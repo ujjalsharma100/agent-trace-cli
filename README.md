@@ -2,6 +2,8 @@
 
 A command-line tool for tracing AI-generated code changes across coding agents like **Cursor** and **Claude Code**.
 
+This implementation is built to the [Agent Trace](https://agent-trace.dev/) specification.
+
 Works in two modes:
 - **Local** — traces saved to `.agent-trace/traces.jsonl` in your project (no server needed)
 - **Remote** — traces sent to the [agent-trace-service](../agent-trace-service/) for centralized storage
@@ -228,3 +230,7 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
   .cursor/hooks.json           # Cursor hooks
   .claude/settings.json        # Claude Code hooks
 ```
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
