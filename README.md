@@ -14,27 +14,28 @@ Works in two modes:
 
 ## Installation
 
+### One-liner (install from GitHub)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/install.sh | bash
+```
+
 ### From the repo (local install)
 
 ```bash
-git clone <repo-url>
-cd agent-trace
-bash agent-trace-cli/install.sh
-```
-
-### One-liner (when hosted)
-
-```bash
-curl -fsSL https://your-domain.com/install.sh | bash
+git clone https://github.com/ujjalsharma100/agent-trace-cli
+cd agent-trace-cli
+bash install.sh
 ```
 
 ### What the installer does
 
-1. Checks for Python 3.9+
-2. Copies Python source to `~/.agent-trace/lib/`
-3. Creates an executable at `~/.agent-trace/bin/agent-trace`
-4. Copies `.env.example` to `~/.agent-trace/.env` (if no `.env` exists)
-5. Adds `~/.agent-trace/bin` to your shell PATH (zsh, bash, or fish)
+1. If run via curl, downloads the repo from GitHub and runs the installer
+2. Checks for Python 3.9+
+3. Copies Python source to `~/.agent-trace/lib/`
+4. Creates an executable at `~/.agent-trace/bin/agent-trace`
+5. Copies `.env.example` to `~/.agent-trace/.env` (if no `.env` exists)
+6. Adds `~/.agent-trace/bin` to your shell PATH (zsh, bash, or fish)
 
 After installing, restart your shell (or `source ~/.zshrc`) and verify:
 
