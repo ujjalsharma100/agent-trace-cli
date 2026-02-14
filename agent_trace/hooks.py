@@ -1,8 +1,9 @@
 """
-Hook configuration for Cursor and Claude Code.
+Hook configuration for Cursor, Claude Code, and Git post-commit.
 
 Writes the correct hooks JSON so that agent events pipe through
-``agent-trace record`` automatically.
+``agent-trace record`` automatically.  Also installs a git post-commit
+hook that links commits to AI traces.
 
 No external dependencies — stdlib only.
 """
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 
 
@@ -18,6 +20,13 @@ CURSOR_HOOKS_FILE = ".cursor/hooks.json"
 CLAUDE_SETTINGS_FILE = ".claude/settings.json"
 
 AGENT_TRACE_CMD = "agent-trace record"
+AGENT_TRACE_COMMIT_LINK_CMD = "agent-trace commit-link"
+
+GIT_HOOK_MARKER = "agent-trace commit-link"
+GIT_HOOK_SCRIPT = """\
+# agent-trace: link commit to AI traces
+agent-trace commit-link 2>/dev/null || true
+"""
 
 
 # -------------------------------------------------------------------
@@ -125,4 +134,56 @@ def configure_claude_hooks(project_dir: str | None = None) -> bool:
         config["hooks"]["Stop"] = stop
 
     settings_path.write_text(json.dumps(config, indent=2) + "\n")
+    return True
+
+
+# -------------------------------------------------------------------
+# Git post-commit hook
+# -------------------------------------------------------------------
+
+def configure_git_hooks(project_dir: str | None = None) -> bool:
+    """Install agent-trace post-commit hook into .git/hooks/.
+
+    Logic:
+      1. If .git/hooks/post-commit already contains the marker, skip.
+      2. If it exists with other content, append the agent-trace call.
+      3. If it doesn't exist, create it with a shebang + the call.
+      4. chmod +x the hook file.
+
+    Returns True on success, False if .git directory is not found.
+    """
+    if project_dir is None:
+        project_dir = os.getcwd()
+
+    git_dir = Path(project_dir) / ".git"
+    if not git_dir.is_dir():
+        return False
+
+    hooks_dir = git_dir / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    hook_path = hooks_dir / "post-commit"
+
+    if hook_path.exists():
+        try:
+            content = hook_path.read_text()
+        except OSError:
+            return False
+
+        # Already installed — nothing to do
+        if GIT_HOOK_MARKER in content:
+            return True
+
+        # Append to existing hook
+        if not content.endswith("\n"):
+            content += "\n"
+        content += "\n" + GIT_HOOK_SCRIPT
+        hook_path.write_text(content)
+    else:
+        # Create new hook file
+        content = "#!/bin/sh\n" + GIT_HOOK_SCRIPT
+        hook_path.write_text(content)
+
+    # Ensure executable
+    current = hook_path.stat().st_mode
+    hook_path.chmod(current | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return True

@@ -91,9 +91,13 @@ def normalize_model_id(model: str | None) -> str | None:
 
 
 def compute_content_hash(content: str) -> str:
-    """SHA-256 hash (truncated) for dedup / verification."""
+    """SHA-256 hash (truncated) for dedup / verification.
+
+    Uses 16 hex chars (64 bits) — collision-safe for any realistic project.
+    Backward-compatible: old 8-char hashes still work with prefix matching.
+    """
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
-    h = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
+    h = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
     return f"sha256:{h}"
 
 

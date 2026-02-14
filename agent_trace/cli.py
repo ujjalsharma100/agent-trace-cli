@@ -8,6 +8,8 @@ Commands:
     agent-trace status            Show tracing status
     agent-trace reset             Reconfigure tracing settings
     agent-trace record            Record a trace from stdin (used by hooks)
+    agent-trace commit-link       Link current commit to traces (called by git hook)
+    agent-trace blame <file>      Show AI attribution for a file
     agent-trace set globaluser    Set a global auth token
     agent-trace remove globaluser Remove the global auth token
 """
@@ -27,7 +29,9 @@ from .config import (
     save_global_config,
     save_project_config,
 )
-from .hooks import configure_claude_hooks, configure_cursor_hooks
+from .blame import blame_file
+from .commit_link import create_commit_link
+from .hooks import configure_claude_hooks, configure_cursor_hooks, configure_git_hooks
 from .record import record_from_stdin
 
 VERSION = "0.1.0"
@@ -118,6 +122,11 @@ def cmd_init(_args):
         configure_claude_hooks()
         print("  -> Claude Code hooks configured (.claude/settings.json)")
 
+    if os.path.isdir(".git"):
+        if _confirm("Configure git post-commit hook? (enables Tier 1 attribution)", default=True):
+            configure_git_hooks()
+            print("  -> Git post-commit hook configured (.git/hooks/post-commit)")
+
     print("\nagent-trace initialized successfully!")
 
 
@@ -157,10 +166,27 @@ def cmd_status(_args):
         else:
             print("  Traces:     0 recorded")
 
+    if config.get("storage") == "local":
+        links_file = os.path.join(".agent-trace", "commit-links.jsonl")
+        if os.path.exists(links_file):
+            with open(links_file) as f:
+                link_count = sum(1 for _ in f)
+            print(f"  Commit links: {link_count} recorded")
+        else:
+            print("  Commit links: 0 recorded")
+
     cursor_ok = os.path.exists(".cursor/hooks.json")
     claude_ok = os.path.exists(".claude/settings.json")
+    git_hook_ok = False
+    try:
+        if os.path.exists(".git/hooks/post-commit"):
+            with open(".git/hooks/post-commit") as f:
+                git_hook_ok = "agent-trace commit-link" in f.read()
+    except OSError:
+        pass
     print(f"\n  Cursor hook:      {'configured' if cursor_ok else 'not configured'}")
     print(f"  Claude Code hook: {'configured' if claude_ok else 'not configured'}")
+    print(f"  Git post-commit:  {'configured' if git_hook_ok else 'not configured'}")
 
 
 # ===================================================================
@@ -221,6 +247,50 @@ def cmd_record(_args):
 
 
 # ===================================================================
+# commit-link  (called by git post-commit hook)
+# ===================================================================
+
+def cmd_commit_link(_args):
+    """Create a commit-trace link for the current HEAD commit."""
+    try:
+        link = create_commit_link()
+        if link:
+            n = len(link.get("trace_ids", []))
+            print(f"agent-trace: linked commit {link['commit_sha'][:8]} to {n} trace(s)")
+    except Exception:
+        # Never crash — this runs inside a git hook
+        pass
+
+
+# ===================================================================
+# blame
+# ===================================================================
+
+def cmd_blame(args):
+    """Show AI attribution for a file."""
+    # Parse --range if provided (e.g. "10-25")
+    start_line = None
+    end_line = None
+    if getattr(args, "range", None):
+        parts = args.range.split("-", 1)
+        try:
+            start_line = int(parts[0])
+            end_line = int(parts[1]) if len(parts) > 1 else start_line
+        except (ValueError, IndexError):
+            print(f"Invalid range: {args.range}  (expected format: START-END)")
+            sys.exit(1)
+
+    blame_file(
+        args.file,
+        line=getattr(args, "line", None),
+        start_line=start_line,
+        end_line=end_line,
+        min_tier=getattr(args, "min_tier", 6),
+        json_output=getattr(args, "json", False),
+    )
+
+
+# ===================================================================
 # set globaluser
 # ===================================================================
 
@@ -264,6 +334,19 @@ def main():
     sub.add_parser("status", help="Show agent-trace status")
     sub.add_parser("reset", help="Reset agent-trace configuration")
     sub.add_parser("record", help="Record a trace from stdin (used by hooks)")
+    sub.add_parser("commit-link", help="Link current commit to traces (called by git hook)")
+
+    # blame <file>
+    sub_blame = sub.add_parser("blame", help="Show AI attribution for a file")
+    sub_blame.add_argument("file", help="File path to blame")
+    sub_blame.add_argument("--line", "-l", type=int, default=None,
+                           help="Specific line number")
+    sub_blame.add_argument("--range", "-r", default=None,
+                           help="Line range (e.g. 10-25)")
+    sub_blame.add_argument("--json", action="store_true", default=False,
+                           help="Output as JSON")
+    sub_blame.add_argument("--min-tier", type=int, default=6,
+                           help="Minimum confidence tier to show (1-6)")
 
     # set globaluser <token>
     set_p = sub.add_parser("set", help="Set global configuration")
@@ -287,6 +370,8 @@ def main():
         "status": cmd_status,
         "reset": cmd_reset,
         "record": cmd_record,
+        "commit-link": cmd_commit_link,
+        "blame": cmd_blame,
     }
 
     if args.command in dispatch:
