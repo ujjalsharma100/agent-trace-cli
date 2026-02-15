@@ -248,6 +248,28 @@ def _compute_content_hash(lines: list[str]) -> str:
 
 
 # ===================================================================
+# Conversation content helper
+# ===================================================================
+
+def _load_conversation_summary(url: str | None, max_chars: int = 200) -> str | None:
+    """Read a file:// conversation URL and return a truncated summary."""
+    if not url or not url.startswith("file://"):
+        return None
+    local_path = url[7:]
+    try:
+        with open(local_path, "r") as f:
+            content = f.read(max_chars + 100)
+        content = content.strip()
+        if not content:
+            return None
+        if len(content) > max_chars:
+            content = content[:max_chars] + "..."
+        return content
+    except (OSError, IOError):
+        return None
+
+
+# ===================================================================
 # Local data loading
 # ===================================================================
 
@@ -294,8 +316,21 @@ def _load_local_commit_links(project_dir: str) -> list[dict[str, Any]]:
 # ===================================================================
 
 def _compute_tier(score: float, signals: list[str]) -> int | None:
-    """Map a numeric score + signal list to a confidence tier (1-6) or None."""
+    """Map a numeric score + signal list to a confidence tier (1-6) or None.
+
+    Requires at least one *structural* signal (commit_link, content_hash,
+    revision_parent, revision_ancestor, range_match, range_overlap).
+    Timestamp alone is never sufficient — it would false-positive on every
+    manual edit made within the same 24-hour window as any AI trace.
+    """
     if score <= 0:
+        return None
+    # Require at least one structural signal beyond just timestamp
+    _STRUCTURAL = {
+        "commit_link", "content_hash", "revision_parent",
+        "revision_ancestor", "range_match", "range_overlap",
+    }
+    if not any(s in _STRUCTURAL for s in signals):
         return None
     if score >= 95 and "commit_link" in signals and "content_hash" in signals:
         return 1
@@ -487,26 +522,28 @@ def _extract_trace_meta(
         "trace_id": trace.get("id"),
     }
 
-    # Tool
+    # Tool (trace-level)
     tool = trace.get("tool")
     if isinstance(tool, dict):
         meta["tool"] = tool
 
-    # Find model + conversation URL from matching file entry
     files_data = trace.get("files") or []
     matched_file = _find_matching_file(files_data, file_path)
+
     if matched_file:
+        # Search conversations in the matched file entry
         for conv in matched_file.get("conversations", []):
             if not isinstance(conv, dict):
                 continue
             contributor = conv.get("contributor") or {}
-            if contributor.get("model_id"):
+            if contributor.get("model_id") and not meta.get("model_id"):
                 meta["model_id"] = contributor["model_id"]
-            if contributor.get("type"):
+            if contributor.get("type") and not meta.get("contributor_type"):
                 meta["contributor_type"] = contributor["type"]
-            if conv.get("url"):
+            if conv.get("url") and not meta.get("conversation_url"):
                 meta["conversation_url"] = conv["url"]
-            if meta.get("model_id"):
+            # Only break when we have BOTH model and conversation
+            if meta.get("model_id") and meta.get("conversation_url"):
                 break
 
         # Best range
@@ -526,6 +563,22 @@ def _extract_trace_meta(
                     best_dist = dist
         if best:
             meta["matched_range"] = {"start_line": best[0], "end_line": best[1]}
+
+    # Fallback: search ALL file entries for model/conversation if still missing
+    if not meta.get("model_id") or not meta.get("conversation_url"):
+        for fe in files_data:
+            if not isinstance(fe, dict) or fe is matched_file:
+                continue
+            for conv in fe.get("conversations", []):
+                if not isinstance(conv, dict):
+                    continue
+                contributor = conv.get("contributor") or {}
+                if contributor.get("model_id") and not meta.get("model_id"):
+                    meta["model_id"] = contributor["model_id"]
+                if conv.get("url") and not meta.get("conversation_url"):
+                    meta["conversation_url"] = conv["url"]
+            if meta.get("model_id") and meta.get("conversation_url"):
+                break
 
     return meta
 
@@ -645,10 +698,30 @@ def _attribute_locally(
                 best_signals = sigs
 
         # Build attribution result
+        tier = None
         if best_trace is not None and best_score > 0:
             tier = _compute_tier(best_score, best_signals)
+
+        if best_trace is not None and tier is not None:
             confidence = _tier_to_confidence(tier)
             meta = _extract_trace_meta(best_trace, file_path, representative_line)
+
+            # Enrich from other linked traces if best trace is missing info
+            if (not meta.get("model_id") or not meta.get("conversation_url")) and linked_trace_ids:
+                for t in candidates:
+                    if t.get("id") == best_trace.get("id"):
+                        continue
+                    other_meta = _extract_trace_meta(t, file_path, representative_line)
+                    if not meta.get("model_id") and other_meta.get("model_id"):
+                        meta["model_id"] = other_meta["model_id"]
+                    if not meta.get("conversation_url") and other_meta.get("conversation_url"):
+                        meta["conversation_url"] = other_meta["conversation_url"]
+                    if meta.get("model_id") and meta.get("conversation_url"):
+                        break
+
+            # Load conversation summary from file URL
+            conv_summary = _load_conversation_summary(meta.get("conversation_url"))
+
             results.append({
                 "start_line": start_line,
                 "end_line": end_line,
@@ -659,6 +732,7 @@ def _attribute_locally(
                 "contributor_type": meta.get("contributor_type", "unknown"),
                 "tool": meta.get("tool"),
                 "conversation_url": meta.get("conversation_url"),
+                "conversation_summary": conv_summary,
                 "matched_range": meta.get("matched_range"),
                 "commit_sha": commit_sha,
                 "signals": best_signals,
@@ -666,6 +740,7 @@ def _attribute_locally(
                 "content_hash_match": "content_hash" in best_signals,
             })
         else:
+            # No attribution (no matching trace, or only weak signals like timestamp)
             results.append({
                 "start_line": start_line,
                 "end_line": end_line,
@@ -676,6 +751,7 @@ def _attribute_locally(
                 "contributor_type": None,
                 "tool": None,
                 "conversation_url": None,
+                "conversation_summary": None,
                 "matched_range": None,
                 "commit_sha": commit_sha,
                 "signals": [],
@@ -844,22 +920,30 @@ def _format_terminal(file_path: str, attributions: list[dict[str, Any]]) -> str:
 
         lines.append(f"  {lr:<12}{tier_label} {model_tool}")
 
+        # Model info on its own line if present
+        if model_id:
+            lines.append(f"              {_DIM}model: {model_id}{_RESET}")
+
         # Conversation summary (if available)
         conv_summary = attr.get("conversation_summary") or ""
         conv_url = attr.get("conversation_url") or ""
         if conv_summary:
-            lines.append(f"              conversation: \"{conv_summary}\"")
+            # Show first line of summary inline, truncated
+            summary_line = conv_summary.replace("\n", " ").strip()
+            if len(summary_line) > 120:
+                summary_line = summary_line[:120] + "..."
+            lines.append(f"              conversation: \"{summary_line}\"")
+        elif conv_url:
+            lines.append(f"              conversation: {conv_url}")
 
-        # Trace / commit / date
+        # Trace / commit (full IDs)
         trace_id = attr.get("trace_id") or ""
         commit_sha = attr.get("commit_sha") or ""
-        # Try to get a date from signals or just show what we have
-        date_str = ""
         detail_parts = []
         if trace_id:
-            detail_parts.append(f"trace: {trace_id[:8]}...")
+            detail_parts.append(f"trace: {trace_id}")
         if commit_sha:
-            detail_parts.append(f"commit: {commit_sha[:8]}...")
+            detail_parts.append(f"commit: {commit_sha[:12]}")
         if detail_parts:
             lines.append(f"              {_DIM}{' | '.join(detail_parts)}{_RESET}")
 
@@ -893,6 +977,8 @@ def _format_json(file_path: str, attributions: list[dict[str, Any]]) -> str:
             entry["commit_sha"] = attr["commit_sha"]
         if attr.get("conversation_url"):
             entry["conversation_url"] = attr["conversation_url"]
+        if attr.get("conversation_summary"):
+            entry["conversation_summary"] = attr["conversation_summary"]
         if attr.get("signals"):
             entry["signals"] = attr["signals"]
         if attr.get("commit_link_match"):
