@@ -8,6 +8,8 @@ Works in two modes:
 - **Local** — traces saved to `.agent-trace/traces.jsonl` in your project (no server needed)
 - **Remote** — traces sent to the [agent-trace-service](../agent-trace-service/) for centralized storage
 
+Use **`agent-trace blame <file>`** to see which lines in a file are attributed to AI traces (works in both local and remote mode).
+
 **Zero external dependencies** — uses only the Python standard library (requires Python 3.9+).
 
 ---
@@ -93,6 +95,38 @@ Record a trace from stdin. This is what the hooks call — you don't run this ma
 ```bash
 echo '{"hook_event_name":"sessionStart",...}' | agent-trace record
 ```
+
+### `agent-trace commit-link`
+
+Link the current git commit to the traces that were active in this session. Called automatically by the post-commit hook when you have configured git hooks; you can also run it manually after a commit. Required for strong AI attribution (commit-link signal) when using `agent-trace blame`.
+
+```bash
+agent-trace commit-link
+```
+
+### `agent-trace blame <file>`
+
+Show **AI attribution** for a file: which lines (or segments) are attributed to AI traces, with a confidence tier (1–6) and model/tool info. Works in both **local** and **remote** mode:
+
+- **Local** — Uses `.agent-trace/traces.jsonl` and `.agent-trace/commit-links.jsonl` in the project.
+- **Remote** — Sends blame data to the agent-trace-service; uses traces and commit links stored there.
+
+The command runs `git blame --porcelain` on the file, groups lines by commit, then runs the same attribution algorithm (signals, scoring, tiers) locally or via the API. See the service [ATTRIBUTION-ALGORITHM.md](../agent-trace-service/ATTRIBUTION-ALGORITHM.md) for how attribution works.
+
+```bash
+agent-trace blame src/utils/parser.ts
+agent-trace blame src/utils/parser.ts --line 42
+agent-trace blame src/utils/parser.ts --range 10-100
+agent-trace blame src/utils/parser.ts --json
+agent-trace blame src/utils/parser.ts --min-tier 4   # Only show tier 1–4 (higher confidence)
+```
+
+| Option | Short | Description |
+|--------|--------|-------------|
+| `--line` | `-l` | Blame a single line |
+| `--range` | `-r` | Blame a line range (e.g. `10-25`) |
+| `--json` | | Output attributions as JSON |
+| `--min-tier` | | Minimum tier to show (1–6; default 6). Lower number = only higher-confidence attributions. |
 
 ### `agent-trace set globaluser <token>`
 
@@ -222,14 +256,18 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
     hooks.py                   # Cursor & Claude Code hook setup
     record.py                  # Trace recording (local JSONL / remote HTTP)
     trace.py                   # Trace record construction
+    blame.py                   # AI blame / attribution (local + remote)
+    commit_link.py             # Commit-to-trace linking (git hook)
   config.json                  # global config (auth_token)
 
 <your-project>/
   .agent-trace/
     config.json                # project config (storage, project_id)
     traces.jsonl               # local traces (when storage=local)
+    commit-links.jsonl         # commit → trace links (when storage=local; used by blame)
   .cursor/hooks.json           # Cursor hooks
   .claude/settings.json        # Claude Code hooks
+  .git/hooks/post-commit       # optional: calls agent-trace commit-link
 ```
 
 ## License

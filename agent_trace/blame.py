@@ -375,6 +375,18 @@ def _find_matching_file(files: list[dict[str, Any]], file_path: str) -> dict[str
     return None
 
 
+def _trace_touches_file(trace: dict[str, Any], file_path: str) -> bool:
+    """Return True if this trace's files array contains an entry for *file_path*.
+
+    Commit links associate a commit with traces that touched *any* changed file.
+    When blaming file F, we must only consider traces that actually touch F.
+    """
+    files_data = trace.get("files") or []
+    if not isinstance(files_data, list):
+        return False
+    return _find_matching_file(files_data, file_path) is not None
+
+
 def _collect_ranges(file_entry: dict[str, Any]) -> list[tuple[int, int]]:
     """Collect all (start_line, end_line) ranges from a file entry."""
     ranges: list[tuple[int, int]] = []
@@ -681,6 +693,9 @@ def _attribute_locally(
             except (ValueError, TypeError):
                 pass
 
+        # Only consider traces that actually touch the blamed file (same as remote)
+        candidates = [t for t in candidates if _trace_touches_file(t, file_path)]
+
         # Score candidates
         best_score: float = 0.0
         best_trace: dict[str, Any] | None = None
@@ -701,6 +716,14 @@ def _attribute_locally(
         tier = None
         if best_trace is not None and best_score > 0:
             tier = _compute_tier(best_score, best_signals)
+
+        # Require some evidence (same as remote): range, or commit_link+content_hash, or commit_link+revision_parent
+        if best_trace is not None and tier is not None:
+            has_range_evidence = "range_match" in best_signals or "range_overlap" in best_signals
+            has_strong_evidence = "commit_link" in best_signals and "content_hash" in best_signals
+            has_commit_and_revision = "commit_link" in best_signals and "revision_parent" in best_signals
+            if not (has_range_evidence or has_strong_evidence or has_commit_and_revision):
+                tier = None
 
         if best_trace is not None and tier is not None:
             confidence = _tier_to_confidence(tier)
@@ -905,8 +928,8 @@ def _format_terminal(file_path: str, attributions: list[dict[str, Any]]) -> str:
 
         tier_label = _TIER_DISPLAY.get(tier, f"[Tier {tier}]")
 
-        # Model + tool
-        model_id = attr.get("model_id") or ""
+        # Model + tool (remote returns model_id in contributor; support both)
+        model_id = attr.get("model_id") or (attr.get("contributor") or {}).get("model_id") or ""
         tool = attr.get("tool")
         tool_name = ""
         if isinstance(tool, dict):
@@ -964,10 +987,12 @@ def _format_json(file_path: str, attributions: list[dict[str, Any]]) -> str:
         }
         if attr.get("trace_id"):
             entry["trace_id"] = attr["trace_id"]
-        if attr.get("model_id"):
-            entry["model_id"] = attr["model_id"]
-        if attr.get("contributor_type"):
-            entry["contributor_type"] = attr["contributor_type"]
+        model_id = attr.get("model_id") or (attr.get("contributor") or {}).get("model_id")
+        if model_id:
+            entry["model_id"] = model_id
+        contributor_type = attr.get("contributor_type") or (attr.get("contributor") or {}).get("type")
+        if contributor_type:
+            entry["contributor_type"] = contributor_type
         tool = attr.get("tool")
         if isinstance(tool, dict):
             entry["tool"] = tool.get("name", "")
