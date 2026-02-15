@@ -95,8 +95,12 @@ def compute_content_hash(content: str) -> str:
 
     Uses 16 hex chars (64 bits) — collision-safe for any realistic project.
     Backward-compatible: old 8-char hashes still work with prefix matching.
+
+    Normalization: CRLF/CR → LF, and trailing newline stripped so that the
+    same logical content hashes identically whether stored (e.g. tool
+    new_string with trailing \\n) or matched (e.g. \"\\n\".join(blame lines)).
     """
-    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
     h = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
     return f"sha256:{h}"
 

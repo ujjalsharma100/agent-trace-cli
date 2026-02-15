@@ -12,7 +12,6 @@ No external dependencies — stdlib only.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
@@ -24,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import get_auth_token, get_project_config, get_service_url
+from .trace import compute_content_hash
 
 
 # ===================================================================
@@ -236,15 +236,12 @@ def _group_into_segments(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 # ===================================================================
-# Content hash computation
+# Content hash (single implementation: trace.compute_content_hash)
 # ===================================================================
 
-def _compute_content_hash(lines: list[str]) -> str:
-    """SHA-256 prefix hash matching trace.py's compute_content_hash."""
-    content = "\n".join(lines)
-    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
-    h = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
-    return f"sha256:{h}"
+def _content_hash_for_segment(content_lines: list[str]) -> str:
+    """Content hash for a blame segment; uses same normalization as trace storage."""
+    return compute_content_hash("\n".join(content_lines))
 
 
 # ===================================================================
@@ -388,19 +385,27 @@ def _trace_touches_file(trace: dict[str, Any], file_path: str) -> bool:
 
 
 def _collect_ranges(file_entry: dict[str, Any]) -> list[tuple[int, int]]:
-    """Collect all (start_line, end_line) ranges from a file entry."""
+    """Collect all (start_line, end_line) ranges from a file entry.
+
+    Same logic as agent-trace-service/attribution._collect_ranges:
+    - Top-level file entry start_line/end_line
+    - Conversation-level start_line/end_line
+    - Inside conversation ranges: conv['ranges'][i] (trace.py format)
+    - Inside changes: change start_line/end_line
+    """
     ranges: list[tuple[int, int]] = []
 
+    # Top-level range on the file entry
     if "start_line" in file_entry and "end_line" in file_entry:
         try:
             ranges.append((int(file_entry["start_line"]), int(file_entry["end_line"])))
         except (ValueError, TypeError):
             pass
 
+    # Ranges inside conversations (including conv["ranges"][] — trace.py format)
     for conv in file_entry.get("conversations", []):
         if not isinstance(conv, dict):
             continue
-        # Ranges can be at conversation level or inside a ranges array
         if "start_line" in conv and "end_line" in conv:
             try:
                 ranges.append((int(conv["start_line"]), int(conv["end_line"])))
@@ -413,6 +418,7 @@ def _collect_ranges(file_entry: dict[str, Any]) -> list[tuple[int, int]]:
                 except (ValueError, TypeError):
                     pass
 
+    # Ranges inside changes
     for change in file_entry.get("changes", []):
         if not isinstance(change, dict):
             continue
@@ -426,31 +432,43 @@ def _collect_ranges(file_entry: dict[str, Any]) -> list[tuple[int, int]]:
 
 
 def _extract_content_hashes(file_entry: dict[str, Any]) -> list[str]:
-    """Extract all content hashes from a file entry."""
+    """Extract all content hashes from a file entry.
+
+    Same sources as agent-trace-service/attribution._extract_content_hash:
+    - Conversation ranges: conv['ranges'][i]['content_hash'] (trace.py stores here)
+    - Conversation-level: conv['content_hash']
+    - Change-level: change['content_hash']
+    - File-level: file_entry['content_hash']
+
+    We collect all and match the segment hash against any; service picks the
+    one that covers the line. Result is equivalent for attribution.
+    """
     hashes: list[str] = []
 
-    ch = file_entry.get("content_hash")
-    if ch:
-        hashes.append(ch)
-
+    # Conversation ranges first (trace.py format — hashes live here)
     for conv in file_entry.get("conversations", []):
         if not isinstance(conv, dict):
             continue
-        ch = conv.get("content_hash")
-        if ch:
-            hashes.append(ch)
         for r in conv.get("ranges", []):
             if isinstance(r, dict):
                 ch = r.get("content_hash")
                 if ch:
                     hashes.append(ch)
+        ch = conv.get("content_hash")
+        if ch:
+            hashes.append(ch)
 
+    # Changes, then file-level
     for change in file_entry.get("changes", []):
         if not isinstance(change, dict):
             continue
         ch = change.get("content_hash")
         if ch:
             hashes.append(ch)
+
+    ch = file_entry.get("content_hash")
+    if ch:
+        hashes.append(ch)
 
     return hashes
 
@@ -624,7 +642,7 @@ def _attribute_locally(
         commit_sha = seg["commit_sha"]
         start_line = seg["start_line"]
         end_line = seg["end_line"]
-        content_hash = _compute_content_hash(seg["content_lines"])
+        content_hash = _content_hash_for_segment(seg["content_lines"])
         representative_line = (start_line + end_line) // 2
 
         # Get parent SHA (cached)
@@ -847,7 +865,7 @@ def _blame_remote(
             "end_line": seg["end_line"],
             "commit_sha": commit_sha,
             "parent_sha": parent_cache[commit_sha],
-            "content_hash": _compute_content_hash(seg["content_lines"]),
+            "content_hash": _content_hash_for_segment(seg["content_lines"]),
             "timestamp": date_cache[commit_sha],
         })
 
