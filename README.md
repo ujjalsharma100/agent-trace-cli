@@ -104,6 +104,18 @@ Link the current git commit to the traces that were active in this session. Call
 agent-trace commit-link
 ```
 
+### `agent-trace viewer [--project /path]`
+
+Open the **file viewer** in your browser. The viewer lets you browse the project’s file tree, view file contents, and (in later phases) see git blame and agent-trace blame inline.
+
+- **If the viewer is not installed:** the CLI prints install instructions (e.g. `curl -fsSL .../agent-trace-viewer/install.sh | bash` or run `./install.sh` from `agent-trace-viewer/`).
+- **If the viewer is installed:** the CLI launches it; open **http://127.0.0.1:8765** in your browser.
+
+```bash
+agent-trace viewer
+agent-trace viewer --project /path/to/repo
+```
+
 ### `agent-trace blame <file>`
 
 Show **AI attribution** for a file: which lines (or segments) are attributed to AI traces, with a confidence tier (1–6) and model/tool info. Works in both **local** and **remote** mode:

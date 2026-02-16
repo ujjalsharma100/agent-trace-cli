@@ -10,6 +10,7 @@ Commands:
     agent-trace record            Record a trace from stdin (used by hooks)
     agent-trace commit-link       Link current commit to traces (called by git hook)
     agent-trace blame <file>      Show AI attribution for a file
+    agent-trace viewer            Open the file viewer (browse files, git + agent-trace blame)
     agent-trace set globaluser    Set a global auth token
     agent-trace remove globaluser Remove the global auth token
 """
@@ -35,6 +36,10 @@ from .hooks import configure_claude_hooks, configure_cursor_hooks, configure_git
 from .record import record_from_stdin
 
 VERSION = "0.1.0"
+
+# Viewer install URL (update when viewer has its own repo)
+VIEWER_INSTALL_URL = "https://raw.githubusercontent.com/ujjalsharma100/agent-trace/main/agent-trace-viewer/install.sh"
+VIEWER_BIN = os.path.expanduser("~/.agent-trace/bin/agent-trace-viewer")
 
 
 # -------------------------------------------------------------------
@@ -263,6 +268,31 @@ def cmd_commit_link(_args):
 
 
 # ===================================================================
+# viewer
+# ===================================================================
+
+def cmd_viewer(args):
+    """Launch the file viewer, or print install instructions if not installed."""
+    project_path = getattr(args, "project", None) or os.getcwd()
+    if not os.path.isdir(project_path):
+        print(f"agent-trace viewer: project path is not a directory: {project_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.isfile(VIEWER_BIN) or not os.access(VIEWER_BIN, os.X_OK):
+        print("Viewer is not installed.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Install with (from GitHub):", file=sys.stderr)
+        print(f"  curl -fsSL {VIEWER_INSTALL_URL} | bash", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Or from a local clone:", file=sys.stderr)
+        print("  cd agent-trace/agent-trace-viewer && ./install.sh", file=sys.stderr)
+        sys.exit(1)
+
+    # Exec the viewer with project path as first argument
+    os.execv(VIEWER_BIN, [VIEWER_BIN, project_path])
+
+
+# ===================================================================
 # blame
 # ===================================================================
 
@@ -280,7 +310,7 @@ def cmd_blame(args):
             print(f"Invalid range: {args.range}  (expected format: START-END)")
             sys.exit(1)
 
-    blame_file(
+    result = blame_file(
         args.file,
         line=getattr(args, "line", None),
         start_line=start_line,
@@ -288,6 +318,8 @@ def cmd_blame(args):
         min_tier=getattr(args, "min_tier", 6),
         json_output=getattr(args, "json", False),
     )
+    if result is not None:
+        print(result)
 
 
 # ===================================================================
@@ -336,6 +368,10 @@ def main():
     sub.add_parser("record", help="Record a trace from stdin (used by hooks)")
     sub.add_parser("commit-link", help="Link current commit to traces (called by git hook)")
 
+    # viewer [--project /path]
+    sub_viewer = sub.add_parser("viewer", help="Open the file viewer (browse files, git + agent-trace blame)")
+    sub_viewer.add_argument("--project", "-p", default=None, help="Project directory (default: current directory)")
+
     # blame <file>
     sub_blame = sub.add_parser("blame", help="Show AI attribution for a file")
     sub_blame.add_argument("file", help="File path to blame")
@@ -371,6 +407,7 @@ def main():
         "reset": cmd_reset,
         "record": cmd_record,
         "commit-link": cmd_commit_link,
+        "viewer": cmd_viewer,
         "blame": cmd_blame,
     }
 

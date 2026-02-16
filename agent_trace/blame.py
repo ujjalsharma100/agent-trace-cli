@@ -1046,8 +1046,9 @@ def blame_file(
     end_line: int | None = None,
     min_tier: int = 6,
     json_output: bool = False,
-) -> None:
-    """Run AI blame on a file and print results.
+    project_dir: str | None = None,
+) -> str | None:
+    """Run AI blame on a file and print results (or return JSON when json_output=True).
 
     Parameters
     ----------
@@ -1060,19 +1061,31 @@ def blame_file(
     min_tier : int
         Minimum confidence tier to display (1-6).
     json_output : bool
-        If True, output JSON instead of terminal format.
+        If True, return JSON string instead of printing; caller can print or use it.
+    project_dir : str | None
+        If set, use this as the project (git) root and config root instead of os.getcwd().
+        Used by the file viewer when running blame for an explicit project path.
+
+    Returns
+    -------
+    str | None
+        When json_output is True, returns the JSON string; otherwise None (output was printed).
     """
     # Resolve the file path relative to git root
-    cwd = os.getcwd()
+    cwd = project_dir if project_dir else os.getcwd()
     abs_path = os.path.abspath(os.path.join(cwd, file_path))
 
     if not os.path.isfile(abs_path):
+        if json_output:
+            return None
         print(f"agent-trace blame: file not found: {file_path}", file=sys.stderr)
         sys.exit(1)
 
     # Determine the git-relative path
     git_root = _git("rev-parse", "--show-toplevel", cwd=cwd)
     if git_root is None:
+        if json_output:
+            return None
         print("agent-trace blame: not a git repository", file=sys.stderr)
         sys.exit(1)
 
@@ -1094,19 +1107,23 @@ def blame_file(
         cwd=git_root,
     )
     if raw is None:
+        if json_output:
+            return None
         print(f"agent-trace blame: git blame failed for {file_path}", file=sys.stderr)
         sys.exit(1)
 
     # Parse and group
     records = _parse_blame_porcelain(raw)
     if not records:
+        if json_output:
+            return None
         print(f"agent-trace blame: no blame data for {file_path}", file=sys.stderr)
         sys.exit(1)
 
     segments = _group_into_segments(records)
 
     # Determine storage mode
-    config = get_project_config()
+    config = get_project_config(project_dir=cwd)
     if config is None:
         config = {"storage": "local"}
     storage = config.get("storage", "local")
@@ -1115,8 +1132,8 @@ def blame_file(
     if storage == "remote":
         attributions = _blame_remote(config, rel_path, segments, cwd=git_root)
     else:
-        traces = _load_local_traces(cwd)
-        commit_links = _load_local_commit_links(cwd)
+        traces = _load_local_traces(git_root)
+        commit_links = _load_local_commit_links(git_root)
         raw_attrs = _attribute_locally(
             segments, traces, commit_links, rel_path, cwd=git_root,
         )
@@ -1131,6 +1148,7 @@ def blame_file(
 
     # Output
     if json_output:
-        print(_format_json(rel_path, attributions))
-    else:
-        print(_format_terminal(rel_path, attributions))
+        result = _format_json(rel_path, attributions)
+        return result
+    print(_format_terminal(rel_path, attributions))
+    return None
