@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import get_auth_token, get_project_config, get_service_url
+from .ledger import load_local_ledgers
 from .trace import compute_content_hash
 
 
@@ -192,14 +193,21 @@ def _group_into_segments(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     Returns segments:
         {
             "commit_sha": "...",
-            "start_line": int,
-            "end_line": int,
+            "start_line": int,        # current (final) line number
+            "end_line": int,           # current (final) line number
+            "orig_start_line": int,    # original line number in the commit
+            "orig_end_line": int,      # original line number in the commit
             "content_lines": ["line1", "line2", ...],
             "author": "...",
             "author_time": int | None,
             "summary": "...",
             "filename": "...",
         }
+
+    ``orig_start_line`` / ``orig_end_line`` are the line numbers as they
+    were in the file version stored by the commit.  These are needed for
+    ledger lookups because the ledger records line numbers at commit time,
+    while subsequent commits can shift the current (final) positions.
     """
     if not records:
         return []
@@ -214,6 +222,7 @@ def _group_into_segments(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             and current["end_line"] + 1 == rec["final_line"]
         ):
             current["end_line"] = rec["final_line"]
+            current["orig_end_line"] = rec["orig_line"]
             current["content_lines"].append(rec["content"])
         else:
             if current is not None:
@@ -222,6 +231,8 @@ def _group_into_segments(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "commit_sha": rec["commit_sha"],
                 "start_line": rec["final_line"],
                 "end_line": rec["final_line"],
+                "orig_start_line": rec["orig_line"],
+                "orig_end_line": rec["orig_line"],
                 "content_lines": [rec["content"]],
                 "author": rec.get("author", ""),
                 "author_time": rec.get("author_time"),
@@ -613,18 +624,148 @@ def _extract_trace_meta(
     return meta
 
 
+def _ranges_overlap(
+    attr_start: int, attr_end: int,
+    seg_start: int, seg_end: int,
+) -> bool:
+    """Return True if two line ranges overlap."""
+    return attr_start <= seg_end and attr_end >= seg_start
+
+
+def _attribution_type_label(attr_type: str) -> str:
+    """Map ledger attribution type to display label."""
+    return {"ai": "AI", "human": "Human", "mixed": "Mixed"}.get(attr_type, attr_type)
+
+
+def _attribute_from_ledger(
+    blame_segments: list[dict[str, Any]],
+    ledgers: dict[str, dict[str, Any]],
+    file_path: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Try to attribute segments from ledger data.
+
+    Returns (attributed, remaining) — segments resolved by the ledger,
+    and segments that need heuristic fallback.
+
+    A single git blame segment may span many ledger entries (e.g. when an
+    entire file is created in one commit but edited by multiple AI sessions).
+    We therefore emit one attribution entry per overlapping ledger entry,
+    clamped to the git blame segment's original line range.
+
+    **Important:** Ledger entries use *original* line numbers (the positions
+    as they were when the commit was made).  Git blame segments carry both
+    original and final (current) line numbers.  We must use the original
+    numbers for ledger lookups and then map back to final numbers for
+    display via the offset ``final_start - orig_start``.
+    """
+    attributed: list[dict[str, Any]] = []
+    remaining: list[dict[str, Any]] = []
+
+    for seg in blame_segments:
+        commit_sha = seg["commit_sha"]
+        ledger = ledgers.get(commit_sha)
+
+        if ledger and file_path in ledger.get("files", {}):
+            file_ledger = ledger["files"][file_path]
+            line_attrs = file_ledger.get("line_attributions", [])
+
+            # Original line range for this segment (as recorded in the commit)
+            orig_start = seg.get("orig_start_line", seg["start_line"])
+            orig_end = seg.get("orig_end_line", seg["end_line"])
+            # Offset to convert original -> final line numbers
+            offset = seg["start_line"] - orig_start
+
+            # Collect ALL overlapping ledger entries using ORIGINAL line numbers.
+            overlapping: list[tuple[int, int, dict[str, Any]]] = []
+            for la in sorted(line_attrs, key=lambda x: x.get("start_line", 0)):
+                la_start = la.get("start_line", 0)
+                la_end = la.get("end_line", 0)
+                if _ranges_overlap(la_start, la_end, orig_start, orig_end):
+                    clamped_start = max(la_start, orig_start)
+                    clamped_end = min(la_end, orig_end)
+                    overlapping.append((clamped_start, clamped_end, la))
+
+            if overlapping:
+                # Emit one attribution per ledger entry, mapped to final line numbers
+                for clamped_orig_start, clamped_orig_end, la in overlapping:
+                    final_start = clamped_orig_start + offset
+                    final_end = clamped_orig_end + offset
+                    attr_type = la.get("type", "unknown")
+                    is_ai = attr_type == "ai"
+                    is_mixed = attr_type == "mixed"
+                    attributed.append({
+                        "start_line": final_start,
+                        "end_line": final_end,
+                        "tier": 1 if is_ai else (3 if is_mixed else None),
+                        "confidence": 1.0 if is_ai else (0.95 if is_mixed else 0.0),
+                        "trace_id": la.get("trace_id"),
+                        "model_id": la.get("model_id"),
+                        "contributor_type": attr_type,
+                        "tool": None,
+                        "conversation_url": la.get("conversation_url"),
+                        "conversation_summary": None,
+                        "matched_range": {
+                            "start_line": la.get("start_line"),
+                            "end_line": la.get("end_line"),
+                        },
+                        "commit_sha": commit_sha,
+                        "signals": ["ledger"],
+                        "commit_link_match": True,
+                        "content_hash_match": is_ai,
+                        "source": "ledger",
+                        "attribution_label": _attribution_type_label(attr_type),
+                    })
+
+                # If there are gaps in ledger coverage within this segment,
+                # pass those uncovered line ranges to the heuristic path.
+                covered_orig_start = overlapping[0][0]
+                covered_orig_end = overlapping[-1][1]
+                if orig_start < covered_orig_start:
+                    gap_seg = dict(seg)
+                    gap_seg["start_line"] = seg["start_line"]
+                    gap_seg["end_line"] = covered_orig_start + offset - 1
+                    gap_seg["orig_start_line"] = orig_start
+                    gap_seg["orig_end_line"] = covered_orig_start - 1
+                    n_lines = covered_orig_start - orig_start
+                    gap_seg["content_lines"] = seg["content_lines"][:n_lines]
+                    remaining.append(gap_seg)
+                if covered_orig_end < orig_end:
+                    gap_seg = dict(seg)
+                    n_before = covered_orig_end - orig_start + 1
+                    gap_seg["start_line"] = covered_orig_end + offset + 1
+                    gap_seg["end_line"] = seg["end_line"]
+                    gap_seg["orig_start_line"] = covered_orig_end + 1
+                    gap_seg["orig_end_line"] = orig_end
+                    gap_seg["content_lines"] = seg["content_lines"][n_before:]
+                    remaining.append(gap_seg)
+                continue
+
+        remaining.append(seg)
+
+    return attributed, remaining
+
+
 def _attribute_locally(
     blame_segments: list[dict[str, Any]],
     traces: list[dict[str, Any]],
     commit_links: list[dict[str, Any]],
     file_path: str,
     cwd: str | None = None,
+    ledgers: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Run multi-tier attribution against local trace data.
 
     Returns a list of attribution dicts (one per segment), ready for
     display or JSON serialization.
     """
+    # --- Ledger-first path: deterministic attribution ---
+    ledger_results: list[dict[str, Any]] = []
+    heuristic_segments = blame_segments
+    if ledgers:
+        ledger_results, heuristic_segments = _attribute_from_ledger(
+            blame_segments, ledgers, file_path,
+        )
+
     # Build commit_sha -> commit_link index
     link_by_commit: dict[str, dict[str, Any]] = {}
     for cl in commit_links:
@@ -638,7 +779,7 @@ def _attribute_locally(
 
     results: list[dict[str, Any]] = []
 
-    for seg in blame_segments:
+    for seg in heuristic_segments:
         commit_sha = seg["commit_sha"]
         start_line = seg["start_line"]
         end_line = seg["end_line"]
@@ -800,7 +941,11 @@ def _attribute_locally(
                 "content_hash_match": False,
             })
 
-    return results
+    # Combine ledger results with heuristic results, sorted by start_line
+    all_results = ledger_results + results
+    all_results.sort(key=lambda a: (a.get("start_line", 0), a.get("end_line", 0)))
+
+    return all_results
 
 
 # ===================================================================
@@ -835,8 +980,25 @@ def _blame_remote(
     file_path: str,
     blame_segments: list[dict[str, Any]],
     cwd: str | None = None,
+    ledgers: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """POST blame data to the remote agent-trace-service and return attributions."""
+    """POST blame data to the remote agent-trace-service and return attributions.
+
+    If local ledgers are available, segments covered by them are attributed
+    deterministically without a round-trip to the service.
+    """
+    # Try ledger-first attribution for segments that have local ledgers
+    ledger_results: list[dict[str, Any]] = []
+    remote_segments = blame_segments
+    if ledgers:
+        ledger_results, remote_segments = _attribute_from_ledger(
+            blame_segments, ledgers, file_path,
+        )
+
+    if not remote_segments:
+        # All segments resolved by ledger
+        return ledger_results
+
     project_id = config.get("project_id")
     auth_token = get_auth_token(config)
     service_url = get_service_url(config)
@@ -844,7 +1006,7 @@ def _blame_remote(
     if not project_id or not auth_token:
         print("agent-trace blame: remote mode requires project_id and auth token.",
               file=sys.stderr)
-        return []
+        return ledger_results
 
     # Cache parent SHAs and dates
     parent_cache: dict[str, str | None] = {}
@@ -852,7 +1014,7 @@ def _blame_remote(
 
     # Build the POST payload
     blame_data: list[dict[str, Any]] = []
-    for seg in blame_segments:
+    for seg in remote_segments:
         commit_sha = seg["commit_sha"]
 
         if commit_sha not in parent_cache:
@@ -894,7 +1056,12 @@ def _blame_remote(
         print(f"agent-trace blame: service unreachable: {e}", file=sys.stderr)
         return []
 
-    return data.get("attributions", [])
+    remote_results = data.get("attributions", [])
+
+    # Merge ledger and remote results, sorted by start_line
+    all_results = ledger_results + remote_results
+    all_results.sort(key=lambda a: (a.get("start_line", 0), a.get("end_line", 0)))
+    return all_results
 
 
 # ===================================================================
@@ -939,12 +1106,28 @@ def _format_terminal(file_path: str, attributions: list[dict[str, Any]]) -> str:
         end = attr.get("end_line", 0)
         tier = attr.get("tier")
         lr = _format_line_range(start, end)
+        source = attr.get("source", "")
 
         if tier is None:
-            lines.append(f"  {lr:<12}{_DIM}[no ai attribution]{_RESET}")
+            # Check if this is a ledger "human" attribution
+            if source == "ledger":
+                label = attr.get("attribution_label", "Human")
+                lines.append(f"  {lr:<12}{_DIM}[{label}]{_RESET}")
+            else:
+                lines.append(f"  {lr:<12}{_DIM}[no ai attribution]{_RESET}")
             continue
 
-        tier_label = _TIER_DISPLAY.get(tier, f"[Tier {tier}]")
+        # Ledger-sourced attribution gets a deterministic label
+        if source == "ledger":
+            label = attr.get("attribution_label", "AI")
+            if label == "AI":
+                tier_label = f"{_GREEN}[{label}]{_RESET}"
+            elif label == "Mixed":
+                tier_label = f"{_YELLOW}[{label}]{_RESET}"
+            else:
+                tier_label = f"{_DIM}[{label}]{_RESET}"
+        else:
+            tier_label = _TIER_DISPLAY.get(tier, f"[Tier {tier}]")
 
         # Model + tool (remote returns model_id in contributor; support both)
         model_id = attr.get("model_id") or (attr.get("contributor") or {}).get("model_id") or ""
@@ -1028,6 +1211,10 @@ def _format_json(file_path: str, attributions: list[dict[str, Any]]) -> str:
             entry["commit_link_match"] = True
         if attr.get("content_hash_match"):
             entry["content_hash_match"] = True
+        if attr.get("source"):
+            entry["source"] = attr["source"]
+        if attr.get("attribution_label"):
+            entry["attribution_label"] = attr["attribution_label"]
         clean.append(entry)
 
     output = {"file": file_path, "attributions": clean}
@@ -1128,14 +1315,18 @@ def blame_file(
         config = {"storage": "local"}
     storage = config.get("storage", "local")
 
+    # Load ledgers for deterministic attribution
+    ledgers = load_local_ledgers(git_root)
+
     # Run attribution
     if storage == "remote":
-        attributions = _blame_remote(config, rel_path, segments, cwd=git_root)
+        attributions = _blame_remote(config, rel_path, segments, cwd=git_root, ledgers=ledgers)
     else:
         traces = _load_local_traces(git_root)
         commit_links = _load_local_commit_links(git_root)
         raw_attrs = _attribute_locally(
             segments, traces, commit_links, rel_path, cwd=git_root,
+            ledgers=ledgers,
         )
         attributions = _merge_attributions(raw_attrs)
 

@@ -90,6 +90,26 @@ def normalize_model_id(model: str | None) -> str | None:
     return model
 
 
+def compute_line_hashes(content: str) -> list[dict]:
+    """Compute per-line SHA-256 hashes for position-independent line tracking.
+
+    Each line is hashed individually so that the ledger can match committed
+    lines back to the trace that produced them, even if surrounding lines
+    shifted.
+
+    Returns a list of ``{"line_offset": 0, "hash": "sha256:..."}`` dicts.
+    """
+    lines = content.split("\n")
+    # Strip trailing empty line caused by trailing newline
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    result: list[dict] = []
+    for i, line in enumerate(lines):
+        h = hashlib.sha256(line.encode("utf-8")).hexdigest()[:16]
+        result.append({"line_offset": i, "hash": f"sha256:{h}"})
+    return result
+
+
 def compute_content_hash(content: str) -> str:
     """SHA-256 hash (truncated) for dedup / verification.
 
@@ -149,6 +169,7 @@ def create_trace(
     range_contents: list[str] | None = None,
     transcript: str | None = None,
     metadata: dict | None = None,
+    edit_sequence: int | None = None,
 ) -> dict:
     """Build a trace record dict."""
     root = get_workspace_root()
@@ -162,6 +183,7 @@ def create_trace(
             r = {"start_line": pos["start_line"], "end_line": pos["end_line"]}
             if range_contents and i < len(range_contents) and range_contents[i]:
                 r["content_hash"] = compute_content_hash(range_contents[i])
+                r["line_hashes"] = compute_line_hashes(range_contents[i])
             ranges.append(r)
     if not ranges:
         ranges = [{"start_line": 1, "end_line": 1}]
@@ -193,7 +215,12 @@ def create_trace(
     if vcs:
         trace["vcs"] = vcs
 
+    meta: dict = {}
     if metadata:
-        trace["metadata"] = {k: v for k, v in metadata.items() if v is not None}
+        meta = {k: v for k, v in metadata.items() if v is not None}
+    if edit_sequence is not None:
+        meta["edit_sequence"] = edit_sequence
+    if meta:
+        trace["metadata"] = meta
 
     return trace

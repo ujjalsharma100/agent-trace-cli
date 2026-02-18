@@ -19,6 +19,41 @@ from .trace import compute_range_positions, create_trace, get_workspace_root
 
 
 # -------------------------------------------------------------------
+# Session edit sequence tracking
+# -------------------------------------------------------------------
+
+def _get_next_sequence(session_id: str, project_dir: str | None = None) -> int:
+    """Return the next edit sequence number for a session, incrementing atomically.
+
+    Stores state in ``.agent-trace/session-state.json`` as ``{"seq:<session_id>": N}``.
+    """
+    if not session_id:
+        return 0
+    if project_dir is None:
+        project_dir = get_workspace_root()
+    state_path = Path(project_dir) / ".agent-trace" / "session-state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+
+    state: dict = {}
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            state = {}
+
+    key = f"seq:{session_id}"
+    seq = state.get(key, 0)
+    state[key] = seq + 1
+
+    try:
+        state_path.write_text(json.dumps(state))
+    except OSError:
+        pass
+
+    return seq
+
+
+# -------------------------------------------------------------------
 # File helpers
 # -------------------------------------------------------------------
 
@@ -54,6 +89,8 @@ def _cursor_afterFileEdit(d):
     edits = d.get("edits", [])
     fp = d.get("file_path", "")
     fc = _try_read_file(fp) if fp else None
+    session_id = d.get("conversation_id") or ""
+    seq = _get_next_sequence(session_id) if session_id else None
     return create_trace(
         "ai", fp,
         model=d.get("model"),
@@ -61,17 +98,21 @@ def _cursor_afterFileEdit(d):
         range_contents=[e["new_string"] for e in edits if e.get("new_string")],
         transcript=d.get("transcript_path"),
         metadata={"conversation_id": d.get("conversation_id"), "generation_id": d.get("generation_id")},
+        edit_sequence=seq,
     ), "afterFileEdit"
 
 
 def _cursor_afterTabFileEdit(d):
     edits = d.get("edits", [])
+    session_id = d.get("conversation_id") or ""
+    seq = _get_next_sequence(session_id) if session_id else None
     return create_trace(
         "ai", d.get("file_path", ""),
         model=d.get("model"),
         range_positions=compute_range_positions(edits),
         range_contents=[e["new_string"] for e in edits if e.get("new_string")],
         metadata={"conversation_id": d.get("conversation_id"), "generation_id": d.get("generation_id")},
+        edit_sequence=seq,
     ), "afterTabFileEdit"
 
 
@@ -147,6 +188,9 @@ def _claude_PostToolUse(d):
         rp = compute_range_positions(edits, fc)
         rc = [ti["new_string"]]
 
+    session_id = d.get("session_id") or ""
+    seq = _get_next_sequence(session_id) if session_id else None
+
     return create_trace(
         "ai", fp,
         model=d.get("model"),
@@ -159,6 +203,7 @@ def _claude_PostToolUse(d):
             "tool_use_id": d.get("tool_use_id"),
             "command": ti.get("command") if is_bash else None,
         },
+        edit_sequence=seq,
     ), "PostToolUse"
 
 

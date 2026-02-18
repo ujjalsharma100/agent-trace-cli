@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import get_auth_token, get_project_config, get_service_url
+from .ledger import build_attribution_ledger, store_ledger_local
 
 
 # -------------------------------------------------------------------
@@ -266,7 +267,26 @@ def create_commit_link(project_dir: str | None = None) -> dict | None:
             project_dir, parent_sha, changed_files
         )
 
+    # Always build the attribution ledger — even for pure-human commits.
+    # A commit with no matching AI traces gets a ledger where every
+    # changed line is "human".  Without a ledger, blame falls back to
+    # heuristic scoring which can produce false positives.
+    ledger = None
+    try:
+        ledger = build_attribution_ledger(project_dir)
+    except Exception:
+        pass  # Never fail the commit link over a ledger error
+
+    # Store ledger locally regardless of whether traces matched.
+    if ledger:
+        try:
+            store_ledger_local(ledger, project_dir)
+        except Exception:
+            pass
+
     if not trace_ids:
+        # No AI traces for this commit — still store ledger (above),
+        # but no commit link to create.
         return None
 
     # Build commit link record
@@ -279,8 +299,10 @@ def create_commit_link(project_dir: str | None = None) -> dict | None:
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Store
+    # Store commit link
     if storage == "remote":
+        if ledger:
+            commit_link["ledger"] = ledger
         _store_remote(commit_link, config)
     else:
         _store_local(commit_link, project_dir)

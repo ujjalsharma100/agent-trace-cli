@@ -14,6 +14,22 @@ Use **`agent-trace blame <file>`** to see which lines in a file are attributed t
 
 ---
 
+## Attribution Ledger
+
+The CLI includes a **deterministic attribution ledger** that records per-line authorship at commit time. Instead of relying on heuristic scoring at blame time, the post-commit hook builds an attribution ledger that definitively maps each changed line to its origin (AI, human, or mixed) by comparing committed content against trace-level line hashes.
+
+How it works:
+
+1. **Per-line content hashing** — Each trace records SHA-256 hashes for every line it touches, enabling position-independent matching even after lines are moved or reordered.
+2. **Session edit sequence** — Edits within a session are numbered so the ledger can resolve "last writer wins" when multiple traces touch the same line.
+3. **Post-commit hook** — After `git commit`, the hook builds the ledger by diffing HEAD against its parent, identifying changed lines, and matching their content hashes against trace records.
+4. **Cross-file matching** — If a line's hash doesn't match any trace for the current file, the ledger searches all traces across all files to catch code that was moved or refactored between files.
+5. **Post-rewrite hook** — After `git rebase` or `git commit --amend`, ledger commit SHAs are automatically remapped to the new SHAs.
+
+When `agent-trace blame` runs, it checks the ledger first. If a ledger exists for a commit, attribution is deterministic (confidence 1.0). The heuristic scoring engine is only used as a fallback for commits that predate the ledger.
+
+---
+
 ## Installation
 
 ### One-liner (install from GitHub)
@@ -66,6 +82,7 @@ Initialize tracing for the current project. You'll be prompted for:
 3. **Auth Token** — (remote only, skipped if global token is set)
 4. **Configure Cursor hook?** — yes/no
 5. **Configure Claude Code hook?** — yes/no
+6. **Configure git hooks?** — yes/no (installs post-commit + post-rewrite hooks for attribution)
 
 ```bash
 cd my-project
@@ -74,7 +91,7 @@ agent-trace init
 
 ### `agent-trace status`
 
-Show current configuration, trace count (local), or remote connection info.
+Show current configuration, trace count, commit link count, ledger count (local), or remote connection info. Also shows which hooks are configured.
 
 ```bash
 agent-trace status
@@ -98,15 +115,24 @@ echo '{"hook_event_name":"sessionStart",...}' | agent-trace record
 
 ### `agent-trace commit-link`
 
-Link the current git commit to the traces that were active in this session. Called automatically by the post-commit hook when you have configured git hooks; you can also run it manually after a commit. Required for strong AI attribution (commit-link signal) when using `agent-trace blame`.
+Link the current git commit to the traces that were active in this session. Called automatically by the post-commit hook when you have configured git hooks. Also builds an **attribution ledger** for the commit — a deterministic per-line map of which lines are AI-authored, human-authored, or mixed.
 
 ```bash
 agent-trace commit-link
 ```
 
+### `agent-trace rewrite-ledger`
+
+Remap ledger commit SHAs after `git rebase` or `git commit --amend`. Called automatically by the post-rewrite hook — you don't normally run this manually. Git provides old-SHA/new-SHA pairs on stdin; this command updates `.agent-trace/ledgers.jsonl` accordingly.
+
+```bash
+# Called by .git/hooks/post-rewrite — not typically run manually
+agent-trace rewrite-ledger
+```
+
 ### `agent-trace viewer [--project /path]`
 
-Open the **file viewer** in your browser. The viewer lets you browse the project’s file tree, view file contents, and (in later phases) see git blame and agent-trace blame inline.
+Open the **file viewer** in your browser. The viewer lets you browse the project's file tree, view file contents, and (in later phases) see git blame and agent-trace blame inline.
 
 - **If the viewer is not installed:** the CLI prints install instructions (e.g. `curl -fsSL .../agent-trace-viewer/install.sh | bash` or run `./install.sh` from `agent-trace-viewer/`).
 - **If the viewer is installed:** the CLI launches it; open **http://127.0.0.1:8765** in your browser.
@@ -118,12 +144,14 @@ agent-trace viewer --project /path/to/repo
 
 ### `agent-trace blame <file>`
 
-Show **AI attribution** for a file: which lines (or segments) are attributed to AI traces, with a confidence tier (1–6) and model/tool info. Works in both **local** and **remote** mode:
+Show **AI attribution** for a file: which lines (or segments) are attributed to AI traces. Works in both **local** and **remote** mode:
 
-- **Local** — Uses `.agent-trace/traces.jsonl` and `.agent-trace/commit-links.jsonl` in the project.
-- **Remote** — Sends blame data to the agent-trace-service; uses traces and commit links stored there.
+- **Ledger-first** — If an attribution ledger exists for a commit, blame uses it directly with deterministic confidence. Lines are labelled `[AI]`, `[Human]`, or `[Mixed]`.
+- **Heuristic fallback** — For commits without a ledger, falls back to the heuristic scoring engine (confidence tiers 1–6).
+- **Local** — Uses `.agent-trace/traces.jsonl`, `.agent-trace/commit-links.jsonl`, and `.agent-trace/ledgers.jsonl` in the project.
+- **Remote** — Queries the agent-trace-service for ledgers and traces.
 
-The command runs `git blame --porcelain` on the file, groups lines by commit, then runs the same attribution algorithm (signals, scoring, tiers) locally or via the API. See the service [ATTRIBUTION-ALGORITHM.md](../agent-trace-service/ATTRIBUTION-ALGORITHM.md) for how attribution works.
+The command runs `git blame --porcelain` on the file, groups lines by commit, then checks for a ledger before falling back to the scoring algorithm. See the service [ATTRIBUTION-ALGORITHM.md](../agent-trace-service/ATTRIBUTION-ALGORITHM.md) for how heuristic attribution works.
 
 ```bash
 agent-trace blame src/utils/parser.ts
@@ -210,8 +238,15 @@ Created by `agent-trace init` in each project directory.
 
 When `agent-trace init` configures hooks, it writes two kinds of events into Cursor and Claude Code config:
 
-1. **Trace-recording hooks** — after file edits, shell runs, and session start/end. Each event produces a trace record (stored locally or sent to the remote service).
+1. **Trace-recording hooks** — after file edits, shell runs, and session start/end. Each event produces a trace record (stored locally or sent to the remote service). Traces include per-line content hashes and edit sequence numbers for deterministic attribution.
 2. **Conversation-sync hooks** — after the assistant has finished a full response. These do **not** create a trace; they only sync the full conversation transcript to the remote service (when storage is remote and the transcript path is local). This keeps conversation content up to date instead of capturing it mid-turn during tool use.
+
+### Git hooks
+
+Two git hooks are installed when you configure git hooks during `agent-trace init`:
+
+- **`post-commit`** — Runs `agent-trace commit-link` after every commit. This links the commit to its traces and builds the attribution ledger.
+- **`post-rewrite`** — Runs `agent-trace rewrite-ledger` after rebase or amend. This remaps ledger SHAs from old commits to their new counterparts.
 
 ### Cursor — `.cursor/hooks.json`
 
@@ -265,11 +300,13 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
     __init__.py
     cli.py                     # CLI commands (argparse)
     config.py                  # Global + project config management
-    hooks.py                   # Cursor & Claude Code hook setup
+    hooks.py                   # Cursor, Claude Code & git hook setup
     record.py                  # Trace recording (local JSONL / remote HTTP)
-    trace.py                   # Trace record construction
-    blame.py                   # AI blame / attribution (local + remote)
-    commit_link.py             # Commit-to-trace linking (git hook)
+    trace.py                   # Trace record construction + per-line hashing
+    blame.py                   # AI blame / attribution (ledger-first + heuristic fallback)
+    commit_link.py             # Commit-to-trace linking + ledger building (git hook)
+    ledger.py                  # Attribution ledger construction (deterministic per-line attribution)
+    rewrite.py                 # Post-rewrite ledger SHA remapping
   config.json                  # global config (auth_token)
 
 <your-project>/
@@ -277,9 +314,12 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
     config.json                # project config (storage, project_id)
     traces.jsonl               # local traces (when storage=local)
     commit-links.jsonl         # commit → trace links (when storage=local; used by blame)
+    ledgers.jsonl              # attribution ledgers (one per commit; deterministic blame)
+    session-state.json         # session edit sequence counters
   .cursor/hooks.json           # Cursor hooks
   .claude/settings.json        # Claude Code hooks
-  .git/hooks/post-commit       # optional: calls agent-trace commit-link
+  .git/hooks/post-commit       # calls agent-trace commit-link (builds ledger)
+  .git/hooks/post-rewrite      # calls agent-trace rewrite-ledger (remaps SHAs)
 ```
 
 ## License

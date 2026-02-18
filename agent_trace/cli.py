@@ -34,6 +34,7 @@ from .blame import blame_file
 from .commit_link import create_commit_link
 from .hooks import configure_claude_hooks, configure_cursor_hooks, configure_git_hooks
 from .record import record_from_stdin
+from .rewrite import rewrite_ledgers
 
 VERSION = "0.1.0"
 
@@ -128,9 +129,10 @@ def cmd_init(_args):
         print("  -> Claude Code hooks configured (.claude/settings.json)")
 
     if os.path.isdir(".git"):
-        if _confirm("Configure git post-commit hook? (enables Tier 1 attribution)", default=True):
+        if _confirm("Configure git hooks? (post-commit + post-rewrite for attribution)", default=True):
             configure_git_hooks()
             print("  -> Git post-commit hook configured (.git/hooks/post-commit)")
+            print("  -> Git post-rewrite hook configured (.git/hooks/post-rewrite)")
 
     print("\nagent-trace initialized successfully!")
 
@@ -180,18 +182,34 @@ def cmd_status(_args):
         else:
             print("  Commit links: 0 recorded")
 
+        ledgers_file = os.path.join(".agent-trace", "ledgers.jsonl")
+        if os.path.exists(ledgers_file):
+            with open(ledgers_file) as f:
+                ledger_count = sum(1 for _ in f)
+            print(f"  Ledgers:      {ledger_count} recorded")
+        else:
+            print("  Ledgers:      0 recorded")
+
     cursor_ok = os.path.exists(".cursor/hooks.json")
     claude_ok = os.path.exists(".claude/settings.json")
     git_hook_ok = False
+    git_rewrite_ok = False
     try:
         if os.path.exists(".git/hooks/post-commit"):
             with open(".git/hooks/post-commit") as f:
                 git_hook_ok = "agent-trace commit-link" in f.read()
     except OSError:
         pass
-    print(f"\n  Cursor hook:      {'configured' if cursor_ok else 'not configured'}")
-    print(f"  Claude Code hook: {'configured' if claude_ok else 'not configured'}")
-    print(f"  Git post-commit:  {'configured' if git_hook_ok else 'not configured'}")
+    try:
+        if os.path.exists(".git/hooks/post-rewrite"):
+            with open(".git/hooks/post-rewrite") as f:
+                git_rewrite_ok = "agent-trace rewrite-ledger" in f.read()
+    except OSError:
+        pass
+    print(f"\n  Cursor hook:       {'configured' if cursor_ok else 'not configured'}")
+    print(f"  Claude Code hook:  {'configured' if claude_ok else 'not configured'}")
+    print(f"  Git post-commit:   {'configured' if git_hook_ok else 'not configured'}")
+    print(f"  Git post-rewrite:  {'configured' if git_rewrite_ok else 'not configured'}")
 
 
 # ===================================================================
@@ -262,6 +280,21 @@ def cmd_commit_link(_args):
         if link:
             n = len(link.get("trace_ids", []))
             print(f"agent-trace: linked commit {link['commit_sha'][:8]} to {n} trace(s)")
+    except Exception:
+        # Never crash — this runs inside a git hook
+        pass
+
+
+# ===================================================================
+# rewrite-ledger  (called by git post-rewrite hook)
+# ===================================================================
+
+def cmd_rewrite_ledger(_args):
+    """Remap ledgers after rebase/amend (called by git post-rewrite hook)."""
+    try:
+        count = rewrite_ledgers()
+        if count:
+            print(f"agent-trace: remapped {count} ledger(s)")
     except Exception:
         # Never crash — this runs inside a git hook
         pass
@@ -367,6 +400,7 @@ def main():
     sub.add_parser("reset", help="Reset agent-trace configuration")
     sub.add_parser("record", help="Record a trace from stdin (used by hooks)")
     sub.add_parser("commit-link", help="Link current commit to traces (called by git hook)")
+    sub.add_parser("rewrite-ledger", help="Remap ledgers after rebase/amend (called by git hook)")
 
     # viewer [--project /path]
     sub_viewer = sub.add_parser("viewer", help="Open the file viewer (browse files, git + agent-trace blame)")
@@ -407,6 +441,7 @@ def main():
         "reset": cmd_reset,
         "record": cmd_record,
         "commit-link": cmd_commit_link,
+        "rewrite-ledger": cmd_rewrite_ledger,
         "viewer": cmd_viewer,
         "blame": cmd_blame,
     }

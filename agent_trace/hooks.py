@@ -28,6 +28,12 @@ GIT_HOOK_SCRIPT = """\
 agent-trace commit-link 2>/dev/null || true
 """
 
+GIT_POST_REWRITE_MARKER = "agent-trace rewrite-ledger"
+GIT_POST_REWRITE_SCRIPT = """\
+# agent-trace: remap ledgers after rebase/amend
+agent-trace rewrite-ledger 2>/dev/null || true
+"""
+
 
 # -------------------------------------------------------------------
 # Cursor
@@ -184,6 +190,51 @@ def configure_git_hooks(project_dir: str | None = None) -> bool:
         hook_path.write_text(content)
 
     # Ensure executable
+    current = hook_path.stat().st_mode
+    hook_path.chmod(current | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    # Also install the post-rewrite hook for ledger remapping
+    configure_git_post_rewrite_hook(project_dir)
+
+    return True
+
+
+def configure_git_post_rewrite_hook(project_dir: str | None = None) -> bool:
+    """Install agent-trace post-rewrite hook into .git/hooks/.
+
+    The post-rewrite hook is called by git after ``rebase`` or ``commit --amend``.
+    It remaps ledger commit SHAs from old to new.
+
+    Returns True on success, False if .git directory is not found.
+    """
+    if project_dir is None:
+        project_dir = os.getcwd()
+
+    git_dir = Path(project_dir) / ".git"
+    if not git_dir.is_dir():
+        return False
+
+    hooks_dir = git_dir / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    hook_path = hooks_dir / "post-rewrite"
+
+    if hook_path.exists():
+        try:
+            content = hook_path.read_text()
+        except OSError:
+            return False
+
+        if GIT_POST_REWRITE_MARKER in content:
+            return True
+
+        if not content.endswith("\n"):
+            content += "\n"
+        content += "\n" + GIT_POST_REWRITE_SCRIPT
+        hook_path.write_text(content)
+    else:
+        content = "#!/bin/sh\n" + GIT_POST_REWRITE_SCRIPT
+        hook_path.write_text(content)
+
     current = hook_path.stat().st_mode
     hook_path.chmod(current | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return True
