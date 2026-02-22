@@ -563,6 +563,10 @@ def _extract_trace_meta(
         "trace_id": trace.get("id"),
     }
 
+    # Timestamp (trace-level)
+    if trace.get("timestamp"):
+        meta["timestamp"] = trace["timestamp"]
+
     # Tool (trace-level)
     tool = trace.get("tool")
     if isinstance(tool, dict):
@@ -641,6 +645,7 @@ def _attribute_from_ledger(
     blame_segments: list[dict[str, Any]],
     ledgers: dict[str, dict[str, Any]],
     file_path: str,
+    traces: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Try to attribute segments from ledger data.
 
@@ -660,6 +665,14 @@ def _attribute_from_ledger(
     """
     attributed: list[dict[str, Any]] = []
     remaining: list[dict[str, Any]] = []
+
+    # Build trace_id -> trace lookup for timestamp/tool enrichment
+    trace_by_id: dict[str, dict[str, Any]] = {}
+    if traces:
+        for t in traces:
+            tid = t.get("id")
+            if tid:
+                trace_by_id[tid] = t
 
     for seg in blame_segments:
         commit_sha = seg["commit_sha"]
@@ -693,15 +706,18 @@ def _attribute_from_ledger(
                     attr_type = la.get("type", "unknown")
                     is_ai = attr_type == "ai"
                     is_mixed = attr_type == "mixed"
+                    trace_id = la.get("trace_id")
+                    trace_rec = trace_by_id.get(trace_id) if trace_id else None
                     attributed.append({
                         "start_line": final_start,
                         "end_line": final_end,
                         "tier": 1 if is_ai else (3 if is_mixed else None),
                         "confidence": 1.0 if is_ai else (0.95 if is_mixed else 0.0),
-                        "trace_id": la.get("trace_id"),
+                        "trace_id": trace_id,
+                        "timestamp": trace_rec.get("timestamp") if trace_rec else None,
                         "model_id": la.get("model_id"),
                         "contributor_type": attr_type,
-                        "tool": None,
+                        "tool": trace_rec.get("tool") if trace_rec else None,
                         "conversation_url": la.get("conversation_url"),
                         "conversation_summary": None,
                         "matched_range": {
@@ -763,7 +779,7 @@ def _attribute_locally(
     heuristic_segments = blame_segments
     if ledgers:
         ledger_results, heuristic_segments = _attribute_from_ledger(
-            blame_segments, ledgers, file_path,
+            blame_segments, ledgers, file_path, traces=traces,
         )
 
     # Build commit_sha -> commit_link index
@@ -910,6 +926,7 @@ def _attribute_locally(
                 "tier": tier,
                 "confidence": confidence,
                 "trace_id": meta.get("trace_id"),
+                "timestamp": meta.get("timestamp"),
                 "model_id": meta.get("model_id"),
                 "contributor_type": meta.get("contributor_type", "unknown"),
                 "tool": meta.get("tool"),
@@ -1196,9 +1213,11 @@ def _format_json(file_path: str, attributions: list[dict[str, Any]]) -> str:
             entry["contributor_type"] = contributor_type
         tool = attr.get("tool")
         if isinstance(tool, dict):
-            entry["tool"] = tool.get("name", "")
+            entry["tool"] = {"name": tool.get("name", ""), "version": tool.get("version", "")}
         elif isinstance(tool, str):
-            entry["tool"] = tool
+            entry["tool"] = {"name": tool, "version": ""}
+        if attr.get("timestamp"):
+            entry["timestamp"] = attr["timestamp"]
         if attr.get("commit_sha"):
             entry["commit_sha"] = attr["commit_sha"]
         if attr.get("conversation_url"):
