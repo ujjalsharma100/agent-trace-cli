@@ -128,7 +128,7 @@ install_files() {
     mkdir -p "${LIB_DIR}/agent_trace"
 
     # Copy Python modules
-    for f in __init__.py blame.py cli.py commit_link.py config.py hooks.py ledger.py record.py rewrite.py trace.py; do
+    for f in __init__.py blame.py cli.py commit_link.py config.py context.py hooks.py ledger.py record.py rules.py rewrite.py trace.py; do
         cp "${SOURCE_DIR}/agent_trace/${f}" "${LIB_DIR}/agent_trace/${f}"
     done
 

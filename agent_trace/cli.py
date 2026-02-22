@@ -10,6 +10,11 @@ Commands:
     agent-trace record            Record a trace from stdin (used by hooks)
     agent-trace commit-link       Link current commit to traces (called by git hook)
     agent-trace blame <file>      Show AI attribution for a file
+    agent-trace context <file>    Get conversation context for AI-attributed code
+    agent-trace rule add <name>   Add a prebuilt rule for a coding agent
+    agent-trace rule remove <name> Remove a rule
+    agent-trace rule show         Show which rules are configured
+    agent-trace rule list         List available prebuilt rules
     agent-trace viewer            Open the file viewer (browse files, git + agent-trace blame)
     agent-trace set globaluser    Set a global auth token
     agent-trace remove globaluser Remove the global auth token
@@ -32,7 +37,9 @@ from .config import (
 )
 from .blame import blame_file
 from .commit_link import create_commit_link
+from .context import context_command
 from .hooks import configure_claude_hooks, configure_cursor_hooks, configure_git_hooks
+from .rules import add_rule, remove_rule, show_rules, list_available_rules, TOOL_CHOICES
 from .record import record_from_stdin
 from .rewrite import rewrite_ledgers
 
@@ -356,6 +363,75 @@ def cmd_blame(args):
 
 
 # ===================================================================
+# context
+# ===================================================================
+
+def cmd_context(args):
+    """Get conversation context for AI-attributed code."""
+    context_command(
+        args.file,
+        lines_range=getattr(args, "lines", None),
+        full=getattr(args, "full", False),
+        json_output=getattr(args, "json", False),
+        query=getattr(args, "query", None),
+    )
+
+
+# ===================================================================
+# rule
+# ===================================================================
+
+def cmd_rule(args):
+    """Manage agent rules."""
+    rule_action = getattr(args, "rule_action", None)
+
+    if rule_action == "add":
+        tool = getattr(args, "tool", None)
+        if not tool:
+            print("--tool is required. Use --tool cursor or --tool claude", file=sys.stderr)
+            sys.exit(1)
+        path = add_rule(args.rule_name, tool)
+        print(f"Rule '{args.rule_name}' added for {tool}: {path}")
+
+    elif rule_action == "remove":
+        tool = getattr(args, "tool", None)
+        if not tool:
+            print("--tool is required. Use --tool cursor or --tool claude", file=sys.stderr)
+            sys.exit(1)
+        path = remove_rule(args.rule_name, tool)
+        if path:
+            print(f"Rule '{args.rule_name}' removed for {tool}: {path}")
+        else:
+            print(f"Rule '{args.rule_name}' is not configured for {tool}.")
+
+    elif rule_action == "show":
+        active = show_rules()
+        if not active:
+            print("No agent-trace rules are configured.")
+            print("Use 'agent-trace rule list' to see available rules.")
+            return
+        print("Configured agent-trace rules:\n")
+        for entry in active:
+            print(f"  {entry['name']:<25} tool: {entry['tool']:<10} {entry['path']}")
+        print()
+
+    elif rule_action == "list":
+        available = list_available_rules()
+        if not available:
+            print("No prebuilt rules available.")
+            return
+        print("Available agent-trace rules:\n")
+        for entry in available:
+            print(f"  {entry['name']:<25} {entry['description']}")
+        print()
+        print("Add a rule with: agent-trace rule add <name> --tool <cursor|claude>")
+
+    else:
+        print("Usage: agent-trace rule {add,remove,show,list}")
+        print("Run 'agent-trace rule --help' for details.")
+
+
+# ===================================================================
 # set globaluser
 # ===================================================================
 
@@ -418,6 +494,40 @@ def main():
     sub_blame.add_argument("--min-tier", type=int, default=6,
                            help="Minimum confidence tier to show (1-6)")
 
+    # context <file>
+    sub_context = sub.add_parser("context", help="Get conversation context for AI-attributed code")
+    sub_context.add_argument("file", help="File path to get context for")
+    sub_context.add_argument("--lines", "-l", default=None,
+                             help="Line range (e.g. 10-25)")
+    sub_context.add_argument("--full", action="store_true", default=False,
+                             help="Include full conversation transcript")
+    sub_context.add_argument("--json", action="store_true", default=False,
+                             help="Output as JSON (for machine consumption)")
+    sub_context.add_argument("--query", "-q", default=None,
+                             help="Query to pass through for subagent instruction")
+
+    # rule {add,remove,show,list}
+    sub_rule = sub.add_parser("rule", help="Manage agent rules for coding agents")
+    rule_sub = sub_rule.add_subparsers(dest="rule_action", metavar="ACTION")
+
+    # rule add <name> --tool <cursor|claude>
+    rule_add = rule_sub.add_parser("add", help="Add a prebuilt rule")
+    rule_add.add_argument("rule_name", help="Rule name (e.g. context-for-agents)")
+    rule_add.add_argument("--tool", "-t", required=True, choices=TOOL_CHOICES,
+                          help="Tool to add the rule for (cursor or claude)")
+
+    # rule remove <name> --tool <cursor|claude>
+    rule_rm = rule_sub.add_parser("remove", help="Remove a rule")
+    rule_rm.add_argument("rule_name", help="Rule name (e.g. context-for-agents)")
+    rule_rm.add_argument("--tool", "-t", required=True, choices=TOOL_CHOICES,
+                         help="Tool to remove the rule from (cursor or claude)")
+
+    # rule show
+    rule_sub.add_parser("show", help="Show which rules are configured")
+
+    # rule list
+    rule_sub.add_parser("list", help="List available prebuilt rules")
+
     # set globaluser <token>
     set_p = sub.add_parser("set", help="Set global configuration")
     set_sub = set_p.add_subparsers(dest="set_command", metavar="KEY")
@@ -444,10 +554,13 @@ def main():
         "rewrite-ledger": cmd_rewrite_ledger,
         "viewer": cmd_viewer,
         "blame": cmd_blame,
+        "context": cmd_context,
     }
 
     if args.command in dispatch:
         dispatch[args.command](args)
+    elif args.command == "rule":
+        cmd_rule(args)
     elif args.command == "set":
         if getattr(args, "set_command", None) == "globaluser":
             cmd_set_globaluser(args)
