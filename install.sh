@@ -160,7 +160,63 @@ ENTRY_POINT
 }
 
 # -------------------------------------------------------------------
-# 4.  Add to PATH
+# 4.  Install viewer
+# -------------------------------------------------------------------
+install_viewer() {
+    local viewer_src="${SOURCE_DIR}/viewer"
+    if [ ! -f "${viewer_src}/run_viewer.py" ]; then
+        warn "Viewer source not found at ${viewer_src}; skipping viewer install."
+        return
+    fi
+
+    local viewer_dir="${INSTALL_DIR}/viewer"
+    info "Installing viewer to ${viewer_dir} ..."
+
+    mkdir -p "${viewer_dir}"
+
+    # Backend + launcher
+    rm -rf "${viewer_dir}/backend"
+    cp -r "${viewer_src}/backend" "${viewer_dir}/"
+    cp "${viewer_src}/run_viewer.py" "${viewer_dir}/"
+
+    # Frontend: optionally build, then copy
+    if [ -f "${viewer_src}/frontend/package.json" ]; then
+        if command -v npm &>/dev/null; then
+            info "Building frontend ..."
+            (cd "${viewer_src}/frontend" && npm install && npm run build) || warn "Frontend build failed; viewer will use pre-built dist if available."
+        else
+            warn "npm not found; using pre-built frontend dist if available."
+        fi
+    fi
+
+    if [ -d "${viewer_src}/frontend" ]; then
+        mkdir -p "${viewer_dir}/frontend"
+        cp -r "${viewer_src}/frontend/src" "${viewer_dir}/frontend/" 2>/dev/null || true
+        cp "${viewer_src}/frontend/index.html" "${viewer_dir}/frontend/" 2>/dev/null || true
+        cp "${viewer_src}/frontend/package.json" "${viewer_dir}/frontend/" 2>/dev/null || true
+        if [ -d "${viewer_src}/frontend/dist" ]; then
+            cp -r "${viewer_src}/frontend/dist" "${viewer_dir}/frontend/"
+        fi
+    fi
+
+    # Viewer launcher script
+    cat > "${BIN_DIR}/agent-trace-viewer" << 'ENTRY_POINT'
+#!/usr/bin/env python3
+import os
+import sys
+VIEWER_DIR = os.path.expanduser(os.path.join("~", ".agent-trace", "viewer"))
+os.chdir(VIEWER_DIR)
+sys.path.insert(0, VIEWER_DIR)
+from backend.main import main
+main()
+ENTRY_POINT
+
+    chmod +x "${BIN_DIR}/agent-trace-viewer"
+    info "Installed ${BIN_DIR}/agent-trace-viewer"
+}
+
+# -------------------------------------------------------------------
+# 5.  Add to PATH
 # -------------------------------------------------------------------
 configure_path() {
     # Already on PATH?
@@ -221,6 +277,7 @@ main() {
     check_python
     find_source
     install_files
+    install_viewer
     configure_path
 
     echo ""

@@ -45,8 +45,6 @@ from .rewrite import rewrite_ledgers
 
 VERSION = "0.1.0"
 
-# Viewer install URL (update when viewer has its own repo)
-VIEWER_INSTALL_URL = "https://raw.githubusercontent.com/ujjalsharma100/agent-trace/main/agent-trace-viewer/install.sh"
 VIEWER_BIN = os.path.expanduser("~/.agent-trace/bin/agent-trace-viewer")
 
 
@@ -321,11 +319,8 @@ def cmd_viewer(args):
     if not os.path.isfile(VIEWER_BIN) or not os.access(VIEWER_BIN, os.X_OK):
         print("Viewer is not installed.", file=sys.stderr)
         print("", file=sys.stderr)
-        print("Install with (from GitHub):", file=sys.stderr)
-        print(f"  curl -fsSL {VIEWER_INSTALL_URL} | bash", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("Or from a local clone:", file=sys.stderr)
-        print("  cd agent-trace/agent-trace-viewer && ./install.sh", file=sys.stderr)
+        print("Re-run install.sh from the agent-trace-cli repo to install the viewer:", file=sys.stderr)
+        print("  cd agent-trace-cli && ./install.sh", file=sys.stderr)
         sys.exit(1)
 
     # Exec the viewer with project path as first argument

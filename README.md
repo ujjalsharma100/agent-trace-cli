@@ -1,6 +1,6 @@
 # agent-trace CLI
 
-A command-line tool for tracing AI-generated code changes across coding agents like **Cursor** and **Claude Code**.
+A command-line tool for tracing AI-generated code changes across coding agents like **Cursor** and **Claude Code**. Includes the **file viewer** for browsing files with git + agent-trace blame in your browser.
 
 This implementation is built to the [Agent Trace](https://agent-trace.dev/) specification.
 
@@ -53,7 +53,9 @@ bash install.sh
 3. Copies Python source to `~/.agent-trace/lib/`
 4. Creates an executable at `~/.agent-trace/bin/agent-trace`
 5. Copies `.env.example` to `~/.agent-trace/.env` (if no `.env` exists)
-6. Adds `~/.agent-trace/bin` to your shell PATH (zsh, bash, or fish)
+6. Installs the **file viewer** to `~/.agent-trace/viewer/` and creates `~/.agent-trace/bin/agent-trace-viewer`
+   - If `npm` is available, builds the frontend from source; otherwise uses the pre-built `dist/`
+7. Adds `~/.agent-trace/bin` to your shell PATH (zsh, bash, or fish)
 
 After installing, restart your shell (or `source ~/.zshrc`) and verify:
 
@@ -64,7 +66,7 @@ agent-trace --version
 ### Uninstall
 
 ```bash
-rm -rf ~/.agent-trace/bin ~/.agent-trace/lib
+rm -rf ~/.agent-trace/bin ~/.agent-trace/lib ~/.agent-trace/viewer
 ```
 
 Then remove the `# agent-trace` + `export PATH=...` lines from your `~/.zshrc` / `~/.bashrc`.
@@ -132,15 +134,80 @@ agent-trace rewrite-ledger
 
 ### `agent-trace viewer [--project /path]`
 
-Open the **file viewer** in your browser. The viewer lets you browse the project's file tree, view file contents, and (in later phases) see git blame and agent-trace blame inline.
+Open the **file viewer** in your browser. The viewer lets you browse the project's file tree, view file contents, and see git blame and agent-trace blame inline.
 
-- **If the viewer is not installed:** the CLI prints install instructions (e.g. `curl -fsSL .../agent-trace-viewer/install.sh | bash` or run `./install.sh` from `agent-trace-viewer/`).
-- **If the viewer is installed:** the CLI launches it; open **http://127.0.0.1:8765** in your browser.
+The viewer is installed automatically by `install.sh`. If it's missing, re-run `install.sh` to reinstall. Once launched, open **http://127.0.0.1:8765** in your browser.
 
 ```bash
 agent-trace viewer
 agent-trace viewer --project /path/to/repo
 ```
+
+### `agent-trace context <file>`
+
+Get **conversation context** for AI-attributed lines in a file. Builds on `agent-trace blame` — runs attribution first, then resolves the conversation transcript behind each AI-attributed segment. Two modes:
+
+- **Default** — returns attribution metadata plus a short preview (~200 chars) and conversation size stats (characters, lines, turns). Light enough to use inline.
+- **Full (`--full`)** — adds the complete conversation transcript for each AI-attributed segment.
+
+```bash
+agent-trace context src/utils/parser.ts
+agent-trace context src/utils/parser.ts --lines 10-50
+agent-trace context src/utils/parser.ts --lines 10-50 --full
+agent-trace context src/utils/parser.ts --json
+agent-trace context src/utils/parser.ts --lines 10-50 --query "why was this approach chosen?"
+```
+
+| Option | Short | Description |
+|--------|--------|-------------|
+| `--lines` | `-l` | Line range to focus on (e.g. `10-50`) |
+| `--full` | | Include full conversation transcript in output |
+| `--json` | | Output as JSON (for machine / subagent consumption) |
+| `--query` | `-q` | Pass a query through to the output (for subagent instruction forwarding) |
+
+The JSON output includes per-segment fields: `start_line`, `end_line`, `attribution` (`ai`/`mixed`/`human`), `model_id`, `tool`, `trace_id`, `confidence`, `conversation_url`, `conversation_size`, and `preview`. When `--full` is set, `conversation_content` is also included.
+
+Conversation content is resolved from local `file://` paths (local mode) or fetched from the remote service (remote mode).
+
+---
+
+### `agent-trace rule {add,remove,show,list}`
+
+Manage **prebuilt rules** that teach coding agents (Cursor, Claude Code) how to use agent-trace features. Rules are written as `.mdc` (Cursor) or `.md` (Claude Code) files in the project's rules directory.
+
+```bash
+# List available prebuilt rules
+agent-trace rule list
+
+# Add a rule for a tool
+agent-trace rule add context-for-agents --tool claude
+agent-trace rule add context-for-agents --tool cursor
+
+# Show which rules are currently configured
+agent-trace rule show
+
+# Remove a rule
+agent-trace rule remove context-for-agents --tool claude
+```
+
+| Subcommand | Options | Description |
+|------------|---------|-------------|
+| `list` | — | List all available prebuilt rules with descriptions |
+| `add <name>` | `--tool cursor\|claude` | Write the rule file for the given tool |
+| `remove <name>` | `--tool cursor\|claude` | Remove the rule file |
+| `show` | — | Show all active agent-trace rules in the project |
+
+**Available rules:**
+
+| Name | Description |
+|------|-------------|
+| `context-for-agents` | Teaches the agent to retrieve conversation context behind AI-attributed code using `agent-trace context` |
+
+Rules are written to:
+- Cursor: `.cursor/rules/agent-trace-<name>.mdc`
+- Claude Code: `.claude/rules/agent-trace-<name>.md`
+
+---
 
 ### `agent-trace blame <file>`
 
@@ -295,7 +362,8 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
 ```
 ~/.agent-trace/
   .env                         # service URL config (from .env.example)
-  bin/agent-trace              # executable (on PATH)
+  bin/agent-trace              # CLI executable (on PATH)
+  bin/agent-trace-viewer       # viewer launcher (on PATH)
   lib/agent_trace/             # Python source
     __init__.py
     cli.py                     # CLI commands (argparse)
@@ -304,9 +372,15 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
     record.py                  # Trace recording (local JSONL / remote HTTP)
     trace.py                   # Trace record construction + per-line hashing
     blame.py                   # AI blame / attribution (ledger-first + heuristic fallback)
+    context.py                 # Conversation context retrieval for AI-attributed code
+    rules.py                   # Prebuilt agent rules management (Cursor, Claude Code)
     commit_link.py             # Commit-to-trace linking + ledger building (git hook)
     ledger.py                  # Attribution ledger construction (deterministic per-line attribution)
     rewrite.py                 # Post-rewrite ledger SHA remapping
+  viewer/                      # file viewer (installed by install.sh)
+    run_viewer.py              # viewer entry point
+    backend/                   # Python backend (serves API + static files)
+    frontend/                  # React frontend source + pre-built dist/
   config.json                  # global config (auth_token)
 
 <your-project>/

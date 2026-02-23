@@ -6,3 +6,5 @@ dist/
 build/
 .venv/
 .env
+node_modules/
+viewer/frontend/node_modules/
