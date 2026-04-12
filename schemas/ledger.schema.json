@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-trace.dev/schemas/ledger/v2.0",
+  "title": "AttributionLedger",
+  "description": "One line in ledgers.jsonl. v2.0 schema documents the same shape produced since v1.0; the embedded version field may remain 1.0 until a format bump.",
+  "type": "object",
+  "required": [
+    "version",
+    "commit_sha",
+    "parent_sha",
+    "committed_at",
+    "created_at",
+    "trace_ids",
+    "files"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "enum": ["1.0", "2.0"]
+    },
+    "commit_sha": { "type": "string", "minLength": 1 },
+    "parent_sha": { "type": ["string", "null"] },
+    "committed_at": { "type": ["string", "null"] },
+    "created_at": { "type": "string" },
+    "trace_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/fileAttribution" }
+    }
+  },
+  "$defs": {
+    "lineSegment": {
+      "type": "object",
+      "required": ["start_line", "end_line", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "type": {
+          "type": "string",
+          "enum": ["ai", "human", "mixed"]
+        },
+        "trace_id": { "type": ["string", "null"] },
+        "model_id": { "type": ["string", "null"] },
+        "conversation_url": { "type": ["string", "null"] }
+      }
+    },
+    "fileAttribution": {
+      "type": "object",
+      "required": ["line_attributions"],
+      "additionalProperties": false,
+      "properties": {
+        "line_attributions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/lineSegment" }
+        }
+      }
+    }
+  }
+}

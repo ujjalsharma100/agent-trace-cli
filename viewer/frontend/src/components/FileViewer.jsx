@@ -41,6 +41,17 @@ function countDistinctLinesCovered(attributions) {
   return lineSet.size;
 }
 
+/** True when this attribution is a "no attribution" segment (local mode: no trace, no tier, no label). */
+function isNoAttribution(attr) {
+  if (!attr) return true;
+  const hasTrace = attr.trace_id != null && attr.trace_id !== '';
+  if (hasTrace) return false;
+  const label = attr.attribution_label;
+  const hasLabel = label != null && label !== '';
+  const hasTier = attr.tier != null;
+  return !hasLabel && !hasTier;
+}
+
 /** Line ranges (start, end) that have no attribution */
 function getUncoveredLineRanges(totalLines, attributions) {
   const covered = new Set();
@@ -53,6 +64,31 @@ function getUncoveredLineRanges(totalLines, attributions) {
   let start = null;
   for (let L = 1; L <= totalLines; L++) {
     if (!covered.has(L)) {
+      if (start === null) start = L;
+    } else {
+      if (start !== null) {
+        ranges.push({ start, end: L - 1 });
+        start = null;
+      }
+    }
+  }
+  if (start !== null) ranges.push({ start, end: totalLines });
+  return ranges;
+}
+
+/** Line ranges that are no-attribution: gaps or segments with no trace/tier/label (e.g. full-file no-attribution in local mode). */
+function getNoAttributionLineRanges(totalLines, attributions) {
+  const coveredByAttributed = new Set();
+  for (const a of attributions) {
+    if (isNoAttribution(a)) continue;
+    const start = a.start_line ?? a.startLine;
+    const end = a.end_line ?? a.endLine;
+    for (let L = start; L <= end; L++) coveredByAttributed.add(L);
+  }
+  const ranges = [];
+  let start = null;
+  for (let L = 1; L <= totalLines; L++) {
+    if (!coveredByAttributed.has(L)) {
       if (start === null) start = L;
     } else {
       if (start !== null) {
@@ -121,6 +157,7 @@ function deeperBorderColor(stripColor) {
 
 function getLineColors(attr, traceColorMap) {
   if (!attr) return { bg: 'transparent', strip: 'transparent', label: null };
+  if (isNoAttribution(attr)) return { ...NO_ATTRIBUTION_COLORS, label: 'No attribution' };
   const label = attr.attribution_label;
   if (label === 'Human') return { ...HUMAN_COLORS, label: 'Human' };
   if (label === 'Mixed') return { ...MIXED_COLORS, label: 'Mixed' };
@@ -132,17 +169,23 @@ function getLineColors(attr, traceColorMap) {
 
 /** Trace key for grouping (must match attributionsByTraceId). */
 function getTraceKey(attr) {
-  if (!attr) return '__no_attribution__';
+  if (isNoAttribution(attr)) return '__no_attribution__';
   const label = attr.attribution_label ?? 'AI';
   return attr.trace_id ? `${attr.trace_id}:${label}` : `__no_trace__:${label}`;
 }
 
 /** Legend key for toolbar / model pie (must match legendItems). */
 function getLegendKey(attr) {
-  if (!attr) return 'No attribution';
+  if (isNoAttribution(attr)) return 'No attribution';
   const label = attr.attribution_label ?? 'AI';
   if (label === 'AI') return `AI:${attr.model_id || '(unknown model)'}`;
   return label;
+}
+
+/** Human-facing label for one attribution (for gutter, detail panel, popover). Use this everywhere we display "AI" / "Human" / "No attribution". */
+function getDisplayLabel(attr) {
+  if (isNoAttribution(attr)) return 'No attribution';
+  return attr.attribution_label ?? 'AI';
 }
 
 const SIDE_PANE_MIN = 320;
@@ -350,21 +393,21 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
   const attributionsByTraceId = useMemo(() => {
     const groups = new Map();
     for (const a of attributions) {
-      const label = a.attribution_label ?? 'AI';
-      const key = a.trace_id ? `${a.trace_id}:${label}` : `__no_trace__:${label}`;
+      const key = getTraceKey(a);
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(a);
     }
     return groups;
   }, [attributions]);
 
-  /* ─── No-attribution stats (for list, pie, legend) ── */
+  /* ─── No-attribution stats (for list, pie, legend). Counts gaps + no-attribution segments (e.g. full-file no-attribution in local mode). ── */
   const noAttributionStats = useMemo(() => {
     const totalLines = lines.length;
     if (!totalLines) return { pct: 0, ranges: [] };
-    const attributed = countDistinctLinesCovered(attributions);
+    const attributedOnly = attributions.filter((a) => !isNoAttribution(a));
+    const attributed = countDistinctLinesCovered(attributedOnly);
     const pct = ((totalLines - attributed) / totalLines) * 100;
-    const ranges = getUncoveredLineRanges(totalLines, attributions);
+    const ranges = getNoAttributionLineRanges(totalLines, attributions);
     return { pct, ranges };
   }, [attributions, lines.length]);
 
@@ -372,10 +415,10 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
   const pieSegments = useMemo(() => {
     const totalLines = lines.length;
     if (!totalLines) return [];
-    const entries = [...attributionsByTraceId.entries()];
+    const entries = [...attributionsByTraceId.entries()].filter(([traceKey]) => traceKey !== '__no_attribution__');
     const withPct = entries.map(([traceKey, attrs]) => {
       const firstAttr = attrs[0];
-      const label = firstAttr.attribution_label || 'AI';
+      const label = isNoAttribution(firstAttr) ? 'No attribution' : (firstAttr.attribution_label || 'AI');
       const pct = countDistinctLinesCovered(attrs) / totalLines * 100;
       const c = getLineColors(firstAttr, traceColorMap);
       return { traceKey, attrs, label, pct, color: c.strip, firstAttr, gapRanges: null };
@@ -397,7 +440,10 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
       const startAngle = cum;
       cum += s.pct;
       const endAngle = cum;
-      return { ...s, startAngle: (startAngle / 100) * 360, endAngle: (endAngle / 100) * 360 };
+      let startDeg = (startAngle / 100) * 360;
+      let endDeg = (endAngle / 100) * 360;
+      if (endDeg >= 360) endDeg = 359.99;
+      return { ...s, startAngle: startDeg, endAngle: endDeg };
     });
   }, [attributionsByTraceId, lines.length, traceColorMap, noAttributionStats]);
 
@@ -406,46 +452,41 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
     const totalLines = lines.length;
     const keyToAttrs = new Map();
     for (const a of attributions) {
-      const label = a.attribution_label || 'AI';
-      const key = label === 'AI' ? `AI:${a.model_id || '(unknown model)'}` : label;
+      const key = getLegendKey(a);
       if (!keyToAttrs.has(key)) keyToAttrs.set(key, []);
       keyToAttrs.get(key).push(a);
     }
     const items = [];
     const seenKeys = new Set();
     for (const a of attributions) {
-      const label = a.attribution_label || 'AI';
-      if (label === 'AI') {
-        const modelKey = a.model_id || '(unknown model)';
-        if (!seenKeys.has(`AI:${modelKey}`)) {
-          seenKeys.add(`AI:${modelKey}`);
-          const colors = getLineColors(a, traceColorMap);
-          const attrs = keyToAttrs.get(`AI:${modelKey}`) ?? [];
-          const pct = totalLines ? (countDistinctLinesCovered(attrs) / totalLines * 100) : 0;
-          items.push({ key: `AI:${modelKey}`, label: 'AI', sublabel: modelKey, bg: colors.bg, strip: colors.strip, pct });
-        }
-      } else if (!seenKeys.has(label)) {
-        seenKeys.add(label);
-        const colors = getLineColors(a, traceColorMap);
-        const attrs = keyToAttrs.get(label) ?? [];
-        const pct = totalLines ? (countDistinctLinesCovered(attrs) / totalLines * 100) : 0;
-        items.push({ key: label, label, sublabel: null, bg: colors.bg, strip: colors.strip, pct });
+      const key = getLegendKey(a);
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      const colors = getLineColors(a, traceColorMap);
+      const attrs = keyToAttrs.get(key) ?? [];
+      const pct = key === 'No attribution'
+        ? noAttributionStats.pct
+        : (totalLines ? (countDistinctLinesCovered(attrs) / totalLines * 100) : 0);
+      if (key === 'No attribution') {
+        items.push({ key: 'No attribution', label: 'No attribution', sublabel: null, bg: NO_ATTRIBUTION_COLORS.bg, strip: NO_ATTRIBUTION_COLORS.strip, pct });
+      } else if (key.startsWith('AI:')) {
+        items.push({ key, label: 'AI', sublabel: key.slice(3), bg: colors.bg, strip: colors.strip, pct });
+      } else {
+        items.push({ key, label: key, sublabel: null, bg: colors.bg, strip: colors.strip, pct });
       }
     }
-    const attributedLines = totalLines ? countDistinctLinesCovered(attributions) : 0;
-    const noAttrPct = totalLines ? ((totalLines - attributedLines) / totalLines * 100) : 0;
-    if (noAttrPct > 0) {
+    if (noAttributionStats.pct > 0 && !seenKeys.has('No attribution')) {
       items.push({
         key: 'No attribution',
         label: 'No attribution',
         sublabel: null,
         bg: NO_ATTRIBUTION_COLORS.bg,
         strip: NO_ATTRIBUTION_COLORS.strip,
-        pct: noAttrPct,
+        pct: noAttributionStats.pct,
       });
     }
     return items;
-  }, [attributions, traceColorMap, lines.length]);
+  }, [attributions, traceColorMap, lines.length, noAttributionStats.pct]);
 
   /* ─── Pie chart legend: one row per label (AI as a whole, Human, Mixed, No attribution) ── */
   const pieLegendItems = useMemo(() => {
@@ -478,14 +519,17 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
       const startAngle = cum;
       cum += item.pct;
       const endAngle = cum;
+      let startDeg = (startAngle / 100) * 360;
+      let endDeg = (endAngle / 100) * 360;
+      if (endDeg >= 360) endDeg = 359.99;
       return {
         key: item.key,
         label: item.label,
         sublabel: item.sublabel,
         pct: item.pct,
         color: item.strip,
-        startAngle: (startAngle / 100) * 360,
-        endAngle: (endAngle / 100) * 360,
+        startAngle: startDeg,
+        endAngle: endDeg,
       };
     });
   }, [legendItems]);
@@ -610,10 +654,10 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
                   <div className="fv-trace-col" style={{ width: tracePaneWidth, flexBasis: tracePaneWidth }}>
                     {attr ? (
                       <>
-                        <span className={`attr-badge ${(attr.attribution_label || 'ai').toLowerCase()}`}>
-                          {attr.attribution_label || 'AI'}
+                        <span className={`attr-badge ${getDisplayLabel(attr) === 'No attribution' ? 'none' : getDisplayLabel(attr).toLowerCase()}`}>
+                          {getDisplayLabel(attr)}
                         </span>
-                        {attr.model_id && <span className="model-name">{attr.model_id}</span>}
+                        {!isNoAttribution(attr) && attr.model_id && <span className="model-name">{attr.model_id}</span>}
                       </>
                     ) : (
                       <span style={{ color: '#d1d5db', fontSize: 10 }}>—</span>
@@ -738,8 +782,8 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
                         <div className="detail-row">
                           <span className="dl">Contributor</span>
                           <span className="dv">
-                            <span className={`attr-badge ${(detailAttr.attribution_label || detailAttr.contributor_type || 'ai').toLowerCase()}`} style={{ fontSize: 10 }}>
-                              {detailAttr.contributor_type}
+                            <span className={`attr-badge ${getDisplayLabel(detailAttr) === 'No attribution' ? 'none' : getDisplayLabel(detailAttr).toLowerCase()}`} style={{ fontSize: 10 }}>
+                              {getDisplayLabel(detailAttr)}
                             </span>
                           </span>
                         </div>
@@ -786,14 +830,17 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
                   </div>
                   {attrMapView === 'list' ? (
                     <div className="attr-file-map attr-file-map-by-trace">
-                      {[...attributionsByTraceId.entries()].map(([traceKey, attrs]) => {
+                      {[...attributionsByTraceId.entries()]
+                        .filter(([traceKey]) => traceKey !== '__no_attribution__')
+                        .map(([traceKey, attrs]) => {
                         const isTraceId = traceKey.startsWith('__no_trace__:') === false;
                         const firstAttr = attrs[0];
-                        const label = firstAttr.attribution_label || 'AI';
+                        const label = isNoAttribution(firstAttr) ? 'No attribution' : (firstAttr.attribution_label || 'AI');
                         const c = getLineColors(firstAttr, traceColorMap);
                         const totalLines = lines.length;
                         const pct = totalLines ? (countDistinctLinesCovered(attrs) / totalLines * 100) : 0;
                         const isPinnedTrace = pinnedTraceKey === traceKey;
+                        const badgeClass = label === 'No attribution' ? 'attr-badge none' : `attr-badge ${label.toLowerCase()}`;
                         return (
                           <div key={traceKey} className={`attr-trace-group ${isPinnedTrace ? 'pinned-trace' : ''}`}>
                             <div
@@ -801,7 +848,7 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
                               style={{ borderLeftColor: c.strip }}
                             >
                               <span className="attr-trace-label-row">
-                                <span className={`attr-trace-label attr-badge ${label.toLowerCase()}`}>
+                                <span className={`attr-trace-label ${badgeClass}`}>
                                   {label}
                                 </span>
                                 <span className="attr-trace-pct">({pct.toFixed(1)}%)</span>
@@ -958,8 +1005,8 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
           {popover.attr && (
             <>
               <div className="pop-header">
-                <span className={`pop-badge ${(popover.attr.attribution_label || popover.attr.contributor_type || 'ai').toLowerCase()}`}>
-                  {popover.attr.contributor_type || popover.attr.attribution_label || 'AI'}
+                <span className={`pop-badge ${getDisplayLabel(popover.attr) === 'No attribution' ? 'none' : getDisplayLabel(popover.attr).toLowerCase()}`}>
+                  {getDisplayLabel(popover.attr)}
                 </span>
                 {popover.attr.model_id && <span style={{ fontSize: 12, fontWeight: 700, color: '#1d4ed8' }}>{popover.attr.model_id}</span>}
               </div>

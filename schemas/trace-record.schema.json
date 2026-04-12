@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-trace.dev/schemas/trace-record/v2.0",
+  "title": "TraceRecord",
+  "description": "One line in traces.jsonl. v2.0 documents metadata.edit_sequence and per-range line_hashes; v1.0 records remain valid.",
+  "type": "object",
+  "required": ["version", "id", "timestamp", "tool", "files"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "enum": ["1.0", "2.0"]
+    },
+    "id": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "description": "ISO-8601 timestamp" },
+    "tool": { "$ref": "#/$defs/tool" },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/fileEntry" }
+    },
+    "vcs": { "$ref": "#/$defs/vcs" },
+    "metadata": { "$ref": "#/$defs/metadata" }
+  },
+  "$defs": {
+    "tool": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "vcs": {
+      "type": "object",
+      "required": ["type", "revision"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "const": "git" },
+        "revision": { "type": "string", "minLength": 1 }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "edit_sequence": { "type": "integer" },
+        "session_id": { "type": "string" },
+        "tool_name": { "type": "string" },
+        "tool_use_id": { "type": "string" },
+        "is_creation": { "type": "boolean" }
+      }
+    },
+    "lineHash": {
+      "type": "object",
+      "required": ["line_offset", "hash"],
+      "additionalProperties": false,
+      "properties": {
+        "line_offset": { "type": "integer", "minimum": 0 },
+        "hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{16}$"
+        }
+      }
+    },
+    "range": {
+      "type": "object",
+      "required": ["start_line", "end_line"],
+      "additionalProperties": false,
+      "properties": {
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{16}$"
+        },
+        "line_hashes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/lineHash" }
+        }
+      }
+    },
+    "contributor": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string" },
+        "model_id": { "type": "string" }
+      }
+    },
+    "conversation": {
+      "type": "object",
+      "required": ["contributor", "ranges"],
+      "additionalProperties": false,
+      "properties": {
+        "contributor": { "$ref": "#/$defs/contributor" },
+        "ranges": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/range" }
+        },
+        "url": { "type": "string" }
+      }
+    },
+    "fileEntry": {
+      "type": "object",
+      "required": ["path", "conversations"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "conversations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/conversation" }
+        }
+      }
+    }
+  }
+}

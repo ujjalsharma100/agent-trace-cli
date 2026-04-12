@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-trace.dev/schemas/commit-link/v1.0",
+  "title": "CommitLink",
+  "description": "One line in commit-links.jsonl. Optional ledger duplicates the ledger record when stored via remote POST.",
+  "type": "object",
+  "required": [
+    "commit_sha",
+    "parent_sha",
+    "trace_ids",
+    "files_changed",
+    "committed_at",
+    "created_at"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "commit_sha": { "type": "string", "minLength": 1 },
+    "parent_sha": { "type": ["string", "null"] },
+    "trace_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "files_changed": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "committed_at": { "type": ["string", "null"] },
+    "created_at": { "type": "string" },
+    "ledger": {
+      "description": "Full ledger object when included (e.g. remote sync)",
+      "type": "object"
+    }
+  }
+}

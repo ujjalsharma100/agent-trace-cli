@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-trace.dev/schemas/git-note/v1.0",
+  "title": "GitNotePayload",
+  "description": "JSON blob under refs/notes/agent-trace. Core fields are always present when notes are enabled; ledger, summary, and prompts are optional independent sections.",
+  "type": "object",
+  "required": ["version", "trace_ids", "ledger_hash", "stats"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "trace_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "ledger_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]+$"
+    },
+    "stats": {
+      "type": "object",
+      "required": ["ai_lines", "human_lines", "mixed_lines"],
+      "additionalProperties": false,
+      "properties": {
+        "ai_lines": { "type": "integer", "minimum": 0 },
+        "human_lines": { "type": "integer", "minimum": 0 },
+        "mixed_lines": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ledger": {
+      "type": "object",
+      "description": "Inline per-line attribution (optional)",
+      "required": ["files"],
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["line_attributions"],
+            "additionalProperties": false,
+            "properties": {
+              "line_attributions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["start_line", "end_line", "type"],
+                  "additionalProperties": true,
+                  "properties": {
+                    "start_line": { "type": "integer", "minimum": 1 },
+                    "end_line": { "type": "integer", "minimum": 1 },
+                    "type": { "type": "string" },
+                    "trace_id": { "type": "string" },
+                    "model_id": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "description": "Map of file path to summary prose (optional)",
+      "additionalProperties": { "type": "string" }
+    },
+    "prompts": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

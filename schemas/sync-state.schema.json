@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-trace.dev/schemas/sync-state/v1.0",
+  "title": "SyncState",
+  "description": "Push/pull cursors per remote (~/.agent-trace/projects/<id>/sync-state.json). Timestamps are ISO-8601.",
+  "type": "object",
+  "required": ["remotes"],
+  "additionalProperties": false,
+  "properties": {
+    "remotes": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/remoteSync" }
+    }
+  },
+  "$defs": {
+    "lastPush": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "traces_max_timestamp": { "type": "string" },
+        "ledgers_max_commit_at": { "type": "string" },
+        "commit_links_max_commit_at": { "type": "string" },
+        "conversations_max_updated_at": { "type": "string" }
+      }
+    },
+    "lastPull": {
+      "type": "object",
+      "required": ["at"],
+      "additionalProperties": false,
+      "properties": {
+        "at": { "type": "string" }
+      }
+    },
+    "remoteSync": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "last_push": { "$ref": "#/$defs/lastPush" },
+        "last_pull": { "$ref": "#/$defs/lastPull" }
+      }
+    }
+  }
+}

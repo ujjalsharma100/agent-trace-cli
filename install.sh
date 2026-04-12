@@ -128,9 +128,14 @@ install_files() {
     mkdir -p "${LIB_DIR}/agent_trace"
 
     # Copy Python modules
-    for f in __init__.py blame.py cli.py commit_link.py config.py context.py hooks.py ledger.py record.py rules.py rewrite.py trace.py; do
+    for f in __init__.py blame.py cli.py commit_link.py config.py context.py hooks.py ledger.py models.py record.py rules.py rewrite.py trace.py; do
         cp "${SOURCE_DIR}/agent_trace/${f}" "${LIB_DIR}/agent_trace/${f}"
     done
+
+    if [ -d "${SOURCE_DIR}/schemas" ]; then
+        mkdir -p "${LIB_DIR}/schemas"
+        cp "${SOURCE_DIR}/schemas/"*.json "${LIB_DIR}/schemas/"
+    fi
 
     # Create the executable entry-point
     cat > "${BIN_DIR}/agent-trace" << 'ENTRY_POINT'

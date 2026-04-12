@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-trace.dev/schemas/remotes/v1.0",
+  "title": "RemotesConfig",
+  "description": "Named remotes for ~/.agent-trace/projects/<project_id>/remotes.json — git-remote-like URLs and auth references.",
+  "type": "object",
+  "additionalProperties": { "$ref": "#/$defs/remote" },
+  "$defs": {
+    "remote": {
+      "type": "object",
+      "required": ["url"],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "auth": {
+          "type": "object",
+          "required": ["type", "token_ref"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "type": "string" },
+            "token_ref": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}
