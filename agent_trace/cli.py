@@ -29,6 +29,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -46,7 +47,12 @@ from .commit_link import create_commit_link
 from .context import context_command
 from .registry import list_projects, lookup_or_create_project_id
 from .trace import cli_resolve_project_root, discover_ambiguous_repo_roots, git_repo_root_for_path
-from .hooks import configure_claude_hooks, configure_cursor_hooks, configure_git_hooks
+from .hooks import (
+    configure_claude_hooks,
+    configure_cursor_hooks,
+    configure_git_hooks,
+    configure_git_notes_refspecs,
+)
 from .rules import add_rule, remove_rule, show_rules, list_available_rules, TOOL_CHOICES
 from .record import record_from_stdin
 from .rewrite import rewrite_ledgers
@@ -163,6 +169,14 @@ def cmd_init(_args):
             configure_git_hooks()
             print("  -> Git post-commit hook configured (.git/hooks/post-commit)")
             print("  -> Git post-rewrite hook configured (.git/hooks/post-rewrite)")
+        if _confirm(
+            "Add git notes refspecs for origin (fetch/push refs/notes/agent-trace)?",
+            default=True,
+        ):
+            if configure_git_notes_refspecs():
+                print("  -> Git notes refspecs configured for remote \"origin\"")
+            else:
+                print("  -> Skipped (no \"origin\" remote or not a git repo)")
 
     print("\nagent-trace initialized successfully!")
 
@@ -738,6 +752,183 @@ def cmd_sync(args):
 
 
 # ===================================================================
+# notes (git refs/notes/agent-trace)
+# ===================================================================
+
+
+def _resolve_note_section_flags(args, cwd: str) -> tuple[bool, bool, bool]:
+    """Merge ``--include-*`` / ``--no-include-*`` with project ``notes.*`` defaults."""
+    from .git_notes import project_notes_flags
+
+    d_l, d_s, d_p = project_notes_flags(cwd)
+
+    def one(name: str, default: bool) -> bool:
+        t = getattr(args, f"include_{name}", False)
+        f = getattr(args, f"no_include_{name}", False)
+        if t and f:
+            print(
+                f"agent-trace notes: specify only one of --include-{name} or --no-include-{name}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if t:
+            return True
+        if f:
+            return False
+        return default
+
+    return (
+        one("ledger", d_l),
+        one("summary", d_s),
+        one("prompts", d_p),
+    )
+
+
+def cmd_notes(args):
+    """Manage per-commit JSON notes on ``refs/notes/agent-trace``."""
+    from .git_notes import (
+        attach_note,
+        backfill_notes,
+        build_note,
+        git_notes_pull,
+        git_notes_push,
+        read_note,
+        rebuild_notes_for_range,
+        resolve_commit,
+        strip_sections,
+    )
+    from .ledger import load_local_ledgers
+
+    cwd = os.getcwd()
+    action = getattr(args, "notes_action", None)
+
+    if action == "show":
+        rev = getattr(args, "commit", None) or "HEAD"
+        sha = resolve_commit(cwd, rev)
+        if not sha:
+            print(f"agent-trace notes show: bad revision: {rev}", file=sys.stderr)
+            sys.exit(1)
+        note = read_note(sha, cwd)
+        if not note:
+            print(f"No agent-trace note for {sha}", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(note, indent=2))
+        return
+
+    if action == "attach":
+        rev = getattr(args, "commit", None) or "HEAD"
+        sha = resolve_commit(cwd, rev)
+        if not sha:
+            print(f"agent-trace notes attach: bad revision: {rev}", file=sys.stderr)
+            sys.exit(1)
+        ledgers = load_local_ledgers(cwd)
+        led = ledgers.get(sha)
+        if not led:
+            print(
+                "agent-trace notes attach: no local ledger for this commit "
+                "(build a ledger first, e.g. make a commit with agent-trace hooks).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        il, isum, ipr = _resolve_note_section_flags(args, cwd)
+        from .git_notes import load_traces_for_ids
+
+        tid_list = [str(x) for x in led.get("trace_ids", [])]
+        traces = load_traces_for_ids(cwd, tid_list)
+        summaries = None
+        if isum:
+            cfg = get_project_config(cwd) or {}
+            s = (cfg.get("notes") or {}).get("summaries")
+            summaries = s if isinstance(s, dict) else None
+        note = build_note(
+            led,
+            traces,
+            include_ledger=il,
+            include_summary=isum,
+            include_prompts=ipr,
+            summaries=summaries,
+        )
+        if attach_note(sha, note, cwd):
+            print(f"Attached note to {sha}")
+        else:
+            print("agent-trace notes attach: failed", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if action == "rebuild":
+        range_spec = getattr(args, "range_spec", None)
+        if not range_spec:
+            print("agent-trace notes rebuild: <range> required (e.g. HEAD~10..HEAD)", file=sys.stderr)
+            sys.exit(1)
+        il, isum, ipr = _resolve_note_section_flags(args, cwd)
+        n = rebuild_notes_for_range(
+            cwd,
+            range_spec,
+            include_ledger=il,
+            include_summary=isum,
+            include_prompts=ipr,
+        )
+        print(f"Rebuilt notes for {n} commit(s)")
+        return
+
+    if action == "backfill":
+        il, isum, ipr = _resolve_note_section_flags(args, cwd)
+        since = getattr(args, "since", None)
+        n = backfill_notes(
+            cwd,
+            since=since,
+            include_ledger=il,
+            include_summary=isum,
+            include_prompts=ipr,
+        )
+        print(f"Backfilled notes for {n} commit(s)")
+        return
+
+    if action == "strip":
+        rev = getattr(args, "commit", None) or "HEAD"
+        sha = resolve_commit(cwd, rev)
+        if not sha:
+            print(f"agent-trace notes strip: bad revision: {rev}", file=sys.stderr)
+            sys.exit(1)
+        sections: list[str] = []
+        if getattr(args, "strip_ledger", False):
+            sections.append("ledger")
+        if getattr(args, "strip_summary", False):
+            sections.append("summary")
+        if getattr(args, "strip_prompts", False):
+            sections.append("prompts")
+        if not sections:
+            print("agent-trace notes strip: specify at least one of --ledger --summary --prompts", file=sys.stderr)
+            sys.exit(1)
+        if strip_sections(sha, sections, cwd):
+            print(f"Stripped {', '.join(sections)} from note on {sha}")
+        else:
+            print("agent-trace notes strip: no note or failed", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if action == "push":
+        remote = getattr(args, "remote", None) or "origin"
+        ok, msg = git_notes_push(cwd, remote=remote)
+        if ok:
+            print(msg or "push ok")
+        else:
+            print(f"agent-trace notes push: {msg}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if action == "pull":
+        remote = getattr(args, "remote", None) or "origin"
+        ok, msg = git_notes_pull(cwd, remote=remote)
+        if ok:
+            print(msg or "fetch ok")
+        else:
+            print(f"agent-trace notes pull: {msg}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+
+# ===================================================================
 # Entry point
 # ===================================================================
 
@@ -905,6 +1096,52 @@ def main():
         help="Path to repository (default: current directory)",
     )
 
+    # notes {show, attach, rebuild, backfill, strip, push, pull}
+    sub_notes = sub.add_parser("notes", help="Git notes (refs/notes/agent-trace)")
+    notes_sub = sub_notes.add_subparsers(dest="notes_action", metavar="ACTION", required=True)
+
+    ns_show = notes_sub.add_parser("show", help="Print JSON note for a commit")
+    ns_show.add_argument("commit", nargs="?", default="HEAD", help="Commit (default: HEAD)")
+
+    ns_attach = notes_sub.add_parser("attach", help="Build note from local ledger and attach")
+    ns_attach.add_argument("commit", nargs="?", default="HEAD", help="Commit (default: HEAD)")
+    ns_attach.add_argument("--include-ledger", action="store_true", help="Include ledger section")
+    ns_attach.add_argument("--no-include-ledger", action="store_true", help="Omit ledger section")
+    ns_attach.add_argument("--include-summary", action="store_true")
+    ns_attach.add_argument("--no-include-summary", action="store_true")
+    ns_attach.add_argument("--include-prompts", action="store_true")
+    ns_attach.add_argument("--no-include-prompts", action="store_true")
+
+    ns_rebuild = notes_sub.add_parser("rebuild", help="Rebuild notes from local ledgers for a commit range")
+    ns_rebuild.add_argument("range_spec", help="Range for git rev-list (e.g. HEAD~10..HEAD)")
+    ns_rebuild.add_argument("--include-ledger", action="store_true")
+    ns_rebuild.add_argument("--no-include-ledger", action="store_true")
+    ns_rebuild.add_argument("--include-summary", action="store_true")
+    ns_rebuild.add_argument("--no-include-summary", action="store_true")
+    ns_rebuild.add_argument("--include-prompts", action="store_true")
+    ns_rebuild.add_argument("--no-include-prompts", action="store_true")
+
+    ns_backfill = notes_sub.add_parser("backfill", help="Rebuild notes for commits (optional --since)")
+    ns_backfill.add_argument("--since", default=None, help="git rev-list --since (e.g. 2026-01-01)")
+    ns_backfill.add_argument("--include-ledger", action="store_true")
+    ns_backfill.add_argument("--no-include-ledger", action="store_true")
+    ns_backfill.add_argument("--include-summary", action="store_true")
+    ns_backfill.add_argument("--no-include-summary", action="store_true")
+    ns_backfill.add_argument("--include-prompts", action="store_true")
+    ns_backfill.add_argument("--no-include-prompts", action="store_true")
+
+    ns_strip = notes_sub.add_parser("strip", help="Remove optional sections from a note")
+    ns_strip.add_argument("commit", nargs="?", default="HEAD")
+    ns_strip.add_argument("--ledger", dest="strip_ledger", action="store_true")
+    ns_strip.add_argument("--summary", dest="strip_summary", action="store_true")
+    ns_strip.add_argument("--prompts", dest="strip_prompts", action="store_true")
+
+    ns_npush = notes_sub.add_parser("push", help="Push refs/notes/agent-trace to a remote")
+    ns_npush.add_argument("--remote", default="origin")
+
+    ns_npull = notes_sub.add_parser("pull", help="Fetch refs/notes/agent-trace from a remote")
+    ns_npull.add_argument("--remote", default="origin")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -926,6 +1163,7 @@ def main():
         "push": cmd_push,
         "pull": cmd_pull,
         "sync": cmd_sync,
+        "notes": cmd_notes,
     }
 
     if args.command in dispatch:

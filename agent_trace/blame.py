@@ -18,7 +18,28 @@ from .blame_meta import (
     _load_conversation_summary,
     _load_local_traces,
 )
+from .git_notes import ledger_from_note_for_blame, read_note
 from .ledger import load_local_ledgers
+
+
+def _merge_ledgers_from_git_notes(
+    git_root: str,
+    segments: list[dict[str, Any]],
+    ledgers: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Fill in ledgers from ``refs/notes/agent-trace`` when missing locally."""
+    merged = dict(ledgers)
+    missing = {seg.get("commit_sha") for seg in segments if seg.get("commit_sha") not in merged}
+    for sha in missing:
+        if not sha:
+            continue
+        note = read_note(sha, git_root)
+        if not note:
+            continue
+        mini = ledger_from_note_for_blame(note)
+        if mini:
+            merged[sha] = mini
+    return merged
 
 
 def _attribution_type_label(attr_type: str) -> str:
@@ -399,6 +420,7 @@ def blame_file(
 
     traces = _load_local_traces(git_root)
     ledgers = load_local_ledgers(git_root)
+    ledgers = _merge_ledgers_from_git_notes(git_root, segments, ledgers)
 
     raw_attrs = _attribute_deterministic(segments, rel_path, ledgers, traces)
     attributions = _merge_attributions(raw_attrs)

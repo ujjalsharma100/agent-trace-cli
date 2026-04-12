@@ -13,7 +13,11 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 from pathlib import Path
+
+
+GIT_NOTES_REFSPEC = "+refs/notes/agent-trace:refs/notes/agent-trace"
 
 
 CURSOR_HOOKS_FILE = ".cursor/hooks.json"
@@ -237,4 +241,67 @@ def configure_git_post_rewrite_hook(project_dir: str | None = None) -> bool:
 
     current = hook_path.stat().st_mode
     hook_path.chmod(current | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return True
+
+
+# -------------------------------------------------------------------
+# Git notes refspecs (Phase 5)
+# -------------------------------------------------------------------
+
+
+def configure_git_notes_refspecs(project_dir: str | None = None, remote_name: str = "origin") -> bool:
+    """Add fetch/push refspecs for ``refs/notes/agent-trace`` on ``remote_name``.
+
+    Skips if the remote does not exist or the refspecs are already present.
+    """
+    if project_dir is None:
+        project_dir = os.getcwd()
+
+    git_dir = Path(project_dir) / ".git"
+    if not git_dir.is_dir():
+        return False
+
+    try:
+        r = subprocess.run(
+            ["git", "-C", project_dir, "remote", "get-url", remote_name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if r.returncode != 0:
+            return False
+    except Exception:
+        return False
+
+    for key in ("fetch", "push"):
+        try:
+            cur = subprocess.run(
+                ["git", "-C", project_dir, "config", "--get-all", f"remote.{remote_name}.{key}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            existing = cur.stdout if cur.returncode == 0 else ""
+        except Exception:
+            existing = ""
+        if "refs/notes/agent-trace" in existing:
+            continue
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    project_dir,
+                    "config",
+                    "--add",
+                    f"remote.{remote_name}.{key}",
+                    GIT_NOTES_REFSPEC,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except Exception:
+            return False
     return True

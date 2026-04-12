@@ -202,6 +202,12 @@ def create_commit_link(project_dir: str | None = None) -> dict | None:
             store_ledger_local(ledger, project_dir)
         except Exception:
             pass
+        try:
+            from .git_notes import attach_note_after_ledger
+
+            attach_note_after_ledger(project_dir, ledger)
+        except Exception:
+            pass
 
     if not trace_ids:
         return None
