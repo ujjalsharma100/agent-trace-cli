@@ -72,11 +72,31 @@ export default function App() {
         <div className="sidebar-header">
           <h2>Agent Trace</h2>
           <div className="project-name" title={project.root}>
-            {project.root.replace(/^.*\//, '') || project.root}
+            {project.label || project.root.replace(/^.*\//, '') || project.root}
           </div>
           <div className="project-meta">
             {project.storage} · {project.has_agent_trace ? 'Traced' : 'No traces'}
+            {project.project_id && (
+              <span title={project.project_id} className="project-id-hint">
+                {' '}
+                · {project.project_id.slice(0, 12)}…
+              </span>
+            )}
           </div>
+          <div className="project-paths" title={`Data: ${project.project_data_dir || ''}`}>
+            <span className="path-label">Storage</span>
+            <code className="path-value">{project.agent_trace_home || '~/.agent-trace'}</code>
+          </div>
+          {project.git_note_head && (() => {
+            const raw = JSON.stringify(project.git_note_head, null, 2);
+            const clipped = raw.length > 1200 ? `${raw.slice(0, 1200)}\n…` : raw;
+            return (
+              <div className="git-note-preview">
+                <div className="git-note-title">Git note (HEAD)</div>
+                <pre className="git-note-json">{clipped}</pre>
+              </div>
+            );
+          })()}
         </div>
         <div className="sidebar-files">
           <FileTree

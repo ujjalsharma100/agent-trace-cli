@@ -41,17 +41,16 @@ function countDistinctLinesCovered(attributions) {
   return lineSet.size;
 }
 
-/** True when this attribution is a "no AI" segment (UNKNOWN, human, or unlabeled). */
+/** True when this attribution is an unlabeled / empty segment (not explicit UNKNOWN from the ledger). */
 function isNoAttribution(attr) {
   if (!attr) return true;
-  if (attr.kind === 'UNKNOWN') return true;
+  if (attr.kind === 'UNKNOWN') return false;
   const hasTrace = attr.trace_id != null && attr.trace_id !== '';
   if (hasTrace) return false;
   const label = attr.attribution_label;
   const hasLabel = label != null && label !== '';
-  const hasTier = attr.tier != null;
   const hasKind = attr.kind != null && attr.kind !== '';
-  return !hasLabel && !hasTier && !hasKind;
+  return !hasLabel && !hasKind;
 }
 
 /** Line ranges (start, end) that have no attribution */
@@ -78,7 +77,7 @@ function getUncoveredLineRanges(totalLines, attributions) {
   return ranges;
 }
 
-/** Line ranges that are no-attribution: gaps or segments with no trace/tier/label (e.g. full-file no-attribution in local mode). */
+/** Line ranges that are no-attribution: gaps or segments with no trace/label (e.g. full-file no-attribution in local mode). */
 function getNoAttributionLineRanges(totalLines, attributions) {
   const coveredByAttributed = new Set();
   for (const a of attributions) {
@@ -144,6 +143,7 @@ function buildTraceColorMap(attributions) {
 
 const HUMAN_COLORS = { bg: 'hsl(220, 58%, 94%)', strip: 'hsl(220, 65%, 48%)' };
 const MIXED_COLORS = { bg: 'hsl(28, 65%, 92%)', strip: 'hsl(24, 75%, 45%)' };
+const UNKNOWN_COLORS = { bg: 'hsl(38, 92%, 90%)', strip: 'hsl(32, 90%, 38%)' };
 const NO_ATTRIBUTION_COLORS = { bg: 'hsl(0, 0%, 94%)', strip: 'hsl(0, 0%, 65%)' };
 const AI_DEFAULT   = AI_PALETTES[0];
 
@@ -159,6 +159,7 @@ function deeperBorderColor(stripColor) {
 
 function getLineColors(attr, traceColorMap) {
   if (!attr) return { bg: 'transparent', strip: 'transparent', label: null };
+  if (attr.kind === 'UNKNOWN') return { ...UNKNOWN_COLORS, label: 'Unknown' };
   if (isNoAttribution(attr)) return { ...NO_ATTRIBUTION_COLORS, label: 'No attribution' };
   const label = attr.attribution_label;
   if (label === 'Human') return { ...HUMAN_COLORS, label: 'Human' };
@@ -171,6 +172,7 @@ function getLineColors(attr, traceColorMap) {
 
 /** Trace key for grouping (must match attributionsByTraceId). */
 function getTraceKey(attr) {
+  if (attr && attr.kind === 'UNKNOWN') return '__unknown__';
   if (isNoAttribution(attr)) return '__no_attribution__';
   const label = attr.attribution_label ?? 'AI';
   return attr.trace_id ? `${attr.trace_id}:${label}` : `__no_trace__:${label}`;
@@ -178,14 +180,17 @@ function getTraceKey(attr) {
 
 /** Legend key for toolbar / model pie (must match legendItems). */
 function getLegendKey(attr) {
+  if (attr && attr.kind === 'UNKNOWN') return 'Unknown';
   if (isNoAttribution(attr)) return 'No attribution';
   const label = attr.attribution_label ?? 'AI';
   if (label === 'AI') return `AI:${attr.model_id || '(unknown model)'}`;
   return label;
 }
 
-/** Human-facing label for one attribution (for gutter, detail panel, popover). Use this everywhere we display "AI" / "Human" / "No attribution". */
+/** Human-facing label for one attribution (for gutter, detail panel, popover). */
 function getDisplayLabel(attr) {
+  if (!attr) return 'No attribution';
+  if (attr.kind === 'UNKNOWN') return 'Unknown';
   if (isNoAttribution(attr)) return 'No attribution';
   return attr.attribution_label ?? 'AI';
 }
@@ -420,7 +425,7 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
     const entries = [...attributionsByTraceId.entries()].filter(([traceKey]) => traceKey !== '__no_attribution__');
     const withPct = entries.map(([traceKey, attrs]) => {
       const firstAttr = attrs[0];
-      const label = isNoAttribution(firstAttr) ? 'No attribution' : (firstAttr.attribution_label || 'AI');
+      const label = getDisplayLabel(firstAttr);
       const pct = countDistinctLinesCovered(attrs) / totalLines * 100;
       const c = getLineColors(firstAttr, traceColorMap);
       return { traceKey, attrs, label, pct, color: c.strip, firstAttr, gapRanges: null };
@@ -471,6 +476,8 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
         : (totalLines ? (countDistinctLinesCovered(attrs) / totalLines * 100) : 0);
       if (key === 'No attribution') {
         items.push({ key: 'No attribution', label: 'No attribution', sublabel: null, bg: NO_ATTRIBUTION_COLORS.bg, strip: NO_ATTRIBUTION_COLORS.strip, pct });
+      } else if (key === 'Unknown') {
+        items.push({ key: 'Unknown', label: 'Unknown', sublabel: null, bg: UNKNOWN_COLORS.bg, strip: UNKNOWN_COLORS.strip, pct });
       } else if (key.startsWith('AI:')) {
         items.push({ key, label: 'AI', sublabel: key.slice(3), bg: colors.bg, strip: colors.strip, pct });
       } else {
@@ -498,11 +505,12 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
       const cur = byLabel.get(label) ?? 0;
       byLabel.set(label, cur + seg.pct);
     }
-    const order = ['AI', 'Human', 'Mixed', 'No attribution'];
+    const order = ['AI', 'Human', 'Mixed', 'Unknown', 'No attribution'];
     const colors = {
       AI: AI_DEFAULT.strip,
       Human: HUMAN_COLORS.strip,
       Mixed: MIXED_COLORS.strip,
+      Unknown: UNKNOWN_COLORS.strip,
       'No attribution': NO_ATTRIBUTION_COLORS.strip,
     };
     return order.filter((l) => byLabel.has(l)).map((label) => ({
@@ -837,7 +845,7 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
                         .map(([traceKey, attrs]) => {
                         const isTraceId = traceKey.startsWith('__no_trace__:') === false;
                         const firstAttr = attrs[0];
-                        const label = isNoAttribution(firstAttr) ? 'No attribution' : (firstAttr.attribution_label || 'AI');
+                        const label = getDisplayLabel(firstAttr);
                         const c = getLineColors(firstAttr, traceColorMap);
                         const totalLines = lines.length;
                         const pct = totalLines ? (countDistinctLinesCovered(attrs) / totalLines * 100) : 0;

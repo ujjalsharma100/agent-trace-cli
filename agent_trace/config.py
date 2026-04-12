@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 
 from .storage import (
@@ -105,6 +106,10 @@ def save_global_config(config: dict) -> None:
     f = get_global_config_file()
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps(config, indent=2) + "\n")
+    try:
+        f.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
 
 
 # -------------------------------------------------------------------

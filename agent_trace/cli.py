@@ -26,6 +26,7 @@ Commands:
     agent-trace adopt [path]      Register a git repo and print its stable project_id
     agent-trace notes ...         Git notes (attach, rebuild, show, push, pull, …)
     agent-trace summary ...       Pluggable session summaries (enable, generate, show)
+    agent-trace doctor            Check hooks, config, remotes, and tooling
 """
 
 from __future__ import annotations
@@ -33,12 +34,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
+import shutil
+import subprocess
 import sys
+import urllib.error
+import urllib.request
 
 from .config import (
     DEFAULT_SERVICE_URL,
     get_auth_token,
     get_global_config,
+    get_global_config_file,
     get_project_config,
     get_service_url,
     save_global_config,
@@ -132,16 +139,20 @@ def cmd_init(_args):
         print("Use 'agent-trace reset' to change configuration.")
         return
 
+    cwd = os.getcwd()
+    if not git_repo_root_for_path(cwd):
+        print("agent-trace init: not a git repository.", file=sys.stderr)
+        print("Create or enter a git repo, then run init again.", file=sys.stderr)
+        sys.exit(1)
+
+    default_label = os.path.basename(os.path.abspath(cwd))
     print("Initializing agent-trace...\n")
 
     storage = _prompt("Storage mode", default="local", choices=["local", "remote"])
     project_config: dict = {"storage": storage}
 
     if storage == "remote":
-        project_id = _prompt("Project ID")
-        project_config["project_id"] = project_id
-        project_config["service_url"] = DEFAULT_SERVICE_URL
-
+        project_config["service_url"] = _prompt("Service URL", default=DEFAULT_SERVICE_URL).rstrip("/")
         global_config = get_global_config()
         if global_config.get("auth_token"):
             print("Using global auth token (set via 'agent-trace set globaluser').")
@@ -149,13 +160,70 @@ def cmd_init(_args):
             auth_token = _prompt("Auth Token")
             project_config["auth_token"] = auth_token
 
+    label = _prompt("Project label (for your reference)", default=default_label)
+    project_config["label"] = (label or default_label).strip() or default_label
+
     save_project_config(project_config)
+
     from .storage import get_project_config_path, resolve_project_id
-    pid = resolve_project_id(os.getcwd(), create=False)
+
+    pid = resolve_project_id(cwd, create=False)
     if pid:
         print(f"\nProject id: {pid}")
         print(f"Settings:   {get_project_config_path(pid)}")
-        print(f"Pointer:    .agent-trace/project.json (checked in; ~200 bytes)")
+        print("Pointer:    .agent-trace/project.json (checked in; small JSON file)")
+
+    # Optional sync remotes (push/pull to agent-trace service)
+    if pid:
+        while _confirm("Configure a sync remote (push/pull to a server)?", default=False):
+            name = _prompt("Remote name", default="origin")
+            url = _prompt("Remote base URL (e.g. https://trace.example.com)").strip()
+            if not url:
+                print("  Skipped (empty URL).")
+                break
+            print("Token: paste a token, or env:VAR, or leave empty for none.")
+            tok_line = _prompt("Token / env:VAR", default="").strip()
+            token = None
+            token_env = None
+            if tok_line.startswith("env:"):
+                token_env = tok_line[4:].strip()
+            elif tok_line:
+                token = tok_line
+            try:
+                remote_add(pid, name, url.rstrip("/"), token=token, token_env=token_env)
+                print(f"  -> Remote '{name}' added.")
+            except ValueError as e:
+                print(f"  -> {e}")
+            if not _confirm("Add another sync remote?", default=False):
+                break
+
+    # Git notes defaults
+    project_config = get_project_config() or project_config
+    if _confirm("Enable git notes (JSON on refs/notes/agent-trace)?", default=True):
+        project_config.setdefault("notes", {})
+        project_config["notes"]["enabled"] = True
+        project_config["notes"]["include_ledger"] = _confirm(
+            "Include per-line ledger in notes?", default=True,
+        )
+        project_config["notes"]["include_summary"] = _confirm(
+            "Include summaries in notes?", default=False,
+        )
+        project_config["notes"]["include_prompts"] = _confirm(
+            "Include prompt previews in notes?", default=False,
+        )
+    else:
+        project_config.setdefault("notes", {})
+        project_config["notes"]["enabled"] = False
+    save_project_config(project_config)
+
+    if os.path.isdir(".git") and _confirm(
+        "Auto-configure git note refspecs (fetch/push refs/notes/agent-trace)?", default=True,
+    ):
+        rn = _prompt("Git remote name for note refspecs", default="origin")
+        if configure_git_notes_refspecs(remote_name=rn):
+            print(f"  -> Git notes refspecs configured for remote \"{rn}\"")
+        else:
+            print(f"  -> Skipped (no remote \"{rn}\" or not a git repo)")
 
     print()
     if _confirm("Configure hook for Cursor?", default=True):
@@ -167,20 +235,213 @@ def cmd_init(_args):
         print("  -> Claude Code hooks configured (.claude/settings.json)")
 
     if os.path.isdir(".git"):
-        if _confirm("Configure git hooks? (post-commit + post-rewrite for attribution)", default=True):
+        if _confirm("Configure git hooks? (post-commit + post-rewrite)", default=True):
             configure_git_hooks()
             print("  -> Git post-commit hook configured (.git/hooks/post-commit)")
             print("  -> Git post-rewrite hook configured (.git/hooks/post-rewrite)")
-        if _confirm(
-            "Add git notes refspecs for origin (fetch/push refs/notes/agent-trace)?",
-            default=True,
-        ):
-            if configure_git_notes_refspecs():
-                print("  -> Git notes refspecs configured for remote \"origin\"")
-            else:
-                print("  -> Skipped (no \"origin\" remote or not a git repo)")
+
+    if _confirm("Configure session summary command (optional)?", default=False):
+        cmd = _prompt(
+            "Summary command (reads JSON on stdin, writes JSON on stdout)",
+            default="",
+        )
+        if cmd.strip():
+            cfg = get_project_config() or {}
+            cfg.setdefault("summary", {})
+            cfg["summary"]["enabled"] = True
+            cfg["summary"]["command"] = cmd.strip()
+            save_project_config(cfg)
+            print("  -> Session summaries enabled.")
 
     print("\nagent-trace initialized successfully!")
+
+
+def _probe_remote_health(base_url: str) -> tuple[bool, str]:
+    """Return (ok, detail) for an agent-trace HTTP service (tries /health, /api/health)."""
+    base = base_url.rstrip("/")
+    last_err = "unreachable"
+    for path in ("/health", "/api/health"):
+        try:
+            with urllib.request.urlopen(base + path, timeout=8) as resp:
+                if 200 <= getattr(resp, "status", 200) < 400:
+                    return True, f"{path} -> OK"
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
+            last_err = str(e) or repr(e)
+    return False, last_err
+
+
+def cmd_doctor(_args):
+    """Report hook installation, config validity, storage, remotes, and optional tools."""
+    from .storage import (
+        get_agent_trace_home,
+        get_project_config_path,
+        read_in_repo_pointer,
+        resolve_project_id,
+    )
+
+    cwd = os.getcwd()
+    ok: list[str] = []
+    warn: list[str] = []
+    err: list[str] = []
+
+    def _git_out(args: list[str]) -> str:
+        try:
+            r = subprocess.run(
+                ["git", "-C", cwd, *args],
+                capture_output=True,
+                text=True,
+                timeout=12,
+            )
+            return r.stdout if r.returncode == 0 else ""
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+
+    # Global home writable
+    home = get_agent_trace_home()
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+        probe = home / ".doctor_write_probe"
+        probe.write_text("")
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+        ok.append(f"Global storage is writable ({home})")
+    except OSError as e:
+        err.append(f"Global storage not writable ({home}): {e}")
+
+    gf = get_global_config_file()
+    if gf.is_file():
+        mode = gf.stat().st_mode & 0o777
+        if mode & 0o077:
+            warn.append(f"Global config should be mode 600 (currently {oct(mode)})")
+        else:
+            ok.append("Global config permissions look good (600)")
+
+    ptr = read_in_repo_pointer(cwd)
+    cfg = get_project_config()
+    pid = resolve_project_id(cwd, create=False)
+    initialised = cfg is not None
+
+    if ptr and isinstance(ptr.get("project_id"), str) and ptr["project_id"].strip():
+        ok.append("In-repo pointer .agent-trace/project.json is present")
+    else:
+        warn.append("No valid .agent-trace/project.json (run agent-trace init)")
+
+    if ptr and isinstance(ptr.get("project_id"), str) and ptr["project_id"].strip() and cfg is None:
+        err.append("project-config.json missing or unreadable under global project dir")
+    elif cfg is not None:
+        if pid:
+            ok.append(f"Project config readable ({get_project_config_path(pid)})")
+        else:
+            ok.append("Project config readable")
+
+    # Hooks
+    if os.path.exists(".cursor/hooks.json"):
+        try:
+            h = json.loads(open(".cursor/hooks.json", encoding="utf-8").read())
+            hooks = h.get("hooks") if isinstance(h, dict) else None
+            if hooks and any(
+                "agent-trace record" in str(v)
+                for v in (hooks.values() if isinstance(hooks, dict) else [])
+            ):
+                ok.append("Cursor hooks mention agent-trace record")
+            else:
+                warn.append("Cursor .cursor/hooks.json present but no agent-trace record hook found")
+        except (OSError, json.JSONDecodeError):
+            warn.append("Cursor .cursor/hooks.json is not valid JSON")
+    elif initialised:
+        warn.append("Cursor hooks not configured (.cursor/hooks.json missing)")
+
+    if os.path.exists(".claude/settings.json"):
+        try:
+            raw = open(".claude/settings.json", encoding="utf-8").read()
+            if "agent-trace record" in raw:
+                ok.append("Claude Code settings mention agent-trace record")
+            else:
+                warn.append("Claude .claude/settings.json present but no agent-trace record hook")
+        except OSError:
+            warn.append("Could not read .claude/settings.json")
+    elif initialised:
+        warn.append("Claude Code hooks not configured (.claude/settings.json missing)")
+
+    git_hook_ok = False
+    git_rewrite_ok = False
+    try:
+        if os.path.exists(".git/hooks/post-commit"):
+            with open(".git/hooks/post-commit", encoding="utf-8", errors="replace") as f:
+                git_hook_ok = "agent-trace commit-link" in f.read()
+    except OSError:
+        pass
+    try:
+        if os.path.exists(".git/hooks/post-rewrite"):
+            with open(".git/hooks/post-rewrite", encoding="utf-8", errors="replace") as f:
+                git_rewrite_ok = "agent-trace rewrite-ledger" in f.read()
+    except OSError:
+        pass
+    if git_hook_ok:
+        ok.append("Git post-commit hook calls agent-trace commit-link")
+    elif initialised and os.path.isdir(".git"):
+        warn.append("Git post-commit hook missing or does not call agent-trace commit-link")
+    if git_rewrite_ok:
+        ok.append("Git post-rewrite hook calls agent-trace rewrite-ledger")
+    elif initialised and os.path.isdir(".git"):
+        warn.append("Git post-rewrite hook missing or does not call agent-trace rewrite-ledger")
+
+    # Git notes refspec (optional hint)
+    if os.path.isdir(".git"):
+        fetch_all = _git_out(["config", "--get-all", "remote.origin.fetch"])
+        push_all = _git_out(["config", "--get-all", "remote.origin.push"])
+        blob = f"{fetch_all}\n{push_all}"
+        if "refs/notes/agent-trace" in blob:
+            ok.append("Git notes refspec present for origin (refs/notes/agent-trace)")
+        else:
+            warn.append(
+                "Git notes refspec not configured for origin "
+                "(optional; run init or git config --add remote.origin.fetch +refs/notes/agent-trace:...)",
+            )
+
+    # Sync remotes
+    if pid:
+        remotes = remote_list(pid)
+        if not remotes:
+            ok.append("No sync remotes configured (optional: agent-trace remote add)")
+        for r in remotes:
+            url = r.get("url") or ""
+            name = r.get("name", "?")
+            if not url:
+                warn.append(f"Remote '{name}' has no URL")
+                continue
+            alive, detail = _probe_remote_health(url)
+            if alive:
+                ok.append(f"Remote '{name}' responds ({detail})")
+            else:
+                warn.append(f"Remote '{name}' not reachable at {url} ({detail})")
+
+    # Summary command
+    summ = (cfg or {}).get("summary") if cfg else None
+    if isinstance(summ, dict) and summ.get("enabled"):
+        cmd = summ.get("command") or ""
+        parts = shlex.split(cmd) if cmd.strip() else []
+        if not parts:
+            err.append("summary.enabled but summary.command is empty")
+        else:
+            exe = parts[0]
+            if os.path.isfile(exe) or shutil.which(exe):
+                ok.append("Summary command first token is executable or on PATH")
+            else:
+                warn.append(f"Summary command may not run (not found: {exe})")
+
+    print("agent-trace doctor\n")
+    for line in ok:
+        print(f"  OK  {line}")
+    for line in warn:
+        print(f"  !!  {line}")
+    for line in err:
+        print(f"  XX  {line}")
+    print()
+    if err:
+        sys.exit(1)
 
 
 # ===================================================================
@@ -205,6 +466,8 @@ def cmd_status(_args):
 
     print("agent-trace status\n")
     print(f"  Storage:    local-first")
+    if config.get("label"):
+        print(f"  Label:      {config['label']}")
 
     if pid:
         print(f"  Project:    {pid}")
@@ -1019,6 +1282,7 @@ def main():
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     sub.add_parser("init", help="Initialize agent-trace for the current project")
+    sub.add_parser("doctor", help="Check hooks, config, remotes, and optional tools")
     sub.add_parser("status", help="Show agent-trace status")
     sub.add_parser("reset", help="Reset agent-trace configuration")
     sub.add_parser("record", help="Record a trace from stdin (used by hooks)")
@@ -1247,6 +1511,7 @@ def main():
 
     dispatch = {
         "init": cmd_init,
+        "doctor": cmd_doctor,
         "status": cmd_status,
         "reset": cmd_reset,
         "record": cmd_record,
