@@ -278,7 +278,10 @@ def attach_note_after_ledger(project_dir: str, ledger: dict[str, Any]) -> bool:
         include_ledger = bool(nc.get("include_ledger", True))
         include_summary = bool(nc.get("include_summary", False))
         include_prompts = bool(nc.get("include_prompts", False))
-        summaries = nc.get("summaries") if isinstance(nc.get("summaries"), dict) else None
+        from .summary import merge_note_summaries
+
+        static_s = nc.get("summaries") if isinstance(nc.get("summaries"), dict) else None
+        summaries = merge_note_summaries(project_dir, ledger, static_s)
 
         tid_list = [str(x) for x in ledger.get("trace_ids", [])]
         traces = load_traces_for_ids(project_dir, tid_list)
@@ -313,7 +316,9 @@ def rebuild_notes_for_range(
     il = include_ledger if include_ledger is not None else bool(nc.get("include_ledger", True))
     isum = include_summary if include_summary is not None else bool(nc.get("include_summary", False))
     ipr = include_prompts if include_prompts is not None else bool(nc.get("include_prompts", False))
-    summaries = nc.get("summaries") if isinstance(nc.get("summaries"), dict) else None
+    from .summary import merge_note_summaries
+
+    static_s = nc.get("summaries") if isinstance(nc.get("summaries"), dict) else None
 
     ledgers = load_local_ledgers(project_dir)
     out = _git("rev-list", range_spec, cwd=project_dir)
@@ -327,6 +332,7 @@ def rebuild_notes_for_range(
             continue
         tid_list = [str(x) for x in led.get("trace_ids", [])]
         traces = load_traces_for_ids(project_dir, tid_list)
+        summaries = merge_note_summaries(project_dir, led, static_s)
         note = build_note(
             led,
             traces,
@@ -367,7 +373,9 @@ def backfill_notes(
     il = include_ledger if include_ledger is not None else bool(nc.get("include_ledger", True))
     isum = include_summary if include_summary is not None else bool(nc.get("include_summary", False))
     ipr = include_prompts if include_prompts is not None else bool(nc.get("include_prompts", False))
-    summaries = nc.get("summaries") if isinstance(nc.get("summaries"), dict) else None
+    from .summary import merge_note_summaries
+
+    static_s = nc.get("summaries") if isinstance(nc.get("summaries"), dict) else None
 
     ledgers = load_local_ledgers(project_dir)
     count = 0
@@ -377,6 +385,7 @@ def backfill_notes(
             continue
         tid_list = [str(x) for x in led.get("trace_ids", [])]
         traces = load_traces_for_ids(project_dir, tid_list)
+        summaries = merge_note_summaries(project_dir, led, static_s)
         note = build_note(
             led,
             traces,

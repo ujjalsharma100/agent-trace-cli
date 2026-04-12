@@ -24,6 +24,8 @@ Commands:
     agent-trace remove globaluser Remove the global auth token
     agent-trace projects          List registered project IDs (or: projects show <id>)
     agent-trace adopt [path]      Register a git repo and print its stable project_id
+    agent-trace notes ...         Git notes (attach, rebuild, show, push, pull, …)
+    agent-trace summary ...       Pluggable session summaries (enable, generate, show)
 """
 
 from __future__ import annotations
@@ -784,6 +786,76 @@ def _resolve_note_section_flags(args, cwd: str) -> tuple[bool, bool, bool]:
     )
 
 
+def cmd_summary(args):
+    """Enable/disable/configure pluggable session summaries."""
+    from .storage import resolve_project_id
+    from .summary import get_summary_for_commit, run_summary_generate
+    from .git_notes import resolve_commit
+
+    cwd = os.getcwd()
+    action = getattr(args, "summary_action", None)
+
+    if action == "enable":
+        cfg = get_project_config(cwd)
+        if cfg is None:
+            print("agent-trace: project not initialised (run agent-trace init)", file=sys.stderr)
+            sys.exit(1)
+        # Use ``summary_command`` dest so we do not overwrite the top-level ``command`` (subcommand name).
+        cmd = getattr(args, "summary_command", None) or ""
+        if not cmd.strip():
+            print("agent-trace summary enable: --command is required", file=sys.stderr)
+            sys.exit(1)
+        cfg.setdefault("summary", {})
+        cfg["summary"]["enabled"] = True
+        cfg["summary"]["command"] = cmd
+        to = getattr(args, "summary_timeout", None)
+        if to is not None:
+            cfg["summary"]["timeout_seconds"] = int(to)
+        save_project_config(cfg, cwd)
+        print("Session summaries enabled.")
+        return
+
+    if action == "disable":
+        cfg = get_project_config(cwd)
+        if cfg is None:
+            print("agent-trace: project not initialised", file=sys.stderr)
+            sys.exit(1)
+        cfg.setdefault("summary", {})
+        cfg["summary"]["enabled"] = False
+        save_project_config(cfg, cwd)
+        print("Session summaries disabled.")
+        return
+
+    if action == "generate":
+        sid = getattr(args, "session_id", None) or ""
+        if not str(sid).strip():
+            print("agent-trace summary generate: session_id required", file=sys.stderr)
+            sys.exit(1)
+        out = run_summary_generate(cwd, str(sid))
+        if out is None:
+            print("agent-trace summary generate: failed or no traces for session", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(out, indent=2))
+        return
+
+    if action == "show":
+        rev = getattr(args, "commit", None) or "HEAD"
+        sha = resolve_commit(cwd, rev)
+        if not sha:
+            print(f"agent-trace summary show: bad revision: {rev}", file=sys.stderr)
+            sys.exit(1)
+        pid = resolve_project_id(cwd, create=False)
+        if not pid:
+            print("agent-trace summary show: no project id", file=sys.stderr)
+            sys.exit(1)
+        s = get_summary_for_commit(pid, sha)
+        if not s:
+            print(f"No summaries stored for {sha}", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(s, indent=2))
+        return
+
+
 def cmd_notes(args):
     """Manage per-commit JSON notes on ``refs/notes/agent-trace``."""
     from .git_notes import (
@@ -837,9 +909,12 @@ def cmd_notes(args):
         traces = load_traces_for_ids(cwd, tid_list)
         summaries = None
         if isum:
+            from .summary import merge_note_summaries
+
             cfg = get_project_config(cwd) or {}
-            s = (cfg.get("notes") or {}).get("summaries")
-            summaries = s if isinstance(s, dict) else None
+            nc = cfg.get("notes") or {}
+            static_s = nc.get("summaries") if isinstance(nc.get("summaries"), dict) else None
+            summaries = merge_note_summaries(cwd, led, static_s)
         note = build_note(
             led,
             traces,
@@ -1142,6 +1217,28 @@ def main():
     ns_npull = notes_sub.add_parser("pull", help="Fetch refs/notes/agent-trace from a remote")
     ns_npull.add_argument("--remote", default="origin")
 
+    sub_summary = sub.add_parser("summary", help="Pluggable session summaries (command reads stdin JSON)")
+    sum_sub = sub_summary.add_subparsers(dest="summary_action", metavar="ACTION", required=True)
+    s_en = sum_sub.add_parser("enable", help="Enable and set the summary command")
+    s_en.add_argument(
+        "--command",
+        dest="summary_command",
+        required=True,
+        help="Executable: JSON on stdin, JSON object on stdout",
+    )
+    s_en.add_argument(
+        "--timeout",
+        dest="summary_timeout",
+        type=int,
+        default=None,
+        help="Timeout seconds (default 30)",
+    )
+    sum_sub.add_parser("disable", help="Disable session-end summaries")
+    s_gen = sum_sub.add_parser("generate", help="Re-run summary for a session id")
+    s_gen.add_argument("session_id", help="conversation_id / session_id")
+    s_show = sum_sub.add_parser("show", help="Show merged file summaries for a commit")
+    s_show.add_argument("commit", nargs="?", default="HEAD", help="Commit (default HEAD)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -1182,6 +1279,8 @@ def main():
             cmd_remove_globaluser(args)
         else:
             rm_p.print_help()
+    elif args.command == "summary":
+        cmd_summary(args)
 
 
 if __name__ == "__main__":

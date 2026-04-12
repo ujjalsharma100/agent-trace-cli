@@ -435,10 +435,15 @@ def record_from_stdin():
 
     event = data.get("hook_event_name", "")
 
-    # Conversation-sync-only events — no trace record to create.
-    # Under the new local-first model these are no-ops at record time.
-    # Conversation content will be synced via ``agent-trace push``.
+    # Session-end: optional pluggable summary (Phase 6); no trace record.
+    # Conversation content syncs via ``agent-trace push``.
     if event in ("afterAgentResponse", "Stop", "stop"):
+        try:
+            from .summary import run_session_summary_hook
+
+            run_session_summary_hook(data)
+        except Exception:
+            pass
         return
 
     handler = _CURSOR.get(event) or _CLAUDE.get(event)

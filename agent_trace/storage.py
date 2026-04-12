@@ -79,6 +79,11 @@ def get_session_state_path(project_id: str) -> Path:
     return get_project_dir(project_id) / "session-state.json"
 
 
+def get_session_summaries_path(project_id: str) -> Path:
+    """Append-only JSONL of per-session LLM summaries (Phase 6)."""
+    return get_project_dir(project_id) / "session-summaries.jsonl"
+
+
 def get_project_config_path(project_id: str) -> Path:
     return get_project_dir(project_id) / "project-config.json"
 

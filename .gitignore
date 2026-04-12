@@ -8,3 +8,4 @@ build/
 .env
 node_modules/
 viewer/frontend/node_modules/
+.pytest_agent_trace_tmp/
