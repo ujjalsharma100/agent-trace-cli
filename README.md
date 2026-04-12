@@ -2,31 +2,36 @@
 
 A command-line tool for tracing AI-generated code changes across coding agents like **Cursor** and **Claude Code**. Includes the **file viewer** for browsing files with git + agent-trace blame in your browser.
 
-This implementation is built to the [Agent Trace](https://agent-trace.dev/) specification.
+This implementation follows the [Agent Trace](https://agent-trace.dev/) specification and the **redesign** described in the umbrella workspace: deterministic-only attribution, local-first storage, **git-like** `push` / `pull` / `sync`, **git notes** (`refs/notes/agent-trace`) for sharing metadata with the repo, and an optional HTTP remote as a **pure datastore** (no server-side blame).
 
-Works in two modes:
-- **Local** — traces saved to `.agent-trace/traces.jsonl` in your project (no server needed)
-- **Remote** — traces sent to the [agent-trace-service](../agent-trace-service/) for centralized storage
+**Documentation** (paths work in a full **agent-trace** workspace; if you cloned only this repo, open the same filenames from the umbrella repository root):
 
-Use **`agent-trace blame <file>`** to see which lines in a file are attributed to AI traces (works in both local and remote mode).
+- [AGENT-TRACE-NEW-PROPOSAL.md](../AGENT-TRACE-NEW-PROPOSAL.md) — product and architecture principles
+- [IMPLEMENTATION-PLAN.md](../IMPLEMENTATION-PLAN.md) — phased implementation (core path complete)
+
+**How it behaves:**
+
+- **Local-first** — Hooks write to JSONL under `AGENT_TRACE_HOME` (default `~/.agent-trace/`). The repo only contains a small **`.agent-trace/project.json`** pointer (stable `project_id`). Data lives in `~/.agent-trace/projects/<project_id>/`.
+- **Optional remote** — Configure a named remote (`agent-trace remote`) and run **`agent-trace push` / `pull` / `sync`** when you want to mirror traces, ledgers, commit-links, and conversations to [agent-trace-service](../agent-trace-service/). Nothing syncs automatically during editing.
+- **Git notes** — `agent-trace notes …` attaches composable JSON to commits so attribution can travel with `git fetch` without any service.
+
+Use **`agent-trace blame <file>`** for per-line **AI**, **HUMAN**, **MIXED**, or **UNKNOWN** labels from the ledger (and git note inline ledger when present). There is **no heuristic blame path**: if there is no ledger (and no usable git note), lines are **UNKNOWN**.
 
 **Zero external dependencies** — uses only the Python standard library (requires Python 3.9+).
 
 ---
 
-## Attribution Ledger
+## Attribution ledger
 
-The CLI includes a **deterministic attribution ledger** that records per-line authorship at commit time. Instead of relying on heuristic scoring at blame time, the post-commit hook builds an attribution ledger that definitively maps each changed line to its origin (AI, human, or mixed) by comparing committed content against trace-level line hashes.
+The **deterministic attribution ledger** is built at **commit time** by the post-commit hook. Each changed line is classified by comparing committed line content (SHA-256 per line) against trace line hashes — not by scoring or probabilities at blame time.
 
-How it works:
+1. **Per-line content hashing** — Traces record hashes for touched lines so matching survives inserts and reordering within reason.
+2. **Session edit sequence** — Resolves “last writer wins” when multiple traces touch the same line.
+3. **Post-commit hook** — Runs `agent-trace commit-link`: links the commit to traces and appends a ledger for that commit.
+4. **Cross-file matching** — The ledger builder can match hashes across files (e.g. moves/refactors) when appropriate.
+5. **Post-rewrite hook** — After rebase or amend, `agent-trace rewrite-ledger` remaps ledger commit SHAs.
 
-1. **Per-line content hashing** — Each trace records SHA-256 hashes for every line it touches, enabling position-independent matching even after lines are moved or reordered.
-2. **Session edit sequence** — Edits within a session are numbered so the ledger can resolve "last writer wins" when multiple traces touch the same line.
-3. **Post-commit hook** — After `git commit`, the hook builds the ledger by diffing HEAD against its parent, identifying changed lines, and matching their content hashes against trace records.
-4. **Cross-file matching** — If a line's hash doesn't match any trace for the current file, the ledger searches all traces across all files to catch code that was moved or refactored between files.
-5. **Post-rewrite hook** — After `git rebase` or `git commit --amend`, ledger commit SHAs are automatically remapped to the new SHAs.
-
-When `agent-trace blame` runs, it checks the ledger first. If a ledger exists for a commit, attribution is deterministic (confidence 1.0). The heuristic scoring engine is only used as a fallback for commits that predate the ledger.
+`agent-trace blame` uses the ledger only. Missing ledger → **UNKNOWN** (honest absence of proof, not a guess).
 
 ---
 
@@ -77,14 +82,7 @@ Then remove the `# agent-trace` + `export PATH=...` lines from your `~/.zshrc` /
 
 ### `agent-trace init`
 
-Initialize tracing for the current project. You'll be prompted for:
-
-1. **Storage mode** — `local` or `remote`
-2. **Project ID** — (remote only)
-3. **Auth Token** — (remote only, skipped if global token is set)
-4. **Configure Cursor hook?** — yes/no
-5. **Configure Claude Code hook?** — yes/no
-6. **Configure git hooks?** — yes/no (installs post-commit + post-rewrite hooks for attribution)
+Initialize tracing for the current project (interactive): project label, optional **remote** URL and token, **git notes** (refspecs + optional sections), **hooks** (Cursor, Claude Code, git post-commit / post-rewrite), and optional **summary** command for note enrichment.
 
 ```bash
 cd my-project
@@ -93,10 +91,18 @@ agent-trace init
 
 ### `agent-trace status`
 
-Show current configuration, trace count, commit link count, ledger count (local), or remote connection info. Also shows which hooks are configured.
+Show project id, storage paths, counts, hook status, remote/sync-related status, and whether unpushed data exists (git-style overview).
 
 ```bash
 agent-trace status
+```
+
+### `agent-trace doctor`
+
+Verify hooks, config, storage, remotes, and optional tools (e.g. summary command).
+
+```bash
+agent-trace doctor
 ```
 
 ### `agent-trace reset`
@@ -251,6 +257,26 @@ Remove the global auth token.
 agent-trace remove globaluser
 ```
 
+### `agent-trace remote` — `add` | `list` | `show` | `set-url` | `set-token` | `remove` | `rename` | `default`
+
+Manage named HTTP remotes (like `git remote`). Defaults are used by `push` / `pull` / `sync`.
+
+### `agent-trace push` | `pull` | `sync`
+
+Explicit sync with the configured service: upload/download traces, ledgers, commit-links, and conversations (see `agent-trace push --help` for options such as attributed-only vs full scope).
+
+### `agent-trace notes` — `show` | `attach` | `rebuild` | `backfill` | `strip` | `push` | `pull`
+
+Build and manage JSON under **`refs/notes/agent-trace`** so teammates can receive trace pointers and optional inline ledgers via normal git fetch.
+
+### `agent-trace summary` — `enable` | `disable` | `generate` | `show`
+
+Optional pluggable summaries (user-defined command) for session or commit note sections.
+
+### `agent-trace projects` | `adopt`
+
+List registered projects or adopt a repo directory and print its `project_id`.
+
 ---
 
 ## Configuration
@@ -272,25 +298,13 @@ AGENT_TRACE_URL=http://localhost:5000
 
 Edit this file after install to point at your service. See `.env.example` for reference.
 
-### Project — `.agent-trace/config.json`
+### In-repo pointer — `.agent-trace/project.json`
 
-Created by `agent-trace init` in each project directory.
+Checked in (small file). Contains **`project_id`** so the CLI resolves `~/.agent-trace/projects/<project_id>/`. May include notes-related fields depending on init.
 
-**Local mode:**
-```json
-{
-  "storage": "local"
-}
-```
+### Project settings — `AGENT_TRACE_HOME/projects/<project_id>/project-config.json`
 
-**Remote mode:**
-```json
-{
-  "storage": "remote",
-  "project_id": "my-project",
-  "service_url": "http://localhost:5000"
-}
-```
+Created/managed by `agent-trace init`. Holds storage mode, optional service URL and token, `label`, `notes.*`, `summary.*`, remotes, etc. **Do not commit** this file; it stays under `AGENT_TRACE_HOME`.
 
 ### Resolution order
 
@@ -361,39 +375,44 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
 
 ```
 ~/.agent-trace/
-  .env                         # service URL config (from .env.example)
+  .env                         # default service URL (from .env.example)
   bin/agent-trace              # CLI executable (on PATH)
   bin/agent-trace-viewer       # viewer launcher (on PATH)
   lib/agent_trace/             # Python source
     __init__.py
     cli.py                     # CLI commands (argparse)
-    config.py                  # Global + project config management
+    config.py                  # Global + project resolution (project.json → project_id)
     hooks.py                   # Cursor, Claude Code & git hook setup
-    record.py                  # Trace recording (local JSONL / remote HTTP)
+    record.py                  # Trace recording from hooks
     trace.py                   # Trace record construction + per-line hashing
-    blame.py                   # AI blame / attribution (ledger-first + heuristic fallback)
-    context.py                 # Conversation context retrieval for AI-attributed code
-    rules.py                   # Prebuilt agent rules management (Cursor, Claude Code)
-    commit_link.py             # Commit-to-trace linking + ledger building (git hook)
-    ledger.py                  # Attribution ledger construction (deterministic per-line attribution)
-    rewrite.py                 # Post-rewrite ledger SHA remapping
+    blame.py                   # Deterministic blame (ledger + git notes; UNKNOWN when missing)
+    context.py                 # Conversation context for AI-attributed segments
+    rules.py                   # Prebuilt agent rules (Cursor, Claude Code)
+    commit_link.py             # Commit-link + ledger build (post-commit)
+    ledger.py                  # Ledger construction
+    rewrite.py                 # Post-rewrite SHA remapping
+    sync.py                    # Push/pull/sync to HTTP remote
+    git_notes.py               # Git notes (refs/notes/agent-trace)
+    remote.py                  # Named remotes
+    ...
   viewer/                      # file viewer (installed by install.sh)
-    run_viewer.py              # viewer entry point
-    backend/                   # Python backend (serves API + static files)
-    frontend/                  # React frontend source + pre-built dist/
   config.json                  # global config (auth_token)
+
+~/.agent-trace/projects/<project_id>/
+  project-config.json          # project settings (not in git)
+  traces.jsonl
+  commit-links.jsonl
+  ledgers.jsonl
+  session-state.json
+  sync-state.json              # push/pull cursors (when using remote)
 
 <your-project>/
   .agent-trace/
-    config.json                # project config (storage, project_id)
-    traces.jsonl               # local traces (when storage=local)
-    commit-links.jsonl         # commit → trace links (when storage=local; used by blame)
-    ledgers.jsonl              # attribution ledgers (one per commit; deterministic blame)
-    session-state.json         # session edit sequence counters
+    project.json               # checked-in: project_id (and optional note defaults)
   .cursor/hooks.json           # Cursor hooks
   .claude/settings.json        # Claude Code hooks
-  .git/hooks/post-commit       # calls agent-trace commit-link (builds ledger)
-  .git/hooks/post-rewrite      # calls agent-trace rewrite-ledger (remaps SHAs)
+  .git/hooks/post-commit       # agent-trace commit-link
+  .git/hooks/post-rewrite      # agent-trace rewrite-ledger
 ```
 
 ## License
