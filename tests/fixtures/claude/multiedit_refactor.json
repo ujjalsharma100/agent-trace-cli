@@ -1,0 +1,13 @@
+{
+  "hook_event_name": "PostToolUse",
+  "tool_name": "MultiEdit",
+  "tool_input": {
+    "file_path": "app.py",
+    "edits": [
+      {"old_string": "FOO", "new_string": "BAR"},
+      {"old_string": "old_fn", "new_string": "new_fn"}
+    ]
+  },
+  "session_id": "sess-example",
+  "tool_use_id": "toolu_02"
+}

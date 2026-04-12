@@ -41,15 +41,17 @@ function countDistinctLinesCovered(attributions) {
   return lineSet.size;
 }
 
-/** True when this attribution is a "no attribution" segment (local mode: no trace, no tier, no label). */
+/** True when this attribution is a "no AI" segment (UNKNOWN, human, or unlabeled). */
 function isNoAttribution(attr) {
   if (!attr) return true;
+  if (attr.kind === 'UNKNOWN') return true;
   const hasTrace = attr.trace_id != null && attr.trace_id !== '';
   if (hasTrace) return false;
   const label = attr.attribution_label;
   const hasLabel = label != null && label !== '';
   const hasTier = attr.tier != null;
-  return !hasLabel && !hasTier;
+  const hasKind = attr.kind != null && attr.kind !== '';
+  return !hasLabel && !hasTier && !hasKind;
 }
 
 /** Line ranges (start, end) that have no attribution */

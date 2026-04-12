@@ -1,8 +1,7 @@
 """
-/api/agent-trace-blame — run agent-trace blame (local or remote from config).
+/api/agent-trace-blame — run agent-trace blame via the CLI library.
 
-Reads project config; if storage == "local" uses CLI lib with project_dir;
-if storage == "remote" POSTs to service /api/v1/blame. Returns same contract as CLI --json.
+Uses ledger-backed deterministic attribution (same contract as ``agent-trace blame --json``).
 Requires ~/.agent-trace/lib on sys.path (added by main.py) to import agent_trace.
 """
 from __future__ import annotations
@@ -46,6 +45,7 @@ def get_agent_trace_blame(
         result_json = blame_module.blame_file(
             file_path_for_blame,
             json_output=True,
+            show_unknown=True,
             project_dir=project_root,
         )
     except TypeError:
@@ -56,6 +56,7 @@ def get_agent_trace_blame(
             result_json = blame_module.blame_file(
                 file_path_for_blame,
                 json_output=True,
+                show_unknown=True,
             )
         finally:
             os.chdir(orig_cwd)

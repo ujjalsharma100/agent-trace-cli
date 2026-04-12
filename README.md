@@ -211,29 +211,29 @@ Rules are written to:
 
 ### `agent-trace blame <file>`
 
-Show **AI attribution** for a file: which lines (or segments) are attributed to AI traces. Works in both **local** and **remote** mode:
+Show **AI attribution** for a file using **deterministic, ledger-only** logic:
 
-- **Ledger-first** — If an attribution ledger exists for a commit, blame uses it directly with deterministic confidence. Lines are labelled `[AI]`, `[Human]`, or `[Mixed]`.
-- **Heuristic fallback** — For commits without a ledger, falls back to the heuristic scoring engine (confidence tiers 1–6).
-- **Local** — Uses `.agent-trace/traces.jsonl`, `.agent-trace/commit-links.jsonl`, and `.agent-trace/ledgers.jsonl` in the project.
-- **Remote** — Queries the agent-trace-service for ledgers and traces.
+- **Ledger** — For each commit, if `.agent-trace/ledgers.jsonl` contains a ledger (built at commit time from traces and line hashes), lines are labelled **AI**, **HUMAN**, or **MIXED** according to that ledger.
+- **UNKNOWN** — If there is no ledger for the introducing commit, or a line range is not covered by the ledger, the output is **UNKNOWN** (nothing is inferred from heuristics or scoring).
 
-The command runs `git blame --porcelain` on the file, groups lines by commit, then checks for a ledger before falling back to the scoring algorithm. See the service [ATTRIBUTION-ALGORITHM.md](../agent-trace-service/ATTRIBUTION-ALGORITHM.md) for how heuristic attribution works.
+The command runs `git blame --porcelain`, groups lines by commit, then resolves attribution from the ledger only. Traces in `.agent-trace/traces.jsonl` are used to enrich model and tool metadata when a `trace_id` is present in the ledger.
 
 ```bash
 agent-trace blame src/utils/parser.ts
 agent-trace blame src/utils/parser.ts --line 42
 agent-trace blame src/utils/parser.ts --range 10-100
 agent-trace blame src/utils/parser.ts --json
-agent-trace blame src/utils/parser.ts --min-tier 4   # Only show tier 1–4 (higher confidence)
+agent-trace blame src/utils/parser.ts --show-unknown    # Include UNKNOWN ranges in output
+agent-trace blame src/utils/parser.ts --require-attribution   # Exit 1 if any line is UNKNOWN (CI)
 ```
 
 | Option | Short | Description |
 |--------|--------|-------------|
 | `--line` | `-l` | Blame a single line |
 | `--range` | `-r` | Blame a line range (e.g. `10-25`) |
-| `--json` | | Output attributions as JSON |
-| `--min-tier` | | Minimum tier to show (1–6; default 6). Lower number = only higher-confidence attributions. |
+| `--json` | | Output attributions as JSON (`kind`: `AI`, `HUMAN`, `MIXED`, `UNKNOWN`) |
+| `--show-unknown` | | List UNKNOWN ranges (default is to omit them from text output) |
+| `--require-attribution` | | Fail with non-zero exit if any line would be UNKNOWN |
 
 ### `agent-trace set globaluser <token>`
 

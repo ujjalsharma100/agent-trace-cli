@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "afterFileEdit",
+  "file_path": "notes.md",
+  "edits": [
+    {"old_string": "", "new_string": "# Title\n\nBody.\n"}
+  ],
+  "conversation_id": "conv-example",
+  "generation_id": "gen-1"
+}

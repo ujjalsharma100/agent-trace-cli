@@ -65,6 +65,78 @@ def _try_read_file(path):
         return None
 
 
+def _file_existed_before(file_path: str) -> bool:
+    """Whether the file existed before this edit (for metadata)."""
+    try:
+        return Path(file_path).exists()
+    except OSError:
+        return False
+
+
+def _ranges_from_write(_file_path: str, content: str) -> tuple[list | None, list | None]:
+    """For Write tool: entire file is the new content."""
+    if not content:
+        return None, None
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    line_count = normalized.count("\n") + (0 if normalized.endswith("\n") else 1)
+    if line_count <= 0:
+        return None, None
+    rp = [{"start_line": 1, "end_line": line_count}]
+    rc = [content]
+    return rp, rc
+
+
+def _ranges_from_edit(file_path: str, old_string: str, new_string: str) -> tuple[list | None, list | None]:
+    """For Edit tool: single old/new pair."""
+    if not new_string:
+        return None, None
+    edits = [{"old_string": old_string, "new_string": new_string}]
+    fc = _try_read_file(file_path) if file_path else None
+    rp = compute_range_positions(edits, fc)
+    rc = [new_string]
+    return rp, rc
+
+
+def _ranges_from_multiedit(file_path: str, edits: list) -> tuple[list | None, list | None]:
+    """For MultiEdit: replay edits in order, emit one range per edit."""
+    if not edits:
+        return None, None
+    buffer = _try_read_file(file_path) or ""
+    rp: list[dict] = []
+    rc: list[str] = []
+    for edit in edits:
+        if not isinstance(edit, dict):
+            continue
+        old = edit.get("old_string", "")
+        new = edit.get("new_string", "")
+        if not new:
+            continue
+        if old == "":
+            start = 1
+            end = new.count("\n") + 1
+        else:
+            idx = buffer.find(old)
+            if idx < 0:
+                continue
+            start = buffer[:idx].count("\n") + 1
+            end = start + new.count("\n")
+        rp.append({"start_line": start, "end_line": end})
+        rc.append(new)
+        buffer = buffer.replace(old, new, 1) if old else new
+    return (rp if rp else None), (rc if rc else None)
+
+
+def _ranges_from_notebook(_notebook_path: str, ti: dict) -> tuple[list | None, list | None]:
+    """For NotebookEdit: cell source as content; line numbers are cell-local."""
+    new_source = ti.get("new_source", "")
+    if not new_source:
+        return None, None
+    line_count = new_source.count("\n") + 1
+    rp = [{"start_line": 1, "end_line": line_count}]
+    rc = [new_source]
+    return rp, rc
+
+
 def _collect_conversation_contents(trace):
     """Walk all files→conversations, read local file:// URLs (deduplicated)."""
     seen: dict[str, str | None] = {}  # url → content (or None if unreadable)
@@ -173,23 +245,59 @@ _CURSOR = {
 
 def _claude_PostToolUse(d):
     tn = d.get("tool_name", "")
-    is_file = tn in ("Write", "Edit")
-    is_bash = tn == "Bash"
-    if not is_file and not is_bash:
-        return None, "PostToolUse"
+    if tn == "Bash":
+        ti = d.get("tool_input", {})
+        session_id = d.get("session_id") or ""
+        seq = _get_next_sequence(session_id) if session_id else None
+        return create_trace(
+            "ai", ".shell-history",
+            model=d.get("model"),
+            transcript=d.get("transcript_path"),
+            metadata={
+                "session_id": d.get("session_id"),
+                "tool_name": tn,
+                "tool_use_id": d.get("tool_use_id"),
+                "command": ti.get("command"),
+            },
+            edit_sequence=seq,
+        ), "PostToolUse"
 
     ti = d.get("tool_input", {})
-    fp = ".shell-history" if is_bash else ti.get("file_path", ".unknown")
+    fp = ti.get("file_path") or ti.get("notebook_path") or ".unknown"
 
-    rp, rc = None, None
-    if is_file and ti.get("new_string"):
-        edits = [{"old_string": ti.get("old_string", ""), "new_string": ti["new_string"]}]
-        fc = _try_read_file(ti.get("file_path", "")) if ti.get("file_path") else None
-        rp = compute_range_positions(edits, fc)
-        rc = [ti["new_string"]]
+    if tn == "Write":
+        existed = _file_existed_before(fp)
+        rp, rc = _ranges_from_write(fp, ti.get("content", ""))
+        meta_extra: dict = {
+            "is_creation": not existed,
+        }
+    elif tn == "Edit":
+        rp, rc = _ranges_from_edit(fp, ti.get("old_string", ""), ti.get("new_string", ""))
+        meta_extra = {}
+    elif tn == "MultiEdit":
+        rp, rc = _ranges_from_multiedit(fp, ti.get("edits", []))
+        meta_extra = {}
+    elif tn == "NotebookEdit":
+        fp = ti.get("notebook_path", fp)
+        rp, rc = _ranges_from_notebook(fp, ti)
+        cell_id = ti.get("cell_id")
+        meta_extra = {"cell_id": cell_id} if cell_id is not None else {}
+    else:
+        return None, "PostToolUse"
+
+    if rp is None or rc is None:
+        return None, "PostToolUse"
 
     session_id = d.get("session_id") or ""
     seq = _get_next_sequence(session_id) if session_id else None
+
+    metadata: dict = {
+        "session_id": d.get("session_id"),
+        "tool_name": tn,
+        "tool_use_id": d.get("tool_use_id"),
+    }
+    metadata = {k: v for k, v in metadata.items() if v is not None}
+    metadata.update(meta_extra)
 
     return create_trace(
         "ai", fp,
@@ -197,12 +305,7 @@ def _claude_PostToolUse(d):
         range_positions=rp,
         range_contents=rc,
         transcript=d.get("transcript_path"),
-        metadata={
-            "session_id": d.get("session_id"),
-            "tool_name": tn,
-            "tool_use_id": d.get("tool_use_id"),
-            "command": ti.get("command") if is_bash else None,
-        },
+        metadata=metadata,
         edit_sequence=seq,
     ), "PostToolUse"
 

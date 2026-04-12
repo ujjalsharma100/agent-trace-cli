@@ -143,6 +143,7 @@ def get_context(
         start_line=start_line,
         end_line=end_line,
         json_output=True,
+        show_unknown=True,
         project_dir=cwd,
     )
 
@@ -170,18 +171,21 @@ def get_context(
         attr_start = attr.get("start_line", 0)
         attr_end = attr.get("end_line", 0)
 
-        # Determine attribution type
-        tier = attr.get("tier")
-        source = attr.get("source", "")
+        # Determine attribution type (deterministic blame: kind + ledger labels)
+        kind = attr.get("kind", "")
         attribution_label = attr.get("attribution_label", "")
         contributor_type = attr.get("contributor_type", "")
 
         is_ai = (
-            tier is not None
+            kind == "AI"
             or attribution_label == "AI"
             or contributor_type == "ai"
         )
-        is_mixed = attribution_label == "Mixed" or contributor_type == "mixed"
+        is_mixed = (
+            kind == "MIXED"
+            or attribution_label == "Mixed"
+            or contributor_type == "mixed"
+        )
 
         if not is_ai and not is_mixed:
             # Human or no attribution — include as a simple segment

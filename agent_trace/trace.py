@@ -136,6 +136,13 @@ def compute_range_positions(
         if not new_string:
             continue
 
+        old_string = edit.get("old_string", "")
+        if not old_string:
+            # File creation, full replace, or prepend — attribute from line 1
+            line_count = new_string.count("\n") + 1
+            positions.append({"start_line": 1, "end_line": line_count})
+            continue
+
         rng = edit.get("range")
         if rng:
             positions.append({

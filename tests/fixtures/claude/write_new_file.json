@@ -1,0 +1,10 @@
+{
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "src/new_module.py",
+    "content": "def main():\n    print(\"hello\")\n"
+  },
+  "session_id": "sess-example",
+  "tool_use_id": "toolu_01"
+}

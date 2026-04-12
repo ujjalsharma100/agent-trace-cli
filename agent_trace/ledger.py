@@ -41,6 +41,31 @@ def _git(*args: str, cwd: str | None = None) -> str | None:
     return None
 
 
+def _get_rename_map(
+    parent_sha: str,
+    commit_sha: str,
+    cwd: str | None = None,
+) -> dict[str, str]:
+    """Return ``{ new_path: old_path }`` for renames between parent and commit."""
+    out = _git_raw("diff", "--find-renames", "--name-status", parent_sha, commit_sha, cwd=cwd)
+    if not out:
+        return {}
+    renames: dict[str, str] = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        status = parts[0]
+        if not status.startswith("R"):
+            continue
+        old_path, new_path = parts[1], parts[2]
+        renames[new_path] = old_path
+    return renames
+
+
 def _git_raw(*args: str, cwd: str | None = None) -> str | None:
     """Run a git command and return raw stdout (not stripped), or None."""
     try:
@@ -142,9 +167,25 @@ def _compute_file_line_hashes(content: str) -> dict[int, str]:
 # Trace indexing
 # -------------------------------------------------------------------
 
+def _trace_file_matches(
+    fpath: str,
+    primary: str,
+    alternates: list[str] | None,
+) -> bool:
+    """Whether trace file path ``fpath`` refers to ``primary`` or an alternate (e.g. pre-rename)."""
+    if fpath == primary or fpath.endswith(primary) or primary.endswith(fpath):
+        return True
+    if alternates:
+        for alt in alternates:
+            if fpath == alt or fpath.endswith(alt) or alt.endswith(fpath):
+                return True
+    return False
+
+
 def _build_trace_hash_index(
     traces: list[dict[str, Any]],
     file_path: str,
+    alternate_paths: list[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Build a map from line content hash → trace metadata.
 
@@ -171,7 +212,7 @@ def _build_trace_hash_index(
             if not isinstance(fe, dict):
                 continue
             fpath = fe.get("path", "")
-            if fpath != file_path and not fpath.endswith(file_path) and not file_path.endswith(fpath):
+            if not _trace_file_matches(fpath, file_path, alternate_paths):
                 continue
 
             for conv in fe.get("conversations", []):
@@ -278,6 +319,7 @@ def _build_cross_file_hash_index(
 def _build_range_claim_index(
     traces: list[dict[str, Any]],
     file_path: str,
+    alternate_paths: list[str] | None = None,
 ) -> dict[int, list[dict[str, Any]]]:
     """Build a map from line_number → list of trace claims.
 
@@ -298,7 +340,7 @@ def _build_range_claim_index(
             if not isinstance(fe, dict):
                 continue
             fpath = fe.get("path", "")
-            if fpath != file_path and not fpath.endswith(file_path) and not file_path.endswith(fpath):
+            if not _trace_file_matches(fpath, file_path, alternate_paths):
                 continue
 
             for conv in fe.get("conversations", []):
@@ -461,6 +503,10 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
     if not changed_files:
         return None
 
+    rename_map: dict[str, str] = (
+        _get_rename_map(parent_sha, commit_sha, project_dir) if parent_sha else {}
+    )
+
     # Find candidate traces (may be empty for pure-human commits).
     # revision_matched: traces at parent revision → range claims valid
     # timestamp_matched: traces in time window → hash matching only
@@ -479,6 +525,11 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
     files_attributions: dict[str, dict[str, Any]] = {}
 
     for file_path in changed_files:
+        alt_paths: list[str] | None = None
+        old_p = rename_map.get(file_path)
+        if old_p:
+            alt_paths = [old_p]
+
         # Read committed file content
         file_content = _git_raw("show", f"HEAD:{file_path}", cwd=project_dir)
         if file_content is None:
@@ -510,12 +561,16 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
         # Hash index: use ALL candidates (revision + timestamp).
         # Content-hash matching is position-independent so it's safe
         # across file versions.
-        trace_hash_index = _build_trace_hash_index(all_candidates, file_path)
+        trace_hash_index = _build_trace_hash_index(
+            all_candidates, file_path, alternate_paths=alt_paths,
+        )
 
         # Range claim index: ONLY from revision-matched traces.
         # Range claims are position-based and only valid when the trace
         # describes the same version of the file (parent revision).
-        range_claim_index = _build_range_claim_index(revision_matched, file_path)
+        range_claim_index = _build_range_claim_index(
+            revision_matched, file_path, alternate_paths=alt_paths,
+        )
 
         # Cross-file hash fallback: if no traces directly claim this file,
         # search all traces' line hashes regardless of file path.

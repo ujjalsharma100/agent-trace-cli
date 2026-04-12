@@ -350,7 +350,8 @@ def cmd_blame(args):
         line=getattr(args, "line", None),
         start_line=start_line,
         end_line=end_line,
-        min_tier=getattr(args, "min_tier", 6),
+        show_unknown=getattr(args, "show_unknown", False),
+        require_attribution=getattr(args, "require_attribution", False),
         json_output=getattr(args, "json", False),
     )
     if result is not None:
@@ -486,8 +487,18 @@ def main():
                            help="Line range (e.g. 10-25)")
     sub_blame.add_argument("--json", action="store_true", default=False,
                            help="Output as JSON")
-    sub_blame.add_argument("--min-tier", type=int, default=6,
-                           help="Minimum confidence tier to show (1-6)")
+    sub_blame.add_argument(
+        "--show-unknown",
+        action="store_true",
+        default=False,
+        help="Include lines with no ledger (UNKNOWN); default is to omit them",
+    )
+    sub_blame.add_argument(
+        "--require-attribution",
+        action="store_true",
+        default=False,
+        help="Exit with non-zero status if any line is UNKNOWN (for CI)",
+    )
 
     # context <file>
     sub_context = sub.add_parser("context", help="Get conversation context for AI-attributed code")
