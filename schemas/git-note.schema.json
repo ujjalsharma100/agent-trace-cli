@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-trace.dev/schemas/git-note/v1.0",
+  "$id": "https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/schemas/git-note.schema.json",
   "title": "GitNotePayload",
   "description": "JSON blob under refs/notes/agent-trace. Core fields are always present when notes are enabled; ledger, summary, and prompts are optional independent sections.",
   "type": "object",

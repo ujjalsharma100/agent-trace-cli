@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-trace.dev/schemas/ledger/v2.0",
+  "$id": "https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/schemas/ledger.schema.json",
   "title": "AttributionLedger",
   "description": "One line in ledgers.jsonl. v2.0 schema documents the same shape produced since v1.0; the embedded version field may remain 1.0 until a format bump.",
   "type": "object",

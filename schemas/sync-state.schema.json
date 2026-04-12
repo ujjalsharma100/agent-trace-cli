@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-trace.dev/schemas/sync-state/v1.0",
+  "$id": "https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/schemas/sync-state.schema.json",
   "title": "SyncState",
   "description": "Push/pull cursors per remote (~/.agent-trace/projects/<id>/sync-state.json). Timestamps are ISO-8601.",
   "type": "object",

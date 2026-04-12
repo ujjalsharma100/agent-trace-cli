@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-trace.dev/schemas/trace-record/v2.0",
+  "$id": "https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/schemas/trace-record.schema.json",
   "title": "TraceRecord",
   "description": "One line in traces.jsonl. v2.0 documents metadata.edit_sequence and per-range line_hashes; v1.0 records remain valid.",
   "type": "object",
