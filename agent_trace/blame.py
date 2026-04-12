@@ -347,7 +347,11 @@ def blame_file(
     project_dir: str | None = None,
 ) -> str | None:
     cwd = project_dir if project_dir else os.getcwd()
-    abs_path = os.path.abspath(os.path.join(cwd, file_path))
+    abs_path = (
+        os.path.abspath(file_path)
+        if os.path.isabs(file_path)
+        else os.path.abspath(os.path.join(cwd, file_path))
+    )
 
     if not os.path.isfile(abs_path):
         if json_output:
@@ -355,7 +359,8 @@ def blame_file(
         print(f"agent-trace blame: file not found: {file_path}", file=sys.stderr)
         sys.exit(1)
 
-    git_root = _git("rev-parse", "--show-toplevel", cwd=cwd)
+    file_dir = os.path.dirname(abs_path) or cwd
+    git_root = _git("rev-parse", "--show-toplevel", cwd=file_dir)
     if git_root is None:
         if json_output:
             return None

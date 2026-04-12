@@ -1,8 +1,14 @@
 """
-Configuration management for agent-trace.
+Configuration management for agent-trace (Phase 2).
 
-Global config:  ~/.agent-trace/config.json   (stores auth_token)
-Project config: .agent-trace/config.json     (stores storage, project_id, etc.)
+Three-tier layout:
+
+  1. Global            — <AGENT_TRACE_HOME>/config.json (tokens, defaults)
+  2. Per-project       — <AGENT_TRACE_HOME>/projects/<id>/project-config.json
+                         (storage mode, service_url, auth_token, notes.*, summary.*)
+  3. In-repo pointer   — <repo>/.agent-trace/project.json (stable project_id)
+
+``AGENT_TRACE_HOME`` env var overrides the default ``~/.agent-trace`` (used by tests).
 
 No external dependencies — stdlib only.
 """
@@ -13,6 +19,17 @@ import json
 import os
 from pathlib import Path
 
+from .storage import (
+    IN_REPO_DIR_NAME,
+    IN_REPO_POINTER_NAME,
+    ensure_project_dir,
+    get_agent_trace_home,
+    get_global_config_file,
+    get_project_config_path,
+    resolve_project_id,
+    write_in_repo_pointer,
+)
+
 
 # -------------------------------------------------------------------
 # Load .env from the CLI tool's install directory (if present)
@@ -20,8 +37,6 @@ from pathlib import Path
 
 def _load_dotenv():
     """Read key=value pairs from the .env next to the installed lib."""
-    # Installed layout: ~/.agent-trace/lib/agent_trace/config.py
-    # .env lives at:    ~/.agent-trace/.env
     env_path = Path(__file__).resolve().parent.parent.parent / ".env"
     if not env_path.is_file():
         return
@@ -35,7 +50,6 @@ def _load_dotenv():
             key, _, value = line.partition("=")
             key = key.strip()
             value = value.strip().strip("'\"")
-            # Only set if not already in the environment (real env wins)
             os.environ.setdefault(key, value)
     except OSError:
         pass
@@ -44,16 +58,30 @@ _load_dotenv()
 
 
 # -------------------------------------------------------------------
-# Paths
+# Back-compat shims (computed lazily so tests can override AGENT_TRACE_HOME)
 # -------------------------------------------------------------------
 
-GLOBAL_CONFIG_DIR = Path.home() / ".agent-trace"
-GLOBAL_CONFIG_FILE = GLOBAL_CONFIG_DIR / "config.json"
+class _GlobalConfigDirProxy:
+    """Acts like the old ``GLOBAL_CONFIG_DIR`` Path but re-reads env each use."""
 
-PROJECT_CONFIG_DIR_NAME = ".agent-trace"
-PROJECT_CONFIG_FILE_NAME = "config.json"
+    def __fspath__(self) -> str:
+        return os.fspath(get_agent_trace_home())
 
-# Default service URL — overridden by .env or AGENT_TRACE_URL env var
+    def __str__(self) -> str:
+        return str(get_agent_trace_home())
+
+    def __truediv__(self, other: str) -> Path:
+        return get_agent_trace_home() / other
+
+    def mkdir(self, *args, **kwargs):  # noqa: D401
+        return get_agent_trace_home().mkdir(*args, **kwargs)
+
+
+GLOBAL_CONFIG_DIR = _GlobalConfigDirProxy()
+
+PROJECT_CONFIG_DIR_NAME = IN_REPO_DIR_NAME
+PROJECT_CONFIG_FILE_NAME = IN_REPO_POINTER_NAME
+
 DEFAULT_SERVICE_URL = os.environ.get("AGENT_TRACE_URL", "http://localhost:5000").rstrip("/")
 
 
@@ -62,70 +90,67 @@ DEFAULT_SERVICE_URL = os.environ.get("AGENT_TRACE_URL", "http://localhost:5000")
 # -------------------------------------------------------------------
 
 def get_global_config() -> dict:
-    """Load ~/.agent-trace/config.json (returns {} if missing)."""
-    if GLOBAL_CONFIG_FILE.exists():
+    """Load <AGENT_TRACE_HOME>/config.json (returns {} if missing)."""
+    f = get_global_config_file()
+    if f.exists():
         try:
-            return json.loads(GLOBAL_CONFIG_FILE.read_text())
+            return json.loads(f.read_text())
         except (json.JSONDecodeError, OSError):
             return {}
     return {}
 
 
 def save_global_config(config: dict) -> None:
-    """Write ~/.agent-trace/config.json."""
-    GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    GLOBAL_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    """Write <AGENT_TRACE_HOME>/config.json."""
+    f = get_global_config_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(config, indent=2) + "\n")
 
 
 # -------------------------------------------------------------------
-# Project config
+# Project config (lives in the global project dir)
 # -------------------------------------------------------------------
-
-def _project_config_path(project_dir: str | None = None) -> Path:
-    if project_dir is None:
-        project_dir = os.getcwd()
-    return Path(project_dir) / PROJECT_CONFIG_DIR_NAME / PROJECT_CONFIG_FILE_NAME
-
 
 def get_project_config(project_dir: str | None = None) -> dict | None:
-    """Load .agent-trace/config.json.  Returns None when not initialised."""
-    path = _project_config_path(project_dir)
-    if path.exists():
+    """Load per-project settings.  Returns ``None`` when the project is not initialised."""
+    if project_dir is None:
+        project_dir = os.getcwd()
+
+    pid = resolve_project_id(project_dir, create=False)
+    if not pid:
+        return None
+
+    cfg_path = get_project_config_path(pid)
+    if cfg_path.is_file():
         try:
-            return json.loads(path.read_text())
+            return json.loads(cfg_path.read_text())
         except (json.JSONDecodeError, OSError):
             return None
     return None
 
 
 def save_project_config(config: dict, project_dir: str | None = None) -> None:
-    """Write .agent-trace/config.json and update .gitignore."""
+    """Persist per-project settings and the in-repo pointer.
+
+    Resolves (or creates) a ``project_id`` for the repo, writes the settings to
+    ``<AGENT_TRACE_HOME>/projects/<id>/project-config.json``, and drops a
+    tiny pointer at ``<repo>/.agent-trace/project.json``.
+    """
     if project_dir is None:
         project_dir = os.getcwd()
 
-    config_dir = Path(project_dir) / PROJECT_CONFIG_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / PROJECT_CONFIG_FILE_NAME).write_text(
-        json.dumps(config, indent=2) + "\n"
-    )
+    pid = resolve_project_id(project_dir, create=True)
+    if not pid:
+        raise RuntimeError(
+            f"agent-trace: cannot resolve project_id for {project_dir} "
+            "(not a git repository and no registry entry)",
+        )
 
-    _ensure_gitignore(project_dir)
+    ensure_project_dir(pid)
+    cfg_path = get_project_config_path(pid)
+    cfg_path.write_text(json.dumps(config, indent=2) + "\n")
 
-
-def _ensure_gitignore(project_dir: str) -> None:
-    """Add .agent-trace/ to .gitignore if not already present."""
-    gitignore = Path(project_dir) / ".gitignore"
-    marker = ".agent-trace/"
-
-    if gitignore.exists():
-        content = gitignore.read_text()
-        if marker not in content:
-            with open(gitignore, "a") as f:
-                if not content.endswith("\n"):
-                    f.write("\n")
-                f.write(f"{marker}\n")
-    else:
-        gitignore.write_text(f"{marker}\n")
+    write_in_repo_pointer(project_dir, pid)
 
 
 # -------------------------------------------------------------------
@@ -133,12 +158,7 @@ def _ensure_gitignore(project_dir: str) -> None:
 # -------------------------------------------------------------------
 
 def get_auth_token(project_config: dict | None = None) -> str | None:
-    """
-    Resolve the auth token.  Priority:
-      1. AGENT_TRACE_TOKEN env var
-      2. Global config  (~/.agent-trace/config.json)
-      3. Project config (.agent-trace/config.json)
-    """
+    """Resolve auth token: env → global → project."""
     env = os.environ.get("AGENT_TRACE_TOKEN")
     if env:
         return env
@@ -154,13 +174,7 @@ def get_auth_token(project_config: dict | None = None) -> str | None:
 
 
 def get_service_url(project_config: dict | None = None) -> str:
-    """
-    Resolve the service URL.  Priority:
-      1. AGENT_TRACE_URL env var / .env file  (already in DEFAULT_SERVICE_URL)
-      2. Project config
-      3. Default (http://localhost:5000)
-    """
+    """Resolve service URL: project config → env/default."""
     if project_config and project_config.get("service_url"):
         return project_config["service_url"].rstrip("/")
-
     return DEFAULT_SERVICE_URL

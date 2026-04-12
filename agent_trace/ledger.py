@@ -399,7 +399,12 @@ def _find_candidate_traces(
       ranges refer to a potentially different file version, so only their
       content hashes should be used (not range claims).
     """
-    traces_path = Path(project_dir) / ".agent-trace" / "traces.jsonl"
+    from .storage import get_traces_path, resolve_project_id
+
+    pid = resolve_project_id(project_dir, create=False)
+    if not pid:
+        return [], []
+    traces_path = get_traces_path(pid)
     if not traces_path.exists():
         return [], []
 
@@ -690,19 +695,29 @@ def _merge_line_attrs(line_attrs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # -------------------------------------------------------------------
 
 def store_ledger_local(ledger: dict[str, Any], project_dir: str) -> None:
-    """Append a ledger to ``.agent-trace/ledgers.jsonl``."""
-    d = Path(project_dir) / ".agent-trace"
-    d.mkdir(parents=True, exist_ok=True)
-    with open(d / "ledgers.jsonl", "a") as f:
+    """Append a ledger to ``<AGENT_TRACE_HOME>/projects/<id>/ledgers.jsonl``."""
+    from .storage import ensure_project_dir, get_ledgers_path, resolve_project_id
+
+    pid = resolve_project_id(project_dir, create=True)
+    if not pid:
+        return
+    ensure_project_dir(pid)
+    path = get_ledgers_path(pid)
+    with open(path, "a") as f:
         f.write(json.dumps(ledger) + "\n")
 
 
 def load_local_ledgers(project_dir: str) -> dict[str, dict[str, Any]]:
-    """Load all ledgers from ``.agent-trace/ledgers.jsonl``.
+    """Load all ledgers from ``<AGENT_TRACE_HOME>/projects/<id>/ledgers.jsonl``.
 
     Returns a dict keyed by ``commit_sha``.
     """
-    ledgers_path = Path(project_dir) / ".agent-trace" / "ledgers.jsonl"
+    from .storage import get_ledgers_path, resolve_project_id
+
+    pid = resolve_project_id(project_dir, create=False)
+    if not pid:
+        return {}
+    ledgers_path = get_ledgers_path(pid)
     if not ledgers_path.exists():
         return {}
     ledgers: dict[str, dict[str, Any]] = {}

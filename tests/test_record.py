@@ -1,19 +1,40 @@
-"""Tests for hook → trace recording (Phase 1a)."""
+"""Tests for hook → trace recording (Phase 1a / 1b)."""
 
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from agent_trace import registry as registry_mod
 from agent_trace.record import (
     _claude_PostToolUse,
     _cursor_afterFileEdit,
     _ranges_from_multiedit,
     _ranges_from_write,
 )
+
+
+def _git_init_with_commit(repo: str) -> None:
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@e.st"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "t"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    Path(repo, ".gitkeep").write_text("")
+    subprocess.run(["git", "add", ".gitkeep"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
 
 
 class TestRangesFromWrite(unittest.TestCase):
@@ -49,13 +70,15 @@ class TestRangesFromMultiedit(unittest.TestCase):
 class TestClaudePostToolUse(unittest.TestCase):
     def test_write_tool_uses_content_not_new_string(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            _git_init_with_commit(tmp)
             fp = str(Path(tmp) / "new.py")
             d = {
                 "tool_name": "Write",
                 "tool_input": {"file_path": fp, "content": "def x():\n    return 1\n"},
                 "session_id": "s1",
+                "cwd": tmp,
             }
-            with patch.dict(os.environ, {"CURSOR_PROJECT_DIR": tmp}, clear=False):
+            with patch.object(registry_mod, "PROJECTS_FILE", Path(tmp) / "projects.json"):
                 trace, ev = _claude_PostToolUse(d)
             self.assertEqual(ev, "PostToolUse")
             self.assertIsNotNone(trace)
@@ -69,6 +92,7 @@ class TestClaudePostToolUse(unittest.TestCase):
 
     def test_multiedit_produces_ranges(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            _git_init_with_commit(tmp)
             p = Path(tmp) / "m.py"
             p.write_text("one\ntwo\n")
             d = {
@@ -81,8 +105,9 @@ class TestClaudePostToolUse(unittest.TestCase):
                     ],
                 },
                 "session_id": "s2",
+                "cwd": tmp,
             }
-            with patch.dict(os.environ, {"CURSOR_PROJECT_DIR": tmp}, clear=False):
+            with patch.object(registry_mod, "PROJECTS_FILE", Path(tmp) / "projects.json"):
                 trace, ev = _claude_PostToolUse(d)
             self.assertEqual(ev, "PostToolUse")
             assert trace is not None
@@ -90,17 +115,19 @@ class TestClaudePostToolUse(unittest.TestCase):
             self.assertEqual(len(conv["ranges"]), 2)
 
     def test_notebook_edit(self) -> None:
-        d = {
-            "tool_name": "NotebookEdit",
-            "tool_input": {
-                "notebook_path": "analysis.ipynb",
-                "cell_id": "c7",
-                "new_source": "import pandas as pd\n",
-            },
-            "session_id": "s3",
-        }
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"CURSOR_PROJECT_DIR": tmp}, clear=False):
+            _git_init_with_commit(tmp)
+            d = {
+                "tool_name": "NotebookEdit",
+                "tool_input": {
+                    "notebook_path": "analysis.ipynb",
+                    "cell_id": "c7",
+                    "new_source": "import pandas as pd\n",
+                },
+                "session_id": "s3",
+                "cwd": tmp,
+            }
+            with patch.object(registry_mod, "PROJECTS_FILE", Path(tmp) / "projects.json"):
                 trace, ev = _claude_PostToolUse(d)
         self.assertEqual(ev, "PostToolUse")
         assert trace is not None
@@ -111,6 +138,7 @@ class TestClaudePostToolUse(unittest.TestCase):
 class TestCursorAfterFileEdit(unittest.TestCase):
     def test_create_file_empty_old_string(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            _git_init_with_commit(tmp)
             fp = str(Path(tmp) / "created.py")
             Path(fp).write_text("import os")
             d = {
@@ -119,7 +147,7 @@ class TestCursorAfterFileEdit(unittest.TestCase):
                 "edits": [{"old_string": "", "new_string": "import os"}],
                 "conversation_id": "c1",
             }
-            with patch.dict(os.environ, {"CURSOR_PROJECT_DIR": tmp}, clear=False):
+            with patch.object(registry_mod, "PROJECTS_FILE", Path(tmp) / "projects.json"):
                 trace, ev = _cursor_afterFileEdit(d)
             self.assertEqual(ev, "afterFileEdit")
             assert trace is not None

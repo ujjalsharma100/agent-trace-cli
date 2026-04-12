@@ -8,7 +8,12 @@ from typing import Any
 
 
 def _load_local_traces(project_dir: str) -> list[dict[str, Any]]:
-    traces_path = Path(project_dir) / ".agent-trace" / "traces.jsonl"
+    from .storage import get_traces_path, resolve_project_id
+
+    pid = resolve_project_id(project_dir, create=False)
+    if not pid:
+        return []
+    traces_path = get_traces_path(pid)
     if not traces_path.exists():
         return []
     traces: list[dict[str, Any]] = []

@@ -372,6 +372,7 @@ def context_command(
     full: bool = False,
     json_output: bool = False,
     query: str | None = None,
+    project_dir: str | None = None,
 ) -> None:
     """Execute the context command (called from cli.py)."""
     # Parse --lines range
@@ -393,6 +394,7 @@ def context_command(
         end_line=end_line,
         full=full,
         query=query,
+        project_dir=project_dir,
     )
 
     if not segments:

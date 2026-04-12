@@ -2,7 +2,7 @@
 Post-rewrite ledger remapping — updates ledger commit SHAs after rebase/amend.
 
 Git's ``post-rewrite`` hook provides ``old_sha new_sha`` lines on stdin.
-This module reads those mappings and updates ``.agent-trace/ledgers.jsonl``
+This module reads those mappings and updates ``<AGENT_TRACE_HOME>/projects/<id>/ledgers.jsonl``
 so that ledgers remain keyed to the correct (new) commit SHAs.
 
 No external dependencies — stdlib only.
@@ -40,7 +40,12 @@ def rewrite_ledgers(project_dir: str | None = None) -> int:
     if not sha_map:
         return 0
 
-    ledgers_path = Path(project_dir) / ".agent-trace" / "ledgers.jsonl"
+    from .storage import get_ledgers_path, resolve_project_id
+
+    pid = resolve_project_id(project_dir, create=False)
+    if not pid:
+        return 0
+    ledgers_path = get_ledgers_path(pid)
     if not ledgers_path.exists():
         return 0
 

@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import unittest
 
-from jsonschema import Draft202012Validator
+try:
+    from jsonschema import Draft202012Validator
+except ImportError:
+    Draft202012Validator = None  # type: ignore[misc, assignment]
 
 from agent_trace.models import (
     CommitLink,
@@ -16,7 +19,7 @@ from agent_trace.models import (
     Trace,
     schemas_dir,
 )
-from agent_trace.trace import create_trace
+from agent_trace.trace import ProjectResolution, create_trace
 
 
 def _schema(name: str) -> dict:
@@ -24,10 +27,22 @@ def _schema(name: str) -> dict:
 
 
 def _validate(instance: dict, schema_name: str) -> None:
+    if Draft202012Validator is None:
+        raise unittest.SkipTest("jsonschema is not installed")
     schema = _schema(schema_name)
     Draft202012Validator(schema).validate(instance)
 
 
+def _fake_resolution(rel_path: str = "src/example.py") -> ProjectResolution:
+    return ProjectResolution(
+        repo_root="/tmp/agent-trace-test-repo",
+        project_id="at_test00000001",
+        rel_path=rel_path,
+        vcs={"type": "git", "revision": "deadbeef" * 5},
+    )
+
+
+@unittest.skipIf(Draft202012Validator is None, "jsonschema is not installed")
 class TestTraceSchema(unittest.TestCase):
     def test_trace_roundtrip_from_create_trace(self) -> None:
         tdict = create_trace(
@@ -38,7 +53,9 @@ class TestTraceSchema(unittest.TestCase):
             range_contents=["line1\nline2"],
             metadata={"session_id": "s1"},
             edit_sequence=3,
+            resolution=_fake_resolution(),
         )
+        assert tdict is not None
         tdict["version"] = "2.0"
         t = Trace.from_dict(tdict)
         back = Trace.from_dict(t.to_dict())
@@ -50,10 +67,13 @@ class TestTraceSchema(unittest.TestCase):
             "README.md",
             range_positions=[{"start_line": 1, "end_line": 1}],
             range_contents=["hello"],
+            resolution=_fake_resolution("README.md"),
         )
+        assert tdict is not None
         _validate(tdict, "trace-record.schema.json")
 
 
+@unittest.skipIf(Draft202012Validator is None, "jsonschema is not installed")
 class TestLedgerAndCommitLink(unittest.TestCase):
     def test_ledger_roundtrip(self) -> None:
         raw = {
@@ -96,6 +116,7 @@ class TestLedgerAndCommitLink(unittest.TestCase):
         _validate(cl.to_dict(), "commit-link.schema.json")
 
 
+@unittest.skipIf(Draft202012Validator is None, "jsonschema is not installed")
 class TestGitNoteRemotesSync(unittest.TestCase):
     def test_git_note_roundtrip(self) -> None:
         raw = {

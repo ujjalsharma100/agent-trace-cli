@@ -76,8 +76,13 @@ def _get_commit_date(cwd: str | None = None) -> str | None:
 # -------------------------------------------------------------------
 
 def _load_local_traces(project_dir: str) -> list[dict]:
-    """Load all traces from .agent-trace/traces.jsonl."""
-    traces_path = Path(project_dir) / ".agent-trace" / "traces.jsonl"
+    """Load all traces from ``<AGENT_TRACE_HOME>/projects/<id>/traces.jsonl``."""
+    from .storage import get_traces_path, resolve_project_id
+
+    pid = resolve_project_id(project_dir, create=False)
+    if not pid:
+        return []
+    traces_path = get_traces_path(pid)
     if not traces_path.exists():
         return []
     traces = []
@@ -177,10 +182,15 @@ def _find_matching_traces_remote(
 # -------------------------------------------------------------------
 
 def _store_local(commit_link: dict, project_dir: str) -> None:
-    """Append commit link to .agent-trace/commit-links.jsonl."""
-    d = Path(project_dir) / ".agent-trace"
-    d.mkdir(parents=True, exist_ok=True)
-    with open(d / "commit-links.jsonl", "a") as f:
+    """Append commit link to ``<AGENT_TRACE_HOME>/projects/<id>/commit-links.jsonl``."""
+    from .storage import ensure_project_dir, get_commit_links_path, resolve_project_id
+
+    pid = resolve_project_id(project_dir, create=True)
+    if not pid:
+        return
+    ensure_project_dir(pid)
+    path = get_commit_links_path(pid)
+    with open(path, "a") as f:
         f.write(json.dumps(commit_link) + "\n")
 
 

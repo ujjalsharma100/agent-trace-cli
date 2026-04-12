@@ -15,7 +15,19 @@ import urllib.request
 from pathlib import Path
 
 from .config import get_auth_token, get_project_config, get_service_url
-from .trace import compute_range_positions, create_trace, get_workspace_root
+from .session import touch_session_project
+from .storage import (
+    ensure_project_dir,
+    get_session_state_path,
+    get_traces_path,
+    resolve_project_id,
+)
+from .trace import (
+    compute_range_positions,
+    create_trace,
+    get_workspace_root,
+    resolve_file_project,
+)
 
 
 # -------------------------------------------------------------------
@@ -25,13 +37,18 @@ from .trace import compute_range_positions, create_trace, get_workspace_root
 def _get_next_sequence(session_id: str, project_dir: str | None = None) -> int:
     """Return the next edit sequence number for a session, incrementing atomically.
 
-    Stores state in ``.agent-trace/session-state.json`` as ``{"seq:<session_id>": N}``.
+    State lives in ``<AGENT_TRACE_HOME>/projects/<id>/session-state.json``
+    as ``{"seq:<session_id>": N}``.
     """
     if not session_id:
         return 0
     if project_dir is None:
         project_dir = get_workspace_root()
-    state_path = Path(project_dir) / ".agent-trace" / "session-state.json"
+    pid = resolve_project_id(project_dir, create=True)
+    if not pid:
+        return 0
+    ensure_project_dir(pid)
+    state_path = get_session_state_path(pid)
     state_path.parent.mkdir(parents=True, exist_ok=True)
 
     state: dict = {}
@@ -162,7 +179,8 @@ def _cursor_afterFileEdit(d):
     fp = d.get("file_path", "")
     fc = _try_read_file(fp) if fp else None
     session_id = d.get("conversation_id") or ""
-    seq = _get_next_sequence(session_id) if session_id else None
+    res = resolve_file_project(fp)
+    seq = _get_next_sequence(session_id, res.repo_root if res else None) if session_id else None
     return create_trace(
         "ai", fp,
         model=d.get("model"),
@@ -171,24 +189,30 @@ def _cursor_afterFileEdit(d):
         transcript=d.get("transcript_path"),
         metadata={"conversation_id": d.get("conversation_id"), "generation_id": d.get("generation_id")},
         edit_sequence=seq,
+        resolution=res,
     ), "afterFileEdit"
 
 
 def _cursor_afterTabFileEdit(d):
     edits = d.get("edits", [])
+    fp = d.get("file_path", "")
     session_id = d.get("conversation_id") or ""
-    seq = _get_next_sequence(session_id) if session_id else None
+    res = resolve_file_project(fp)
+    seq = _get_next_sequence(session_id, res.repo_root if res else None) if session_id else None
     return create_trace(
-        "ai", d.get("file_path", ""),
+        "ai", fp,
         model=d.get("model"),
         range_positions=compute_range_positions(edits),
         range_contents=[e["new_string"] for e in edits if e.get("new_string")],
         metadata={"conversation_id": d.get("conversation_id"), "generation_id": d.get("generation_id")},
         edit_sequence=seq,
+        resolution=res,
     ), "afterTabFileEdit"
 
 
 def _cursor_afterShellExecution(d):
+    anchor = d.get("cwd") or os.getcwd()
+    res = resolve_file_project(".shell-history", anchor_path=anchor)
     return create_trace(
         "ai", ".shell-history",
         model=d.get("model"),
@@ -199,10 +223,14 @@ def _cursor_afterShellExecution(d):
             "command": d.get("command"),
             "duration_ms": d.get("duration"),
         },
+        anchor_path=anchor,
+        resolution=res,
     ), "afterShellExecution"
 
 
 def _cursor_sessionStart(d):
+    anchor = d.get("cwd") or os.getcwd()
+    res = resolve_file_project(".sessions", anchor_path=anchor)
     return create_trace(
         "ai", ".sessions",
         model=d.get("model"),
@@ -213,10 +241,14 @@ def _cursor_sessionStart(d):
             "is_background_agent": d.get("is_background_agent"),
             "composer_mode": d.get("composer_mode"),
         },
+        anchor_path=anchor,
+        resolution=res,
     ), "sessionStart"
 
 
 def _cursor_sessionEnd(d):
+    anchor = d.get("cwd") or os.getcwd()
+    res = resolve_file_project(".sessions", anchor_path=anchor)
     return create_trace(
         "ai", ".sessions",
         model=d.get("model"),
@@ -227,6 +259,8 @@ def _cursor_sessionEnd(d):
             "reason": d.get("reason"),
             "duration_ms": d.get("duration_ms"),
         },
+        anchor_path=anchor,
+        resolution=res,
     ), "sessionEnd"
 
 
@@ -248,7 +282,9 @@ def _claude_PostToolUse(d):
     if tn == "Bash":
         ti = d.get("tool_input", {})
         session_id = d.get("session_id") or ""
-        seq = _get_next_sequence(session_id) if session_id else None
+        anchor = ti.get("cwd") or d.get("cwd") or os.getcwd()
+        res = resolve_file_project(".shell-history", anchor_path=anchor)
+        seq = _get_next_sequence(session_id, res.repo_root if res else None) if session_id else None
         return create_trace(
             "ai", ".shell-history",
             model=d.get("model"),
@@ -260,10 +296,13 @@ def _claude_PostToolUse(d):
                 "command": ti.get("command"),
             },
             edit_sequence=seq,
+            anchor_path=anchor,
+            resolution=res,
         ), "PostToolUse"
 
     ti = d.get("tool_input", {})
     fp = ti.get("file_path") or ti.get("notebook_path") or ".unknown"
+    anchor = d.get("cwd") or os.getcwd()
 
     if tn == "Write":
         existed = _file_existed_before(fp)
@@ -289,7 +328,8 @@ def _claude_PostToolUse(d):
         return None, "PostToolUse"
 
     session_id = d.get("session_id") or ""
-    seq = _get_next_sequence(session_id) if session_id else None
+    res = resolve_file_project(fp, anchor_path=anchor)
+    seq = _get_next_sequence(session_id, res.repo_root if res else None) if session_id else None
 
     metadata: dict = {
         "session_id": d.get("session_id"),
@@ -307,10 +347,14 @@ def _claude_PostToolUse(d):
         transcript=d.get("transcript_path"),
         metadata=metadata,
         edit_sequence=seq,
+        anchor_path=anchor,
+        resolution=res,
     ), "PostToolUse"
 
 
 def _claude_SessionStart(d):
+    anchor = d.get("cwd") or os.getcwd()
+    res = resolve_file_project(".sessions", anchor_path=anchor)
     return create_trace(
         "ai", ".sessions",
         model=d.get("model"),
@@ -319,10 +363,14 @@ def _claude_SessionStart(d):
             "session_id": d.get("session_id"),
             "source": d.get("source"),
         },
+        anchor_path=anchor,
+        resolution=res,
     ), "SessionStart"
 
 
 def _claude_SessionEnd(d):
+    anchor = d.get("cwd") or os.getcwd()
+    res = resolve_file_project(".sessions", anchor_path=anchor)
     return create_trace(
         "ai", ".sessions",
         model=d.get("model"),
@@ -331,6 +379,8 @@ def _claude_SessionEnd(d):
             "session_id": d.get("session_id"),
             "reason": d.get("reason"),
         },
+        anchor_path=anchor,
+        resolution=res,
     ), "SessionEnd"
 
 
@@ -346,12 +396,18 @@ _CLAUDE = {
 # -------------------------------------------------------------------
 
 def _store_local(trace, project_dir=None):
-    """Append trace to .agent-trace/traces.jsonl."""
-    if project_dir is None:
-        project_dir = get_workspace_root()
-    d = Path(project_dir) / ".agent-trace"
-    d.mkdir(parents=True, exist_ok=True)
-    with open(d / "traces.jsonl", "a") as f:
+    """Append trace to <AGENT_TRACE_HOME>/projects/<id>/traces.jsonl."""
+    meta = trace.get("metadata") or {}
+    pid = meta.get("project_id")
+    if not pid:
+        if project_dir is None:
+            project_dir = meta.get("repo_root") or get_workspace_root()
+        pid = resolve_project_id(project_dir, create=True)
+    if not pid:
+        return
+    ensure_project_dir(pid)
+    path = get_traces_path(pid)
+    with open(path, "a") as f:
         f.write(json.dumps(trace) + "\n")
 
 
@@ -425,10 +481,17 @@ def _sync_conversation_only(data):
     Only runs when storage is remote and we have a local transcript path.
     Does not create or store a trace.
     """
-    config = get_project_config()
+    workspace_roots = data.get("workspace_roots") or []
+    roots_to_try = [os.path.abspath(r) for r in workspace_roots if r]
+    if not roots_to_try:
+        roots_to_try = [os.getcwd()]
+    config = None
+    for root in roots_to_try:
+        cfg = get_project_config(project_dir=root)
+        if cfg is not None and cfg.get("storage", "local") == "remote":
+            config = cfg
+            break
     if config is None:
-        return
-    if config.get("storage", "local") != "remote":
         return
 
     transcript_path = data.get("transcript_path")
@@ -436,7 +499,6 @@ def _sync_conversation_only(data):
         return
 
     # Resolve to absolute path so URL is stable
-    workspace_roots = data.get("workspace_roots") or []
     if workspace_roots and not os.path.isabs(transcript_path):
         root = workspace_roots[0]
         abs_path = os.path.abspath(os.path.join(root, transcript_path))
@@ -485,12 +547,30 @@ def record_from_stdin():
     if trace is None:
         return
 
-    config = get_project_config()
+    meta = trace.get("metadata") or {}
+    repo_root = meta.get("repo_root")
+    config = get_project_config(project_dir=repo_root) if repo_root else get_project_config()
     if config is None:
-        return  # not initialised — silent exit
+        return  # not initialised in this repo — silent exit
+
+    sid = (
+        meta.get("session_id")
+        or meta.get("conversation_id")
+        or data.get("conversation_id")
+        or data.get("session_id")
+    )
+    pid = meta.get("project_id")
+    if sid and pid:
+        tool = trace.get("tool") if isinstance(trace.get("tool"), dict) else {}
+        touch_session_project(
+            str(sid),
+            str(pid),
+            tool_name=(tool or {}).get("name"),
+            transcript_path=data.get("transcript_path"),
+        )
 
     storage = config.get("storage", "local")
     if storage == "local":
-        _store_local(trace)
+        _store_local(trace, project_dir=repo_root)
     elif storage == "remote":
         _store_remote(trace, hook_event, config)
