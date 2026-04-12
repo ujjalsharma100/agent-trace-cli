@@ -3,7 +3,10 @@ Git post-commit hook logic — links commits to AI traces.
 
 Called by the git post-commit hook (via ``agent-trace commit-link``).
 Matches the newly-created commit against traces that were active at
-the parent revision, then records the link locally or remotely.
+the parent revision, then records the link locally.
+
+Hooks write *only* to local JSONL.  Network sync happens via
+``agent-trace push`` / ``agent-trace pull``.
 
 No external dependencies — stdlib only.
 """
@@ -14,12 +17,10 @@ import json
 import os
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import get_auth_token, get_project_config, get_service_url
+from .config import get_project_config
 from .ledger import build_attribution_ledger, store_ledger_local
 
 
@@ -135,48 +136,6 @@ def _find_matching_traces_local(
     ]
 
 
-def _find_matching_traces_remote(
-    config: dict,
-    parent_sha: str | None,
-    changed_files: list[str],
-    committed_at: str | None,
-) -> list[str]:
-    """Query the remote service for matching traces and filter client-side."""
-    if parent_sha is None:
-        return []
-
-    project_id = config.get("project_id")
-    auth_token = get_auth_token(config)
-    service_url = get_service_url(config)
-
-    if not project_id or not auth_token:
-        return []
-
-    # Build query — fetch traces for this project, narrowing by time if possible
-    params = f"project_id={project_id}"
-    url = f"{service_url}/api/v1/traces?{params}"
-
-    req = urllib.request.Request(url, method="GET")
-    req.add_header("Authorization", f"Bearer {auth_token}")
-
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception:
-        return []
-
-    traces = data.get("traces", data) if isinstance(data, dict) else data
-    if not isinstance(traces, list):
-        return []
-
-    changed_set = set(changed_files)
-    return [
-        t["id"]
-        for t in traces
-        if isinstance(t, dict) and t.get("id") and _trace_matches(t, parent_sha, changed_set)
-    ]
-
-
 # -------------------------------------------------------------------
 # Storage
 # -------------------------------------------------------------------
@@ -192,40 +151,6 @@ def _store_local(commit_link: dict, project_dir: str) -> None:
     path = get_commit_links_path(pid)
     with open(path, "a") as f:
         f.write(json.dumps(commit_link) + "\n")
-
-
-def _store_remote(commit_link: dict, config: dict) -> None:
-    """POST commit link to the remote agent-trace-service."""
-    project_id = config.get("project_id")
-    auth_token = get_auth_token(config)
-    service_url = get_service_url(config)
-
-    if not project_id or not auth_token:
-        return
-
-    body = {
-        "project_id": project_id,
-        **commit_link,
-    }
-    data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        f"{service_url}/api/v1/commit-links",
-        data=data,
-        method="POST",
-    )
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {auth_token}")
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            _ = resp.read()  # drain
-    except urllib.error.HTTPError as e:
-        print(
-            f"agent-trace: commit-link service responded {e.code}: {e.read().decode()}",
-            file=sys.stderr,
-        )
-    except Exception as e:
-        print(f"agent-trace: commit-link service unreachable: {e}", file=sys.stderr)
 
 
 # -------------------------------------------------------------------
@@ -259,33 +184,17 @@ def create_commit_link(project_dir: str | None = None) -> dict | None:
     if not changed_files:
         return None
 
-    # Determine storage mode
-    config = get_project_config(project_dir)
-    if config is None:
-        # Not initialised — try local trace matching anyway (best-effort)
-        config = {"storage": "local"}
-
-    storage = config.get("storage", "local")
-
-    # Find matching traces
-    if storage == "remote":
-        trace_ids = _find_matching_traces_remote(
-            config, parent_sha, changed_files, committed_at
-        )
-    else:
-        trace_ids = _find_matching_traces_local(
-            project_dir, parent_sha, changed_files
-        )
+    # Find matching traces from local storage only.
+    trace_ids = _find_matching_traces_local(
+        project_dir, parent_sha, changed_files
+    )
 
     # Always build the attribution ledger — even for pure-human commits.
-    # A commit with no matching AI traces gets a ledger where every
-    # changed line is "human".  Without a ledger, blame falls back to
-    # heuristic scoring which can produce false positives.
     ledger = None
     try:
         ledger = build_attribution_ledger(project_dir)
     except Exception:
-        pass  # Never fail the commit link over a ledger error
+        pass
 
     # Store ledger locally regardless of whether traces matched.
     if ledger:
@@ -295,8 +204,6 @@ def create_commit_link(project_dir: str | None = None) -> dict | None:
             pass
 
     if not trace_ids:
-        # No AI traces for this commit — still store ledger (above),
-        # but no commit link to create.
         return None
 
     # Build commit link record
@@ -309,12 +216,5 @@ def create_commit_link(project_dir: str | None = None) -> dict | None:
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Store commit link
-    if storage == "remote":
-        if ledger:
-            commit_link["ledger"] = ledger
-        _store_remote(commit_link, config)
-    else:
-        _store_local(commit_link, project_dir)
-
+    _store_local(commit_link, project_dir)
     return commit_link

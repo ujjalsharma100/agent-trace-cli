@@ -1,8 +1,11 @@
 """
 Trace recording — reads hook events from stdin, constructs trace records,
-and stores them locally (JSONL) or sends them to the remote service.
+and stores them locally (JSONL).
 
-No external dependencies — uses urllib from the standard library.
+Hooks write *only* to local JSONL.  Network calls happen exclusively via
+``sync.py`` (``agent-trace push`` / ``agent-trace pull``).
+
+No external dependencies — uses only the Python standard library.
 """
 
 from __future__ import annotations
@@ -10,11 +13,9 @@ from __future__ import annotations
 import json
 import os
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
 
-from .config import get_auth_token, get_project_config, get_service_url
+from .config import get_project_config
 from .session import touch_session_project
 from .storage import (
     ensure_project_dir,
@@ -411,107 +412,6 @@ def _store_local(trace, project_dir=None):
         f.write(json.dumps(trace) + "\n")
 
 
-def _store_remote(trace, hook_event, config):
-    """POST trace to the remote agent-trace-service (stdlib urllib)."""
-    project_id = config.get("project_id")
-    auth_token = get_auth_token(config)
-    service_url = get_service_url(config)
-
-    if not project_id or not auth_token:
-        return
-
-    conv_contents = _collect_conversation_contents(trace)
-    body: dict = {"project_id": project_id, "trace": trace}
-    if conv_contents:
-        body["conversation_contents"] = conv_contents
-
-    data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        f"{service_url}/api/v1/traces",
-        data=data,
-        method="POST",
-    )
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {auth_token}")
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            _ = resp.read()  # drain
-    except urllib.error.HTTPError as e:
-        print(f"agent-trace: service responded {e.code}: {e.read().decode()}", file=sys.stderr)
-    except Exception as e:
-        # Never break the coding agent
-        print(f"agent-trace: service unreachable: {e}", file=sys.stderr)
-
-
-def _sync_conversation_remote(conversation_contents, config):
-    """POST conversation contents only to the remote service (no trace)."""
-    project_id = config.get("project_id")
-    auth_token = get_auth_token(config)
-    service_url = get_service_url(config)
-
-    if not project_id or not auth_token or not conversation_contents:
-        return
-
-    body = {
-        "project_id": project_id,
-        "conversation_contents": conversation_contents,
-    }
-    data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        f"{service_url}/api/v1/conversations/sync",
-        data=data,
-        method="POST",
-    )
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {auth_token}")
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            _ = resp.read()
-    except urllib.error.HTTPError as e:
-        print(f"agent-trace: conversation sync failed {e.code}: {e.read().decode()}", file=sys.stderr)
-    except Exception as e:
-        print(f"agent-trace: conversation sync unreachable: {e}", file=sys.stderr)
-
-
-def _sync_conversation_only(data):
-    """
-    Sync conversation content to remote after the agent has finished a response.
-    Only runs when storage is remote and we have a local transcript path.
-    Does not create or store a trace.
-    """
-    workspace_roots = data.get("workspace_roots") or []
-    roots_to_try = [os.path.abspath(r) for r in workspace_roots if r]
-    if not roots_to_try:
-        roots_to_try = [os.getcwd()]
-    config = None
-    for root in roots_to_try:
-        cfg = get_project_config(project_dir=root)
-        if cfg is not None and cfg.get("storage", "local") == "remote":
-            config = cfg
-            break
-    if config is None:
-        return
-
-    transcript_path = data.get("transcript_path")
-    if not transcript_path or not isinstance(transcript_path, str):
-        return
-
-    # Resolve to absolute path so URL is stable
-    if workspace_roots and not os.path.isabs(transcript_path):
-        root = workspace_roots[0]
-        abs_path = os.path.abspath(os.path.join(root, transcript_path))
-    else:
-        abs_path = os.path.abspath(transcript_path)
-
-    content = _try_read_file(abs_path)
-    if content is None:
-        return
-
-    url = "file://" + abs_path
-    conversation_contents = [{"url": url, "content": content}]
-    _sync_conversation_remote(conversation_contents, config)
 
 
 # -------------------------------------------------------------------
@@ -519,7 +419,11 @@ def _sync_conversation_only(data):
 # -------------------------------------------------------------------
 
 def record_from_stdin():
-    """Read a hook event from stdin, build a trace, and store it (or sync conversation only)."""
+    """Read a hook event from stdin, build a trace, and store it locally.
+
+    Hooks write *only* to local JSONL.  Network sync happens via
+    ``agent-trace push`` / ``agent-trace pull``.
+    """
     raw = sys.stdin.read().strip()
     if not raw:
         return
@@ -531,12 +435,10 @@ def record_from_stdin():
 
     event = data.get("hook_event_name", "")
 
-    # Conversation-sync-only events (no trace record):
-    #   - afterAgentResponse  : Cursor native — fires after each assistant message
-    #   - Stop                : Claude Code native — fires when the agent loop ends
-    #   - stop                : Cursor mapping of Claude Code's Stop
+    # Conversation-sync-only events — no trace record to create.
+    # Under the new local-first model these are no-ops at record time.
+    # Conversation content will be synced via ``agent-trace push``.
     if event in ("afterAgentResponse", "Stop", "stop"):
-        _sync_conversation_only(data)
         return
 
     handler = _CURSOR.get(event) or _CLAUDE.get(event)
@@ -551,7 +453,7 @@ def record_from_stdin():
     repo_root = meta.get("repo_root")
     config = get_project_config(project_dir=repo_root) if repo_root else get_project_config()
     if config is None:
-        return  # not initialised in this repo — silent exit
+        return
 
     sid = (
         meta.get("session_id")
@@ -569,8 +471,4 @@ def record_from_stdin():
             transcript_path=data.get("transcript_path"),
         )
 
-    storage = config.get("storage", "local")
-    if storage == "local":
-        _store_local(trace, project_dir=repo_root)
-    elif storage == "remote":
-        _store_remote(trace, hook_event, config)
+    _store_local(trace, project_dir=repo_root)

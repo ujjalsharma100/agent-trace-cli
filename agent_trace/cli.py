@@ -16,6 +16,10 @@ Commands:
     agent-trace rule show         Show which rules are configured
     agent-trace rule list         List available prebuilt rules
     agent-trace viewer            Open the file viewer (browse files, git + agent-trace blame)
+    agent-trace remote add/list/show/set-url/set-token/remove/rename/default
+    agent-trace push              Push local traces to remote
+    agent-trace pull              Pull remote traces to local
+    agent-trace sync              Push + pull in one go
     agent-trace set globaluser    Set a global auth token
     agent-trace remove globaluser Remove the global auth token
     agent-trace projects          List registered project IDs (or: projects show <id>)
@@ -46,6 +50,18 @@ from .hooks import configure_claude_hooks, configure_cursor_hooks, configure_git
 from .rules import add_rule, remove_rule, show_rules, list_available_rules, TOOL_CHOICES
 from .record import record_from_stdin
 from .rewrite import rewrite_ledgers
+from .remote import (
+    add_remote as remote_add,
+    get_default_remote,
+    list_remotes as remote_list,
+    remove_remote as remote_remove,
+    rename_remote as remote_rename,
+    set_default_remote,
+    set_remote_token,
+    set_remote_url,
+    show_remote as remote_show,
+)
+from .sync import pull as sync_pull, push as sync_push, status as sync_status
 
 VERSION = "0.1.0"
 
@@ -162,22 +178,6 @@ def cmd_status(_args):
         print("Run 'agent-trace init' to get started.")
         return
 
-    print("agent-trace status\n")
-    print(f"  Storage:    {config.get('storage', 'unknown')}")
-
-    if config.get("storage") == "remote":
-        print(f"  Project ID: {config.get('project_id', 'not set')}")
-        print(f"  Service:    {get_service_url(config)}")
-
-        token = get_auth_token(config)
-        if token:
-            masked = f"{'*' * 8}...{token[-4:]}"
-            global_cfg = get_global_config()
-            source = "global" if global_cfg.get("auth_token") == token else "project"
-            print(f"  Auth Token: {masked}  (source: {source})")
-        else:
-            print("  Auth Token: not configured")
-
     from .storage import (
         get_commit_links_path,
         get_ledgers_path,
@@ -187,7 +187,10 @@ def cmd_status(_args):
     )
     pid = resolve_project_id(os.getcwd(), create=False)
 
-    if config.get("storage") == "local" and pid:
+    print("agent-trace status\n")
+    print(f"  Storage:    local-first")
+
+    if pid:
         print(f"  Project:    {pid}")
         print(f"  Data dir:   {get_project_dir(pid)}")
 
@@ -200,6 +203,25 @@ def cmd_status(_args):
         print(f"  Traces:       {_count(get_traces_path(pid))} recorded")
         print(f"  Commit links: {_count(get_commit_links_path(pid))} recorded")
         print(f"  Ledgers:      {_count(get_ledgers_path(pid))} recorded")
+
+        # Show remote sync info
+        try:
+            report = sync_status(pid)
+            if report.remote_name:
+                print(f"\n  Remote '{report.remote_name}' ({report.remote_url}):")
+                print(f"    Unpushed: {report.unpushed_traces} traces "
+                      f"({report.unattributed_traces} unattributed held back)")
+                print(f"              {report.unpushed_ledgers} ledgers")
+                print(f"              {report.unpushed_commit_links} commit-links")
+                if report.last_push:
+                    print(f"    Last push: {report.last_push}")
+                if report.last_pull:
+                    print(f"    Last pull: {report.last_pull}")
+                print()
+                print("  Run 'agent-trace push' to share attributed work.")
+                print("  Run 'agent-trace pull' to fetch teammates' changes.")
+        except Exception:
+            pass
 
     cursor_ok = os.path.exists(".cursor/hooks.json")
     claude_ok = os.path.exists(".claude/settings.json")
@@ -536,6 +558,186 @@ def cmd_adopt(args):
 
 
 # ===================================================================
+# remote
+# ===================================================================
+
+def _resolve_pid_for_remote():
+    from .storage import resolve_project_id
+    pid = resolve_project_id(os.getcwd(), create=False)
+    if not pid:
+        print("agent-trace: not in an initialised project. Run 'agent-trace init' first.", file=sys.stderr)
+        sys.exit(1)
+    return pid
+
+
+def cmd_remote(args):
+    """Manage named remotes (git remote-like)."""
+    action = getattr(args, "remote_action", None)
+
+    if action == "add":
+        pid = _resolve_pid_for_remote()
+        try:
+            entry = remote_add(
+                pid, args.name, args.url,
+                token=getattr(args, "token", None),
+                token_env=getattr(args, "token_env", None),
+            )
+            print(f"Remote '{args.name}' added: {entry['url']}")
+        except ValueError as e:
+            print(f"agent-trace remote add: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif action == "list":
+        pid = _resolve_pid_for_remote()
+        remotes = remote_list(pid)
+        if not remotes:
+            print("No remotes configured. Run 'agent-trace remote add <name> <url>'.")
+            return
+        for r in remotes:
+            ref = r["token_ref"] or "(no auth)"
+            print(f"  {r['name']:<15} {r['url']}  (token: {ref})")
+
+    elif action == "show":
+        pid = _resolve_pid_for_remote()
+        info = remote_show(pid, args.name)
+        if not info:
+            print(f"Remote '{args.name}' not found.", file=sys.stderr)
+            sys.exit(1)
+        print(f"  Name:     {info['name']}")
+        print(f"  URL:      {info['url']}")
+        print(f"  Auth:     {info['auth_type']}")
+        print(f"  Token:    {info['token_masked']}  (ref: {info['token_ref']})")
+
+    elif action == "set-url":
+        pid = _resolve_pid_for_remote()
+        try:
+            set_remote_url(pid, args.name, args.url)
+            print(f"Remote '{args.name}' URL updated.")
+        except ValueError as e:
+            print(f"agent-trace remote set-url: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif action == "set-token":
+        pid = _resolve_pid_for_remote()
+        try:
+            set_remote_token(
+                pid, args.name,
+                token=getattr(args, "token", None),
+                token_env=getattr(args, "token_env", None),
+            )
+            print(f"Remote '{args.name}' token updated.")
+        except ValueError as e:
+            print(f"agent-trace remote set-token: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif action == "remove":
+        pid = _resolve_pid_for_remote()
+        if remote_remove(pid, args.name):
+            print(f"Remote '{args.name}' removed.")
+        else:
+            print(f"Remote '{args.name}' not found.", file=sys.stderr)
+            sys.exit(1)
+
+    elif action == "rename":
+        pid = _resolve_pid_for_remote()
+        try:
+            remote_rename(pid, args.old_name, args.new_name)
+            print(f"Remote '{args.old_name}' renamed to '{args.new_name}'.")
+        except ValueError as e:
+            print(f"agent-trace remote rename: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif action == "default":
+        pid = _resolve_pid_for_remote()
+        try:
+            set_default_remote(pid, args.name)
+            print(f"Default remote set to '{args.name}'.")
+        except ValueError as e:
+            print(f"agent-trace remote default: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print("Usage: agent-trace remote {add,list,show,set-url,set-token,remove,rename,default}")
+
+
+# ===================================================================
+# push / pull / sync
+# ===================================================================
+
+def cmd_push(args):
+    """Push local data to a remote service."""
+    pid = _resolve_pid_for_remote()
+    try:
+        result = sync_push(
+            pid,
+            remote_name=getattr(args, "remote", None),
+            full=getattr(args, "full", False),
+            only=getattr(args, "only", None),
+            since=getattr(args, "since", None),
+            dry_run=getattr(args, "dry_run", False),
+        )
+    except ValueError as e:
+        print(f"agent-trace push: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    prefix = "[dry-run] " if result.dry_run else ""
+    print(f"{prefix}Pushed {result.traces_pushed} trace(s), "
+          f"{result.ledgers_pushed} ledger(s), "
+          f"{result.commit_links_pushed} commit-link(s)")
+    if result.traces_held_back:
+        print(f"  ({result.traces_held_back} unattributed trace(s) held back; "
+              "use --full to push)")
+    for err in result.errors:
+        print(f"  Error: {err}", file=sys.stderr)
+
+
+def cmd_pull(args):
+    """Pull remote data into local storage."""
+    pid = _resolve_pid_for_remote()
+    try:
+        result = sync_pull(
+            pid,
+            remote_name=getattr(args, "remote", None),
+            since=getattr(args, "since", None),
+            dry_run=getattr(args, "dry_run", False),
+        )
+    except ValueError as e:
+        print(f"agent-trace pull: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    prefix = "[dry-run] " if result.dry_run else ""
+    print(f"{prefix}Pulled {result.traces_pulled} trace(s), "
+          f"{result.ledgers_pulled} ledger(s), "
+          f"{result.commit_links_pulled} commit-link(s)")
+    for err in result.errors:
+        print(f"  Error: {err}", file=sys.stderr)
+
+
+def cmd_sync(args):
+    """Push + pull in one go."""
+    pid = _resolve_pid_for_remote()
+    rn = getattr(args, "remote", None)
+    try:
+        push_r = sync_push(pid, remote_name=rn)
+    except ValueError as e:
+        print(f"agent-trace sync (push): {e}", file=sys.stderr)
+        push_r = None
+    try:
+        pull_r = sync_pull(pid, remote_name=rn)
+    except ValueError as e:
+        print(f"agent-trace sync (pull): {e}", file=sys.stderr)
+        pull_r = None
+
+    if push_r:
+        print(f"Pushed {push_r.traces_pushed} trace(s), "
+              f"{push_r.ledgers_pushed} ledger(s), "
+              f"{push_r.commit_links_pushed} commit-link(s)")
+    if pull_r:
+        print(f"Pulled {pull_r.traces_pulled} trace(s), "
+              f"{pull_r.ledgers_pulled} ledger(s), "
+              f"{pull_r.commit_links_pulled} commit-link(s)")
+
+
+# ===================================================================
 # Entry point
 # ===================================================================
 
@@ -636,6 +838,62 @@ def main():
     rm_sub = rm_p.add_subparsers(dest="remove_command", metavar="KEY")
     rm_sub.add_parser("globaluser", help="Remove global auth token")
 
+    # remote {add,list,show,set-url,set-token,remove,rename,default}
+    sub_remote = sub.add_parser("remote", help="Manage named remotes (git remote-like)")
+    remote_sub = sub_remote.add_subparsers(dest="remote_action", metavar="ACTION")
+
+    r_add = remote_sub.add_parser("add", help="Add a remote")
+    r_add.add_argument("name", help="Remote name (e.g. origin)")
+    r_add.add_argument("url", help="Remote URL")
+    r_add.add_argument("--token", default=None, help="Auth token (stored globally)")
+    r_add.add_argument("--token-env", default=None, help="Environment variable holding the token")
+
+    r_list = remote_sub.add_parser("list", help="List remotes")
+
+    r_show = remote_sub.add_parser("show", help="Show remote details (token masked)")
+    r_show.add_argument("name", help="Remote name")
+
+    r_seturl = remote_sub.add_parser("set-url", help="Change remote URL")
+    r_seturl.add_argument("name", help="Remote name")
+    r_seturl.add_argument("url", help="New URL")
+
+    r_settok = remote_sub.add_parser("set-token", help="Update remote auth token")
+    r_settok.add_argument("name", help="Remote name")
+    r_settok.add_argument("--token", default=None, help="New auth token")
+    r_settok.add_argument("--token-env", default=None, help="Environment variable holding the token")
+
+    r_rm = remote_sub.add_parser("remove", help="Remove a remote")
+    r_rm.add_argument("name", help="Remote name")
+
+    r_ren = remote_sub.add_parser("rename", help="Rename a remote")
+    r_ren.add_argument("old_name", help="Current name")
+    r_ren.add_argument("new_name", help="New name")
+
+    r_def = remote_sub.add_parser("default", help="Set default remote")
+    r_def.add_argument("name", help="Remote name to set as default")
+
+    # push
+    sub_push = sub.add_parser("push", help="Push local data to a remote")
+    sub_push.add_argument("--remote", default=None, help="Remote name (default: auto)")
+    sub_push.add_argument("--full", action="store_true", default=False,
+                          help="Include unattributed traces (default: attributed only)")
+    sub_push.add_argument("--only", default=None, choices=["traces", "ledgers", "commit-links"],
+                          help="Push only one artifact type")
+    sub_push.add_argument("--since", default=None, help="Push only since this timestamp/commit")
+    sub_push.add_argument("--dry-run", action="store_true", default=False,
+                          help="Show what would be pushed without sending")
+
+    # pull
+    sub_pull = sub.add_parser("pull", help="Pull remote data into local storage")
+    sub_pull.add_argument("--remote", default=None, help="Remote name (default: auto)")
+    sub_pull.add_argument("--since", default=None, help="Pull only since this timestamp")
+    sub_pull.add_argument("--dry-run", action="store_true", default=False,
+                          help="Show what would be pulled without writing")
+
+    # sync
+    sub_sync = sub.add_parser("sync", help="Push + pull in one go")
+    sub_sync.add_argument("--remote", default=None, help="Remote name (default: auto)")
+
     p_projects = sub.add_parser("projects", help="List registered projects (or: projects show <id>)")
     p_projects.add_argument("projects_args", nargs="*", default=[], help="show <project_id>")
 
@@ -665,10 +923,15 @@ def main():
         "context": cmd_context,
         "projects": cmd_projects,
         "adopt": cmd_adopt,
+        "push": cmd_push,
+        "pull": cmd_pull,
+        "sync": cmd_sync,
     }
 
     if args.command in dispatch:
         dispatch[args.command](args)
+    elif args.command == "remote":
+        cmd_remote(args)
     elif args.command == "rule":
         cmd_rule(args)
     elif args.command == "set":
