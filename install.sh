@@ -16,6 +16,7 @@ set -euo pipefail
 #   3. Copies the Python source to ~/.agent-trace/lib/
 #   4. Creates an executable at ~/.agent-trace/bin/agent-trace
 #   5. Adds ~/.agent-trace/bin to your PATH
+#   6. After a curl install, deletes the temp download dir (archive + extracted tree)
 # =========================================================================
 
 INSTALL_DIR="${HOME}/.agent-trace"
@@ -74,6 +75,8 @@ bootstrap_if_remote() {
     fi
 
     export AGENT_TRACE_INSTALL_FROM_GITHUB=1
+    # Entire tree (tarball + extracted repo) lives here; child removes this when done.
+    export AGENT_TRACE_INSTALL_TMPDIR="$tmpdir"
     exec bash "${extract_dir}/install.sh"
 }
 
@@ -359,8 +362,13 @@ main() {
     echo "    cd your-project && agent-trace init"
     echo ""
 
-    if [ -n "${AGENT_TRACE_INSTALL_FROM_GITHUB:-}" ] && [ -n "${SOURCE_DIR:-}" ]; then
-        rm -rf "${SOURCE_DIR}"
+    # GitHub bootstrap: remove the whole mktemp dir (tarball + extracted clone), not only SOURCE_DIR.
+    if [ -n "${AGENT_TRACE_INSTALL_FROM_GITHUB:-}" ]; then
+        if [ -n "${AGENT_TRACE_INSTALL_TMPDIR:-}" ] && [ -d "${AGENT_TRACE_INSTALL_TMPDIR}" ]; then
+            rm -rf "${AGENT_TRACE_INSTALL_TMPDIR}"
+        elif [ -n "${SOURCE_DIR:-}" ]; then
+            rm -rf "${SOURCE_DIR}"
+        fi
     fi
 }
 
