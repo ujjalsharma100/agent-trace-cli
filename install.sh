@@ -270,6 +270,25 @@ configure_path() {
 # -------------------------------------------------------------------
 # 6.  Offer global hook setup
 # -------------------------------------------------------------------
+
+# When the script is piped (e.g. curl ... | bash), stdin is not the terminal and
+# plain `read` hits EOF immediately — exit status 1 triggers `set -e` and the
+# installer aborts before "Installation complete". Read from /dev/tty instead.
+read_y_n_prompt() {
+    local prompt="$1"
+    local reply=""
+    if [ -t 0 ]; then
+        read -rp "$prompt" reply || true
+    elif [ -r /dev/tty ]; then
+        read -rp "$prompt" reply < /dev/tty || true
+    else
+        warn "No TTY; skipping optional hook setup. Run: agent-trace hooks setup-global"
+        printf '%s' 'n'
+        return
+    fi
+    printf '%s' "$reply"
+}
+
 configure_global_hooks() {
     # Ensure agent-trace is on PATH for this function
     export PATH="${BIN_DIR}:${PATH}"
@@ -291,7 +310,7 @@ configure_global_hooks() {
         info "Cursor global hooks already configured"
     else
         local answer
-        read -rp "$(echo -e "${GREEN}==>${NC}") Set up global hooks for Cursor? [Y/n]: " answer
+        answer=$(read_y_n_prompt "$(echo -e "${GREEN}==>${NC}") Set up global hooks for Cursor? [Y/n]: ")
         answer="${answer:-y}"
         if [[ "$answer" =~ ^[Yy] ]]; then
             agent-trace hooks setup-global --tool cursor
@@ -303,7 +322,7 @@ configure_global_hooks() {
         info "Claude Code global hooks already configured"
     else
         local answer
-        read -rp "$(echo -e "${GREEN}==>${NC}") Set up global hooks for Claude Code? [Y/n]: " answer
+        answer=$(read_y_n_prompt "$(echo -e "${GREEN}==>${NC}") Set up global hooks for Claude Code? [Y/n]: ")
         answer="${answer:-y}"
         if [[ "$answer" =~ ^[Yy] ]]; then
             agent-trace hooks setup-global --tool claude
