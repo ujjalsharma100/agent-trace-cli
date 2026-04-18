@@ -56,6 +56,7 @@ bash install.sh
 6. Installs the **file viewer** to `~/.agent-trace/viewer/` and creates `~/.agent-trace/bin/agent-trace-viewer`
    - If `npm` is available, builds the frontend from source; otherwise uses the pre-built `dist/`
 7. Adds `~/.agent-trace/bin` to your shell PATH (zsh, bash, or fish)
+8. **Offers to set up global hooks** for Cursor and Claude Code (optional, per-tool prompt)
 
 After installing, restart your shell (or `source ~/.zshrc`) and verify:
 
@@ -78,6 +79,8 @@ Then remove the `# agent-trace` + `export PATH=...` lines from your `~/.zshrc` /
 ### `agent-trace init`
 
 Initialize tracing for the current project (interactive): project label, optional **remote** URL and token, **git notes** (refspecs + optional sections), **hooks** (Cursor, Claude Code, git post-commit / post-rewrite), and optional **summary** command for note enrichment.
+
+If **global hooks** are already configured for a tool (via `agent-trace hooks setup-global`), the init wizard skips the project-level hook prompt for that tool — global hooks make project-level hooks redundant.
 
 ```bash
 cd my-project
@@ -107,6 +110,38 @@ Re-prompts for all settings (storage mode, project ID, auth token, hooks).
 ```bash
 agent-trace reset
 ```
+
+### `agent-trace hooks {setup-global,remove-global,status}`
+
+Manage **global hooks** for coding tools. Global hooks are installed once in your home directory and fire for every project — like `git config --global`. Edits in an initialised repo are traced; edits elsewhere are silently ignored.
+
+This is the recommended setup: install global hooks once, then `agent-trace init` in each repo you want to trace (for project config, git hooks, and git notes). No per-project Cursor/Claude hook configuration needed.
+
+```bash
+# Install global hooks for all supported tools
+agent-trace hooks setup-global
+
+# Install for a specific tool only
+agent-trace hooks setup-global --tool cursor
+agent-trace hooks setup-global --tool claude
+
+# Check current status
+agent-trace hooks status
+
+# Remove global hooks
+agent-trace hooks remove-global
+agent-trace hooks remove-global --tool claude
+```
+
+| Subcommand | Options | Description |
+|------------|---------|-------------|
+| `setup-global` | `--tool cursor\|claude` | Install global hooks (default: all tools) |
+| `remove-global` | `--tool cursor\|claude` | Remove global hooks (default: all tools) |
+| `status` | — | Show whether global hooks are configured |
+
+**Where hooks are written:**
+- Cursor: `~/.cursor/hooks.json`
+- Claude Code: `~/.claude/settings.json`
 
 ### `agent-trace record`
 
@@ -312,7 +347,21 @@ Created/managed by `agent-trace init`. Holds storage mode, optional service URL 
 
 ## How hooks work
 
-When `agent-trace init` configures hooks, it writes two kinds of events into Cursor and Claude Code config:
+Hooks pipe coding agent events through `agent-trace record`. They can be installed at two levels:
+
+- **Global** (recommended) — `~/.cursor/hooks.json`, `~/.claude/settings.json`. Fire for *every* project, like `git config --global`. Set up once with `agent-trace hooks setup-global`.
+- **Project-level** — `<project>/.cursor/hooks.json`, `<project>/.claude/settings.json`. Set up per-project during `agent-trace init`.
+
+Global hooks are the recommended approach. The recording pipeline resolves the correct project from the **file being edited** (via its git root), not from the agent's working directory. This means:
+
+- Edits to files inside an initialised repo are recorded for that project
+- Edits to files outside any initialised repo are silently ignored
+- An agent running from a parent directory editing files in a subfolder project works correctly
+- An agent running from a subfolder of an initialised project works correctly
+
+When global hooks are present, `agent-trace init` skips the per-tool hook prompts — they'd be redundant.
+
+There are two kinds of hook events:
 
 1. **Trace-recording hooks** — after file edits, shell runs, and session start/end. Each event produces a trace record (stored locally or sent to the remote service). Traces include per-line content hashes and edit sequence numbers for deterministic attribution.
 2. **Conversation-sync hooks** — after the assistant has finished a full response. These do **not** create a trace; they only sync the full conversation transcript to the remote service (when storage is remote and the transcript path is local). This keeps conversation content up to date instead of capturing it mid-turn during tool use.
@@ -324,7 +373,7 @@ Two git hooks are installed when you configure git hooks during `agent-trace ini
 - **`post-commit`** — Runs `agent-trace commit-link` after every commit. This links the commit to its traces and builds the attribution ledger.
 - **`post-rewrite`** — Runs `agent-trace rewrite-ledger` after rebase or amend. This remaps ledger SHAs from old commits to their new counterparts.
 
-### Cursor — `.cursor/hooks.json`
+### Cursor — `.cursor/hooks.json` (project) or `~/.cursor/hooks.json` (global)
 
 ```json
 {
@@ -343,7 +392,7 @@ Two git hooks are installed when you configure git hooks during `agent-trace ini
 - **Trace events:** `sessionStart`, `sessionEnd`, `afterFileEdit`, `afterTabFileEdit`, `afterShellExecution`
 - **Conversation sync only:** `afterAgentResponse` (no trace; syncs full transcript in remote mode)
 
-### Claude Code — `.claude/settings.json`
+### Claude Code — `.claude/settings.json` (project) or `~/.claude/settings.json` (global)
 
 ```json
 {
@@ -369,45 +418,48 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
 ## File structure
 
 ```
+~/.cursor/hooks.json             # Cursor global hooks (optional, via hooks setup-global)
+~/.claude/settings.json          # Claude Code global hooks (optional, via hooks setup-global)
+
 ~/.agent-trace/
-  .env                         # default service URL (from .env.example)
-  bin/agent-trace              # CLI executable (on PATH)
-  bin/agent-trace-viewer       # viewer launcher (on PATH)
-  lib/agent_trace/             # Python source
+  .env                           # default service URL (from .env.example)
+  bin/agent-trace                # CLI executable (on PATH)
+  bin/agent-trace-viewer         # viewer launcher (on PATH)
+  lib/agent_trace/               # Python source
     __init__.py
-    cli.py                     # CLI commands (argparse)
-    config.py                  # Global + project resolution (project.json → project_id)
-    hooks.py                   # Cursor, Claude Code & git hook setup
-    record.py                  # Trace recording from hooks
-    trace.py                   # Trace record construction + per-line hashing
-    blame.py                   # Deterministic blame (ledger + git notes; UNKNOWN when missing)
-    context.py                 # Conversation context for AI-attributed segments
-    rules.py                   # Prebuilt agent rules (Cursor, Claude Code)
-    commit_link.py             # Commit-link + ledger build (post-commit)
-    ledger.py                  # Ledger construction
-    rewrite.py                 # Post-rewrite SHA remapping
-    sync.py                    # Push/pull/sync to HTTP remote
-    git_notes.py               # Git notes (refs/notes/agent-trace)
-    remote.py                  # Named remotes
+    cli.py                       # CLI commands (argparse)
+    config.py                    # Global + project resolution (project.json → project_id)
+    hooks.py                     # Cursor, Claude Code & git hook setup (project + global)
+    record.py                    # Trace recording from hooks
+    trace.py                     # Trace record construction + per-line hashing
+    blame.py                     # Deterministic blame (ledger + git notes; UNKNOWN when missing)
+    context.py                   # Conversation context for AI-attributed segments
+    rules.py                     # Prebuilt agent rules (Cursor, Claude Code)
+    commit_link.py               # Commit-link + ledger build (post-commit)
+    ledger.py                    # Ledger construction
+    rewrite.py                   # Post-rewrite SHA remapping
+    sync.py                      # Push/pull/sync to HTTP remote
+    git_notes.py                 # Git notes (refs/notes/agent-trace)
+    remote.py                    # Named remotes
     ...
-  viewer/                      # file viewer (installed by install.sh)
-  config.json                  # global config (auth_token)
+  viewer/                        # file viewer (installed by install.sh)
+  config.json                    # global config (auth_token)
 
 ~/.agent-trace/projects/<project_id>/
-  project-config.json          # project settings (not in git)
+  project-config.json            # project settings (not in git)
   traces.jsonl
   commit-links.jsonl
   ledgers.jsonl
   session-state.json
-  sync-state.json              # push/pull cursors (when using remote)
+  sync-state.json                # push/pull cursors (when using remote)
 
 <your-project>/
   .agent-trace/
-    project.json               # checked-in: project_id (and optional note defaults)
-  .cursor/hooks.json           # Cursor hooks
-  .claude/settings.json        # Claude Code hooks
-  .git/hooks/post-commit       # agent-trace commit-link
-  .git/hooks/post-rewrite      # agent-trace rewrite-ledger
+    project.json                 # checked-in: project_id (and optional note defaults)
+  .cursor/hooks.json             # Cursor project hooks (only if no global hooks)
+  .claude/settings.json          # Claude Code project hooks (only if no global hooks)
+  .git/hooks/post-commit         # agent-trace commit-link
+  .git/hooks/post-rewrite        # agent-trace rewrite-ledger
 ```
 
 ## License

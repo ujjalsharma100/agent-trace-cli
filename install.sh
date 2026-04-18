@@ -270,6 +270,51 @@ configure_path() {
 }
 
 # -------------------------------------------------------------------
+# 6.  Offer global hook setup
+# -------------------------------------------------------------------
+configure_global_hooks() {
+    # Ensure agent-trace is on PATH for this function
+    export PATH="${BIN_DIR}:${PATH}"
+
+    if ! command -v agent-trace &>/dev/null; then
+        warn "agent-trace not on PATH yet; skipping global hook setup."
+        echo "  Run 'agent-trace hooks setup-global' after restarting your shell."
+        return
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Global hooks${NC}"
+    echo "  Global hooks let agent-trace record traces in any initialised project,"
+    echo "  no matter which directory the coding agent runs from."
+    echo ""
+
+    # Cursor
+    if grep -q 'agent-trace record' "${HOME}/.cursor/hooks.json" 2>/dev/null; then
+        info "Cursor global hooks already configured"
+    else
+        local answer
+        read -rp "$(echo -e "${GREEN}==>${NC}") Set up global hooks for Cursor? [Y/n]: " answer
+        answer="${answer:-y}"
+        if [[ "$answer" =~ ^[Yy] ]]; then
+            agent-trace hooks setup-global --tool cursor
+        fi
+    fi
+
+    # Claude Code
+    if grep -q 'agent-trace record' "${HOME}/.claude/settings.json" 2>/dev/null; then
+        info "Claude Code global hooks already configured"
+    else
+        local answer
+        read -rp "$(echo -e "${GREEN}==>${NC}") Set up global hooks for Claude Code? [Y/n]: " answer
+        answer="${answer:-y}"
+        if [[ "$answer" =~ ^[Yy] ]]; then
+            agent-trace hooks setup-global --tool claude
+        fi
+    fi
+}
+
+
+# -------------------------------------------------------------------
 # Main
 # -------------------------------------------------------------------
 main() {
@@ -284,6 +329,7 @@ main() {
     install_files
     install_viewer
     configure_path
+    configure_global_hooks
 
     echo ""
     info "Installation complete!"

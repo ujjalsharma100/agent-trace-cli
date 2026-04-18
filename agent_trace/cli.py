@@ -7,6 +7,9 @@ Commands:
     agent-trace init              Initialize tracing for the current project
     agent-trace status            Show tracing status
     agent-trace reset             Reconfigure tracing settings
+    agent-trace hooks setup-global  Install global hooks for all tools
+    agent-trace hooks remove-global Remove global hooks
+    agent-trace hooks status      Show global hook status
     agent-trace record            Record a trace from stdin (used by hooks)
     agent-trace commit-link       Link current commit to traces (called by git hook)
     agent-trace blame <file>      Show AI attribution for a file
@@ -61,6 +64,10 @@ from .hooks import (
     configure_cursor_hooks,
     configure_git_hooks,
     configure_git_notes_refspecs,
+    has_global_claude_hooks,
+    has_global_cursor_hooks,
+    remove_global_hooks,
+    setup_global_hooks,
 )
 from .rules import add_rule, remove_rule, show_rules, list_available_rules, TOOL_CHOICES
 from .record import record_from_stdin
@@ -226,11 +233,18 @@ def cmd_init(_args):
             print(f"  -> Skipped (no remote \"{rn}\" or not a git repo)")
 
     print()
-    if _confirm("Configure hook for Cursor?", default=True):
+    cursor_global = has_global_cursor_hooks()
+    claude_global = has_global_claude_hooks()
+
+    if cursor_global:
+        print("  Cursor:     global hooks already configured (~/.cursor/hooks.json) — skipping")
+    elif _confirm("Configure hook for Cursor?", default=True):
         configure_cursor_hooks()
         print("  -> Cursor hooks configured (.cursor/hooks.json)")
 
-    if _confirm("Configure hook for Claude Code?", default=True):
+    if claude_global:
+        print("  Claude Code: global hooks already configured (~/.claude/settings.json) — skipping")
+    elif _confirm("Configure hook for Claude Code?", default=True):
         configure_claude_hooks()
         print("  -> Claude Code hooks configured (.claude/settings.json)")
 
@@ -336,8 +350,13 @@ def cmd_doctor(_args):
         else:
             ok.append("Project config readable")
 
-    # Hooks
-    if os.path.exists(".cursor/hooks.json"):
+    # Hooks — check global first, then project-level
+    cursor_global = has_global_cursor_hooks()
+    claude_global = has_global_claude_hooks()
+
+    if cursor_global:
+        ok.append("Cursor global hooks configured (~/.cursor/hooks.json)")
+    elif os.path.exists(".cursor/hooks.json"):
         try:
             h = json.loads(open(".cursor/hooks.json", encoding="utf-8").read())
             hooks = h.get("hooks") if isinstance(h, dict) else None
@@ -345,25 +364,27 @@ def cmd_doctor(_args):
                 "agent-trace record" in str(v)
                 for v in (hooks.values() if isinstance(hooks, dict) else [])
             ):
-                ok.append("Cursor hooks mention agent-trace record")
+                ok.append("Cursor project hooks mention agent-trace record")
             else:
                 warn.append("Cursor .cursor/hooks.json present but no agent-trace record hook found")
         except (OSError, json.JSONDecodeError):
             warn.append("Cursor .cursor/hooks.json is not valid JSON")
     elif initialised:
-        warn.append("Cursor hooks not configured (.cursor/hooks.json missing)")
+        warn.append("Cursor hooks not configured (no global or project hooks)")
 
-    if os.path.exists(".claude/settings.json"):
+    if claude_global:
+        ok.append("Claude Code global hooks configured (~/.claude/settings.json)")
+    elif os.path.exists(".claude/settings.json"):
         try:
             raw = open(".claude/settings.json", encoding="utf-8").read()
             if "agent-trace record" in raw:
-                ok.append("Claude Code settings mention agent-trace record")
+                ok.append("Claude Code project settings mention agent-trace record")
             else:
                 warn.append("Claude .claude/settings.json present but no agent-trace record hook")
         except OSError:
             warn.append("Could not read .claude/settings.json")
     elif initialised:
-        warn.append("Claude Code hooks not configured (.claude/settings.json missing)")
+        warn.append("Claude Code hooks not configured (no global or project hooks)")
 
     git_hook_ok = False
     git_rewrite_ok = False
@@ -502,8 +523,10 @@ def cmd_status(_args):
         except Exception:
             pass
 
-    cursor_ok = os.path.exists(".cursor/hooks.json")
-    claude_ok = os.path.exists(".claude/settings.json")
+    cursor_global = has_global_cursor_hooks()
+    claude_global = has_global_claude_hooks()
+    cursor_project = os.path.exists(".cursor/hooks.json")
+    claude_project = os.path.exists(".claude/settings.json")
     git_hook_ok = False
     git_rewrite_ok = False
     try:
@@ -518,8 +541,16 @@ def cmd_status(_args):
                 git_rewrite_ok = "agent-trace rewrite-ledger" in f.read()
     except OSError:
         pass
-    print(f"\n  Cursor hook:       {'configured' if cursor_ok else 'not configured'}")
-    print(f"  Claude Code hook:  {'configured' if claude_ok else 'not configured'}")
+
+    def _hook_label(has_global, has_project):
+        if has_global:
+            return "global"
+        if has_project:
+            return "project"
+        return "not configured"
+
+    print(f"\n  Cursor hook:       {_hook_label(cursor_global, cursor_project)}")
+    print(f"  Claude Code hook:  {_hook_label(claude_global, claude_project)}")
     print(f"  Git post-commit:   {'configured' if git_hook_ok else 'not configured'}")
     print(f"  Git post-rewrite:  {'configured' if git_rewrite_ok else 'not configured'}")
 
@@ -567,6 +598,49 @@ def cmd_reset(_args):
     if _confirm("Reconfigure hook for Claude Code?", default=False):
         configure_claude_hooks()
         print("  -> Claude Code hooks configured.")
+
+
+# ===================================================================
+# hooks (global hook management)
+# ===================================================================
+
+HOOK_TOOL_CHOICES = ["cursor", "claude"]
+
+
+def cmd_hooks(args):
+    """Manage global hooks for coding tools."""
+    action = getattr(args, "hooks_action", None)
+
+    if action == "setup-global":
+        tools = getattr(args, "tools", None) or HOOK_TOOL_CHOICES
+        results = setup_global_hooks(tools)
+        for tool, ok in results.items():
+            if ok:
+                print(f"  -> Global {tool} hooks configured")
+            else:
+                print(f"  !! Failed to configure global {tool} hooks")
+
+    elif action == "remove-global":
+        tools = getattr(args, "tools", None) or HOOK_TOOL_CHOICES
+        results = remove_global_hooks(tools)
+        for tool, removed in results.items():
+            if removed:
+                print(f"  -> Global {tool} hooks removed")
+            else:
+                print(f"  -- Global {tool} hooks were not present")
+
+    elif action == "status":
+        cursor_global = has_global_cursor_hooks()
+        claude_global = has_global_claude_hooks()
+        print("Global hooks:")
+        print(f"  Cursor:     {'configured' if cursor_global else 'not configured'}"
+              f"  (~/.cursor/hooks.json)")
+        print(f"  Claude Code: {'configured' if claude_global else 'not configured'}"
+              f"  (~/.claude/settings.json)")
+
+    else:
+        print("Usage: agent-trace hooks {setup-global,remove-global,status}")
+        print("Run 'agent-trace hooks --help' for details.")
 
 
 # ===================================================================
@@ -1285,6 +1359,17 @@ def main():
     sub.add_parser("doctor", help="Check hooks, config, remotes, and optional tools")
     sub.add_parser("status", help="Show agent-trace status")
     sub.add_parser("reset", help="Reset agent-trace configuration")
+    # hooks {setup-global, remove-global, status}
+    sub_hooks = sub.add_parser("hooks", help="Manage global hooks for coding tools (Cursor, Claude Code)")
+    hooks_sub = sub_hooks.add_subparsers(dest="hooks_action", metavar="ACTION")
+    h_setup = hooks_sub.add_parser("setup-global", help="Install global hooks (~/.cursor/hooks.json, ~/.claude/settings.json)")
+    h_setup.add_argument("--tool", "-t", dest="tools", action="append", choices=HOOK_TOOL_CHOICES,
+                         help="Tool(s) to configure (default: all). Can be repeated.")
+    h_remove = hooks_sub.add_parser("remove-global", help="Remove global hooks")
+    h_remove.add_argument("--tool", "-t", dest="tools", action="append", choices=HOOK_TOOL_CHOICES,
+                          help="Tool(s) to remove (default: all). Can be repeated.")
+    hooks_sub.add_parser("status", help="Show global hook status")
+
     sub.add_parser("record", help="Record a trace from stdin (used by hooks)")
     sub.add_parser("commit-link", help="Link current commit to traces (called by git hook)")
     sub.add_parser("rewrite-ledger", help="Remap ledgers after rebase/amend (called by git hook)")
@@ -1514,6 +1599,7 @@ def main():
         "doctor": cmd_doctor,
         "status": cmd_status,
         "reset": cmd_reset,
+        "hooks": cmd_hooks,
         "record": cmd_record,
         "commit-link": cmd_commit_link,
         "rewrite-ledger": cmd_rewrite_ledger,

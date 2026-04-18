@@ -5,6 +5,16 @@ Writes the correct hooks JSON so that agent events pipe through
 ``agent-trace record`` automatically.  Also installs a git post-commit
 hook that links commits to AI traces.
 
+Hooks can be installed at two levels:
+
+- **Project-level** — ``<project>/.cursor/hooks.json``, ``<project>/.claude/settings.json``
+- **Global** — ``~/.cursor/hooks.json``, ``~/.claude/settings.json``
+
+Global hooks fire for *every* project / directory, just like ``git config --global``.
+The ``agent-trace record`` pipeline already resolves the correct project from the
+file being edited (via its git root), so global hooks "just work": edits in an
+initialised repo are recorded, and edits elsewhere are silently ignored.
+
 No external dependencies — stdlib only.
 """
 
@@ -22,6 +32,9 @@ GIT_NOTES_REFSPEC = "+refs/notes/agent-trace:refs/notes/agent-trace"
 
 CURSOR_HOOKS_FILE = ".cursor/hooks.json"
 CLAUDE_SETTINGS_FILE = ".claude/settings.json"
+
+CURSOR_GLOBAL_HOOKS_FILE = Path.home() / ".cursor" / "hooks.json"
+CLAUDE_GLOBAL_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 
 AGENT_TRACE_CMD = "agent-trace record"
 AGENT_TRACE_COMMIT_LINK_CMD = "agent-trace commit-link"
@@ -43,12 +56,19 @@ agent-trace rewrite-ledger 2>/dev/null || true
 # Cursor
 # -------------------------------------------------------------------
 
-def configure_cursor_hooks(project_dir: str | None = None) -> bool:
-    """Merge agent-trace into .cursor/hooks.json.  Returns True on success."""
-    if project_dir is None:
-        project_dir = os.getcwd()
+def configure_cursor_hooks(project_dir: str | None = None, *, global_install: bool = False) -> bool:
+    """Merge agent-trace into .cursor/hooks.json.  Returns True on success.
 
-    hooks_path = Path(project_dir) / CURSOR_HOOKS_FILE
+    When ``global_install`` is True, writes to ``~/.cursor/hooks.json`` instead
+    of the project-level file.
+    """
+    if global_install:
+        hooks_path = CURSOR_GLOBAL_HOOKS_FILE
+    else:
+        if project_dir is None:
+            project_dir = os.getcwd()
+        hooks_path = Path(project_dir) / CURSOR_HOOKS_FILE
+
     hooks_path.parent.mkdir(parents=True, exist_ok=True)
 
     if hooks_path.exists():
@@ -87,12 +107,19 @@ def configure_cursor_hooks(project_dir: str | None = None) -> bool:
 # Claude Code
 # -------------------------------------------------------------------
 
-def configure_claude_hooks(project_dir: str | None = None) -> bool:
-    """Merge agent-trace into .claude/settings.json.  Returns True on success."""
-    if project_dir is None:
-        project_dir = os.getcwd()
+def configure_claude_hooks(project_dir: str | None = None, *, global_install: bool = False) -> bool:
+    """Merge agent-trace into .claude/settings.json.  Returns True on success.
 
-    settings_path = Path(project_dir) / CLAUDE_SETTINGS_FILE
+    When ``global_install`` is True, writes to ``~/.claude/settings.json`` instead
+    of the project-level file.
+    """
+    if global_install:
+        settings_path = CLAUDE_GLOBAL_SETTINGS_FILE
+    else:
+        if project_dir is None:
+            project_dir = os.getcwd()
+        settings_path = Path(project_dir) / CLAUDE_SETTINGS_FILE
+
     settings_path.parent.mkdir(parents=True, exist_ok=True)
 
     if settings_path.exists():
@@ -145,6 +172,162 @@ def configure_claude_hooks(project_dir: str | None = None) -> bool:
 
     settings_path.write_text(json.dumps(config, indent=2) + "\n")
     return True
+
+
+# -------------------------------------------------------------------
+# Global hook detection and removal
+# -------------------------------------------------------------------
+
+def has_global_cursor_hooks() -> bool:
+    """Return True if ``~/.cursor/hooks.json`` contains agent-trace hooks."""
+    try:
+        raw = CURSOR_GLOBAL_HOOKS_FILE.read_text()
+    except (OSError, FileNotFoundError):
+        return False
+    return AGENT_TRACE_CMD in raw
+
+
+def has_global_claude_hooks() -> bool:
+    """Return True if ``~/.claude/settings.json`` contains agent-trace hooks."""
+    try:
+        raw = CLAUDE_GLOBAL_SETTINGS_FILE.read_text()
+    except (OSError, FileNotFoundError):
+        return False
+    return AGENT_TRACE_CMD in raw
+
+
+def has_global_hooks(tool: str | None = None) -> bool:
+    """Return True if global hooks are configured.
+
+    ``tool`` can be ``"cursor"``, ``"claude"``, or ``None`` (any).
+    """
+    if tool == "cursor":
+        return has_global_cursor_hooks()
+    if tool == "claude":
+        return has_global_claude_hooks()
+    return has_global_cursor_hooks() or has_global_claude_hooks()
+
+
+def _remove_agent_trace_from_cursor(hooks_path: Path) -> bool:
+    """Remove agent-trace entries from a Cursor hooks.json file."""
+    if not hooks_path.is_file():
+        return False
+    try:
+        config = json.loads(hooks_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    hooks = config.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+
+    changed = False
+    for event, entries in list(hooks.items()):
+        if not isinstance(entries, list):
+            continue
+        filtered = [
+            h for h in entries
+            if not (isinstance(h, dict) and AGENT_TRACE_CMD in h.get("command", ""))
+        ]
+        if len(filtered) != len(entries):
+            changed = True
+            if filtered:
+                hooks[event] = filtered
+            else:
+                del hooks[event]
+
+    if changed:
+        hooks_path.write_text(json.dumps(config, indent=2) + "\n")
+    return changed
+
+
+def _remove_agent_trace_from_claude(settings_path: Path) -> bool:
+    """Remove agent-trace entries from a Claude Code settings.json file."""
+    if not settings_path.is_file():
+        return False
+    try:
+        config = json.loads(settings_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    hooks = config.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+
+    changed = False
+    for event, entries in list(hooks.items()):
+        if not isinstance(entries, list):
+            continue
+        filtered = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                filtered.append(entry)
+                continue
+            inner = entry.get("hooks", [])
+            if isinstance(inner, list) and any(
+                AGENT_TRACE_CMD in h.get("command", "")
+                for h in inner if isinstance(h, dict)
+            ):
+                changed = True
+                continue
+            filtered.append(entry)
+        if len(filtered) != len(entries):
+            changed = True
+        if filtered:
+            hooks[event] = filtered
+        else:
+            del hooks[event]
+
+    if changed:
+        if not hooks:
+            del config["hooks"]
+        config_text = json.dumps(config, indent=2) + "\n"
+        settings_path.write_text(config_text)
+    return changed
+
+
+def remove_global_cursor_hooks() -> bool:
+    """Remove agent-trace entries from ``~/.cursor/hooks.json``."""
+    return _remove_agent_trace_from_cursor(CURSOR_GLOBAL_HOOKS_FILE)
+
+
+def remove_global_claude_hooks() -> bool:
+    """Remove agent-trace entries from ``~/.claude/settings.json``."""
+    return _remove_agent_trace_from_claude(CLAUDE_GLOBAL_SETTINGS_FILE)
+
+
+def setup_global_hooks(tools: list[str] | None = None) -> dict[str, bool]:
+    """Install global hooks for the given tools (default: all).
+
+    Returns a dict of ``{tool_name: success}``.
+    """
+    if tools is None:
+        tools = ["cursor", "claude"]
+
+    results: dict[str, bool] = {}
+    for tool in tools:
+        if tool == "cursor":
+            results["cursor"] = configure_cursor_hooks(global_install=True)
+        elif tool == "claude":
+            results["claude"] = configure_claude_hooks(global_install=True)
+    return results
+
+
+def remove_global_hooks(tools: list[str] | None = None) -> dict[str, bool]:
+    """Remove global hooks for the given tools (default: all).
+
+    Returns a dict of ``{tool_name: removed}``.
+    """
+    if tools is None:
+        tools = ["cursor", "claude"]
+
+    results: dict[str, bool] = {}
+    for tool in tools:
+        if tool == "cursor":
+            results["cursor"] = remove_global_cursor_hooks()
+        elif tool == "claude":
+            results["claude"] = remove_global_claude_hooks()
+    return results
 
 
 # -------------------------------------------------------------------
