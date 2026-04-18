@@ -4,15 +4,10 @@ A command-line tool for tracing AI-generated code changes across coding agents l
 
 This implementation follows the [Agent Trace](https://agent-trace.dev/) specification and the **redesign** described in the umbrella workspace: deterministic-only attribution, local-first storage, **git-like** `push` / `pull` / `sync`, **git notes** (`refs/notes/agent-trace`) for sharing metadata with the repo, and an optional HTTP remote as a **pure datastore** (no server-side blame).
 
-**Documentation** (paths work in a full **agent-trace** workspace; if you cloned only this repo, open the same filenames from the umbrella repository root):
-
-- [AGENT-TRACE-NEW-PROPOSAL.md](../AGENT-TRACE-NEW-PROPOSAL.md) — product and architecture principles
-- [IMPLEMENTATION-PLAN.md](../IMPLEMENTATION-PLAN.md) — phased implementation (core path complete)
-
 **How it behaves:**
 
 - **Local-first** — Hooks write to JSONL under `AGENT_TRACE_HOME` (default `~/.agent-trace/`). The repo only contains a small **`.agent-trace/project.json`** pointer (stable `project_id`). Data lives in `~/.agent-trace/projects/<project_id>/`.
-- **Optional remote** — Configure a named remote (`agent-trace remote`) and run **`agent-trace push` / `pull` / `sync`** when you want to mirror traces, ledgers, commit-links, and conversations to [agent-trace-service](../agent-trace-service/). Nothing syncs automatically during editing.
+- **Optional remote** — Configure a named remote (`agent-trace remote`) and run **`agent-trace push` / `pull` / `sync`** when you want to mirror traces, ledgers, commit-links, and conversations to a remote repository storing the traces. Nothing syncs automatically during editing.
 - **Git notes** — `agent-trace notes …` attaches composable JSON to commits so attribution can travel with `git fetch` without any service.
 
 Use **`agent-trace blame <file>`** for per-line **AI**, **HUMAN**, **MIXED**, or **UNKNOWN** labels from the ledger (and git note inline ledger when present). There is **no heuristic blame path**: if there is no ledger (and no usable git note), lines are **UNKNOWN**.
