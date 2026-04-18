@@ -127,10 +127,8 @@ install_files() {
     mkdir -p "${BIN_DIR}"
     mkdir -p "${LIB_DIR}/agent_trace"
 
-    # Copy Python modules
-    for f in __init__.py blame.py cli.py commit_link.py config.py context.py hooks.py ledger.py models.py record.py rules.py rewrite.py trace.py; do
-        cp "${SOURCE_DIR}/agent_trace/${f}" "${LIB_DIR}/agent_trace/${f}"
-    done
+    # Copy all Python modules (avoid a stale whitelist — new files must ship too)
+    cp "${SOURCE_DIR}/agent_trace/"*.py "${LIB_DIR}/agent_trace/"
 
     if [ -d "${SOURCE_DIR}/schemas" ]; then
         mkdir -p "${LIB_DIR}/schemas"
