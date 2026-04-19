@@ -55,7 +55,12 @@ from .blame import blame_file
 from .commit_link import create_commit_link
 from .context import context_command
 from .registry import list_projects, lookup_or_create_project_id
-from .trace import cli_resolve_project_root, discover_ambiguous_repo_roots, git_repo_root_for_path
+from .trace import (
+    cli_resolve_project_root,
+    discover_ambiguous_repo_roots,
+    get_vcs_info,
+    git_repo_root_for_path,
+)
 from .hooks import (
     configure_claude_hooks,
     configure_cursor_hooks,
@@ -153,6 +158,11 @@ def cmd_init(_args):
     if not git_repo_root_for_path(cwd):
         print("agent-trace init: not a git repository.", file=sys.stderr)
         print("Create or enter a git repo, then run init again.", file=sys.stderr)
+        sys.exit(1)
+
+    if get_vcs_info(cwd) is None:
+        print("agent-trace init: repository has no commits yet.", file=sys.stderr)
+        print("Create at least one commit, then run 'agent-trace init' again.", file=sys.stderr)
         sys.exit(1)
 
     label = os.path.basename(os.path.abspath(cwd))
