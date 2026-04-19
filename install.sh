@@ -152,17 +152,10 @@ ENTRY_POINT
 
     chmod +x "${BIN_DIR}/agent-trace"
 
-    # Copy .env.example → .env (only if .env doesn't exist yet)
-    if [ ! -f "${INSTALL_DIR}/.env" ]; then
-        if [ -f "${SOURCE_DIR}/.env.example" ]; then
-            cp "${SOURCE_DIR}/.env.example" "${INSTALL_DIR}/.env"
-            info "Created ${INSTALL_DIR}/.env (edit to configure)"
-        fi
-    else
-        info "Keeping existing ${INSTALL_DIR}/.env"
-    fi
+    # Short alias: `at` → agent-trace
+    ln -sf "${BIN_DIR}/agent-trace" "${BIN_DIR}/at"
 
-    info "Installed ${BIN_DIR}/agent-trace"
+    info "Installed ${BIN_DIR}/agent-trace (alias: at)"
 }
 
 # -------------------------------------------------------------------

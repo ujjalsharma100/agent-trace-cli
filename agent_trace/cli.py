@@ -45,12 +45,9 @@ import urllib.error
 import urllib.request
 
 from .config import (
-    DEFAULT_SERVICE_URL,
-    get_auth_token,
     get_global_config,
     get_global_config_file,
     get_project_config,
-    get_service_url,
     save_global_config,
     save_project_config,
 )
@@ -140,6 +137,12 @@ def _confirm(message, default=True):
 # ===================================================================
 
 def cmd_init(_args):
+    """Zero-prompt init — applies sensible local defaults and wires up hooks.
+
+    Like ``git init``: creates local-only state. Remote sharing is opt-in and
+    set up later via ``agent-trace remote add`` (and ``agent-trace notes push``
+    / ``agent-trace push``).
+    """
     config = get_project_config()
     if config is not None:
         print("agent-trace is already initialized for this project.")
@@ -152,122 +155,68 @@ def cmd_init(_args):
         print("Create or enter a git repo, then run init again.", file=sys.stderr)
         sys.exit(1)
 
-    default_label = os.path.basename(os.path.abspath(cwd))
-    print("Initializing agent-trace...\n")
+    label = os.path.basename(os.path.abspath(cwd))
 
-    storage = _prompt("Storage mode", default="local", choices=["local", "remote"])
-    project_config: dict = {"storage": storage}
-
-    if storage == "remote":
-        project_config["service_url"] = _prompt("Service URL", default=DEFAULT_SERVICE_URL).rstrip("/")
-        global_config = get_global_config()
-        if global_config.get("auth_token"):
-            print("Using global auth token (set via 'agent-trace set globaluser').")
-        else:
-            auth_token = _prompt("Auth Token")
-            project_config["auth_token"] = auth_token
-
-    label = _prompt("Project label (for your reference)", default=default_label)
-    project_config["label"] = (label or default_label).strip() or default_label
-
+    project_config: dict = {
+        "label": label,
+        "notes": {
+            "enabled": True,
+            "include_ledger": True,
+            "include_summary": True,
+            "include_prompts": True,
+        },
+    }
     save_project_config(project_config)
 
     from .storage import get_project_config_path, resolve_project_id
 
-    pid = resolve_project_id(cwd, create=False)
-    if pid:
-        print(f"\nProject id: {pid}")
-        print(f"Settings:   {get_project_config_path(pid)}")
-        print("Pointer:    .agent-trace/project.json (checked in; small JSON file)")
+    pid = resolve_project_id(cwd, create=True)
 
-    # Optional sync remotes (push/pull to agent-trace service)
-    if pid:
-        while _confirm("Configure a sync remote (push/pull to a server)?", default=False):
-            name = _prompt("Remote name", default="origin")
-            url = _prompt("Remote base URL (e.g. https://trace.example.com)").strip()
-            if not url:
-                print("  Skipped (empty URL).")
-                break
-            print("Token: paste a token, or env:VAR, or leave empty for none.")
-            tok_line = _prompt("Token / env:VAR", default="").strip()
-            token = None
-            token_env = None
-            if tok_line.startswith("env:"):
-                token_env = tok_line[4:].strip()
-            elif tok_line:
-                token = tok_line
-            try:
-                remote_add(pid, name, url.rstrip("/"), token=token, token_env=token_env)
-                print(f"  -> Remote '{name}' added.")
-            except ValueError as e:
-                print(f"  -> {e}")
-            if not _confirm("Add another sync remote?", default=False):
-                break
+    print("Initializing agent-trace...\n")
+    print(f"  Project id:   {pid}")
+    print(f"  Label:        {label}")
+    print(f"  Data dir:     {get_project_config_path(pid).parent if pid else '?'}")
 
-    # Git notes defaults
-    project_config = get_project_config() or project_config
-    if _confirm("Enable git notes (JSON on refs/notes/agent-trace)?", default=True):
-        project_config.setdefault("notes", {})
-        project_config["notes"]["enabled"] = True
-        project_config["notes"]["include_ledger"] = _confirm(
-            "Include per-line ledger in notes?", default=True,
-        )
-        project_config["notes"]["include_summary"] = _confirm(
-            "Include summaries in notes?", default=False,
-        )
-        project_config["notes"]["include_prompts"] = _confirm(
-            "Include prompt previews in notes?", default=False,
-        )
+    # Git notes — defaults on, include all sections
+    print("  Git notes:    enabled (ledger + summary + prompts)")
+
+    notes_remote = "origin"
+    notes_refspec_ok = False
+    if os.path.isdir(".git"):
+        notes_refspec_ok = configure_git_notes_refspecs(remote_name=notes_remote)
+    if notes_refspec_ok:
+        print(f"  Note refspec: configured on remote \"{notes_remote}\"")
     else:
-        project_config.setdefault("notes", {})
-        project_config["notes"]["enabled"] = False
-    save_project_config(project_config)
+        print(f"  Note refspec: skipped (no git remote \"{notes_remote}\" yet — "
+              "rerun 'agent-trace reset' after adding one)")
 
-    if os.path.isdir(".git") and _confirm(
-        "Auto-configure git note refspecs (fetch/push refs/notes/agent-trace)?", default=True,
-    ):
-        rn = _prompt("Git remote name for note refspecs", default="origin")
-        if configure_git_notes_refspecs(remote_name=rn):
-            print(f"  -> Git notes refspecs configured for remote \"{rn}\"")
-        else:
-            print(f"  -> Skipped (no remote \"{rn}\" or not a git repo)")
-
-    print()
+    # Hooks — install everything by default, skip if global already handles it
     cursor_global = has_global_cursor_hooks()
     claude_global = has_global_claude_hooks()
 
     if cursor_global:
-        print("  Cursor:     global hooks already configured (~/.cursor/hooks.json) — skipping")
-    elif _confirm("Configure hook for Cursor?", default=True):
+        print("  Cursor hooks: global (~/.cursor/hooks.json) — already set")
+    else:
         configure_cursor_hooks()
-        print("  -> Cursor hooks configured (.cursor/hooks.json)")
+        print("  Cursor hooks: configured (.cursor/hooks.json)")
 
     if claude_global:
-        print("  Claude Code: global hooks already configured (~/.claude/settings.json) — skipping")
-    elif _confirm("Configure hook for Claude Code?", default=True):
+        print("  Claude hooks: global (~/.claude/settings.json) — already set")
+    else:
         configure_claude_hooks()
-        print("  -> Claude Code hooks configured (.claude/settings.json)")
+        print("  Claude hooks: configured (.claude/settings.json)")
 
     if os.path.isdir(".git"):
-        if _confirm("Configure git hooks? (post-commit + post-rewrite)", default=True):
-            configure_git_hooks()
-            print("  -> Git post-commit hook configured (.git/hooks/post-commit)")
-            print("  -> Git post-rewrite hook configured (.git/hooks/post-rewrite)")
+        configure_git_hooks()
+        print("  Git hooks:    post-commit + post-rewrite installed")
 
-    if _confirm("Configure session summary command (optional)?", default=False):
-        cmd = _prompt(
-            "Summary command (reads JSON on stdin, writes JSON on stdout)",
-            default="",
-        )
-        if cmd.strip():
-            cfg = get_project_config() or {}
-            cfg.setdefault("summary", {})
-            cfg["summary"]["enabled"] = True
-            cfg["summary"]["command"] = cmd.strip()
-            save_project_config(cfg)
-            print("  -> Session summaries enabled.")
-
-    print("\nagent-trace initialized successfully!")
+    print()
+    print("agent-trace initialized. Everything runs locally.")
+    print()
+    print("  Change config:    agent-trace reset")
+    print("  Add a sync remote: agent-trace remote add origin <url>")
+    print("  Push to remote:    agent-trace push")
+    print("  Ship notes with commits: notes travel with 'git push' once a remote is set.")
 
 
 def _probe_remote_health(base_url: str) -> tuple[bool, str]:
@@ -285,11 +234,10 @@ def _probe_remote_health(base_url: str) -> tuple[bool, str]:
 
 
 def cmd_doctor(_args):
-    """Report hook installation, config validity, storage, remotes, and optional tools."""
+    """Report hook installation, config validity, remotes, and optional tools."""
     from .storage import (
         get_agent_trace_home,
         get_project_config_path,
-        read_in_repo_pointer,
         resolve_project_id,
     )
 
@@ -332,23 +280,17 @@ def cmd_doctor(_args):
         else:
             ok.append("Global config permissions look good (600)")
 
-    ptr = read_in_repo_pointer(cwd)
     cfg = get_project_config()
     pid = resolve_project_id(cwd, create=False)
     initialised = cfg is not None
 
-    if ptr and isinstance(ptr.get("project_id"), str) and ptr["project_id"].strip():
-        ok.append("In-repo pointer .agent-trace/project.json is present")
-    else:
-        warn.append("No valid .agent-trace/project.json (run agent-trace init)")
-
-    if ptr and isinstance(ptr.get("project_id"), str) and ptr["project_id"].strip() and cfg is None:
-        err.append("project-config.json missing or unreadable under global project dir")
-    elif cfg is not None:
+    if initialised:
         if pid:
             ok.append(f"Project config readable ({get_project_config_path(pid)})")
         else:
             ok.append("Project config readable")
+    else:
+        warn.append("Project not initialised (run agent-trace init)")
 
     # Hooks — check global first, then project-level
     cursor_global = has_global_cursor_hooks()
@@ -486,7 +428,6 @@ def cmd_status(_args):
     pid = resolve_project_id(os.getcwd(), create=False)
 
     print("agent-trace status\n")
-    print(f"  Storage:    local-first")
     if config.get("label"):
         print(f"  Label:      {config['label']}")
 
@@ -560,6 +501,7 @@ def cmd_status(_args):
 # ===================================================================
 
 def cmd_reset(_args):
+    """Reconfigure label, notes sections, hooks, and git-notes refspecs."""
     config = get_project_config()
     if config is None:
         print("agent-trace is not set up for this project.")
@@ -568,36 +510,53 @@ def cmd_reset(_args):
 
     print("Resetting agent-trace configuration...\n")
 
-    storage = _prompt(
-        "Storage mode",
-        default=config.get("storage", "local"),
-        choices=["local", "remote"],
+    cwd = os.getcwd()
+    default_label = config.get("label") or os.path.basename(os.path.abspath(cwd))
+    label = _prompt("Project label", default=default_label).strip() or default_label
+
+    notes_cfg = config.get("notes") or {}
+    notes_enabled = _confirm(
+        "Enable git notes (JSON on refs/notes/agent-trace)?",
+        default=bool(notes_cfg.get("enabled", True)),
     )
-    new_config: dict = {"storage": storage}
+    new_notes = {"enabled": notes_enabled}
+    if notes_enabled:
+        new_notes["include_ledger"] = _confirm(
+            "Include per-line ledger in notes?",
+            default=bool(notes_cfg.get("include_ledger", True)),
+        )
+        new_notes["include_summary"] = _confirm(
+            "Include summaries in notes?",
+            default=bool(notes_cfg.get("include_summary", True)),
+        )
+        new_notes["include_prompts"] = _confirm(
+            "Include prompt previews in notes?",
+            default=bool(notes_cfg.get("include_prompts", True)),
+        )
 
-    if storage == "remote":
-        project_id = _prompt("Project ID", default=config.get("project_id", ""))
-        new_config["project_id"] = project_id
-        new_config["service_url"] = config.get("service_url", DEFAULT_SERVICE_URL)
-
-        global_config = get_global_config()
-        if global_config.get("auth_token"):
-            print("Using global auth token (set via 'agent-trace set globaluser').")
-        else:
-            auth_token = _prompt("Auth Token", default=config.get("auth_token", ""))
-            new_config["auth_token"] = auth_token
-
+    new_config = dict(config)
+    new_config["label"] = label
+    new_config["notes"] = new_notes
     save_project_config(new_config)
-    print("\nConfiguration updated.")
+    print("\nConfiguration updated.\n")
 
-    print()
-    if _confirm("Reconfigure hook for Cursor?", default=False):
+    if os.path.isdir(".git"):
+        rn = _prompt("Git remote for note refspecs (blank to skip)", default="origin").strip()
+        if rn:
+            if configure_git_notes_refspecs(remote_name=rn):
+                print(f"  -> Git notes refspecs configured for remote \"{rn}\"")
+            else:
+                print(f"  -> Skipped (no remote \"{rn}\")")
+
+    if _confirm("Reconfigure Cursor hook?", default=False):
         configure_cursor_hooks()
         print("  -> Cursor hooks configured.")
-
-    if _confirm("Reconfigure hook for Claude Code?", default=False):
+    if _confirm("Reconfigure Claude Code hook?", default=False):
         configure_claude_hooks()
         print("  -> Claude Code hooks configured.")
+    if os.path.isdir(".git") and _confirm("Reinstall git hooks?", default=False):
+        configure_git_hooks()
+        print("  -> Git hooks reinstalled.")
 
 
 # ===================================================================

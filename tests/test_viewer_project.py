@@ -42,7 +42,7 @@ class TestViewerProjectInfo(unittest.TestCase):
 
         os.environ["AGENT_TRACE_HOME"] = str(home)
         os.chdir(repo)
-        save_project_config({"storage": "local", "label": "my-label"})
+        save_project_config({"label": "my-label"})
 
         info = get_project_info(str(repo))
         self.assertTrue(info.get("has_agent_trace"))

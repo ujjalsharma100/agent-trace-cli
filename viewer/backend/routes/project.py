@@ -1,7 +1,7 @@
 """
 /api/project — project root, agent-trace init state, and global storage paths.
 
-Uses the in-repo pointer ``.agent-trace/project.json`` (Phase 2), not legacy config.json.
+Resolves ``project_id`` directly from the repo root (sanitized absolute path).
 """
 from __future__ import annotations
 
@@ -46,33 +46,28 @@ def _git_note_for_head(project_root: str) -> dict[str, Any] | None:
         return None
 
 
+def _path_to_project_id(repo_root: str) -> str:
+    """Mirror of ``agent_trace.storage.path_to_project_id`` (keeps viewer standalone)."""
+    return os.path.realpath(repo_root).replace(os.sep, "-")
+
+
 def get_project_info(project_root: str) -> dict[str, Any]:
     """Return project metadata for the viewer UI."""
     root = os.path.abspath(project_root)
     home = os.environ.get("AGENT_TRACE_HOME") or os.path.expanduser("~/.agent-trace")
     home = os.path.abspath(os.path.expanduser(home))
 
-    pointer_path = os.path.join(root, ".agent-trace", "project.json")
-    ptr = _read_json(pointer_path)
-    project_id = ptr.get("project_id") if ptr else None
-    if not isinstance(project_id, str):
-        project_id = None
+    project_id = _path_to_project_id(root)
+    project_data_dir = os.path.join(home, "projects", project_id)
+    cfg_path = os.path.join(project_data_dir, "project-config.json")
+    cfg = _read_json(cfg_path)
 
-    has_agent_trace = bool(project_id)
-    storage = "local"
+    has_agent_trace = cfg is not None
     label = None
-    project_data_dir = None
-
-    if project_id:
-        safe = project_id.replace(":", "_").replace("/", "_").replace("\\", "_")
-        project_data_dir = os.path.join(home, "projects", safe)
-        cfg_path = os.path.join(project_data_dir, "project-config.json")
-        cfg = _read_json(cfg_path)
-        if cfg:
-            storage = str(cfg.get("storage", "local"))
-            lab = cfg.get("label")
-            if isinstance(lab, str) and lab.strip():
-                label = lab.strip()
+    if cfg:
+        lab = cfg.get("label")
+        if isinstance(lab, str) and lab.strip():
+            label = lab.strip()
 
     note_head: dict[str, Any] | None = None
     if os.path.isdir(os.path.join(root, ".git")):
@@ -81,10 +76,9 @@ def get_project_info(project_root: str) -> dict[str, Any]:
     return {
         "root": root,
         "agent_trace_home": home,
-        "storage": storage,
         "has_agent_trace": has_agent_trace,
-        "project_id": project_id,
+        "project_id": project_id if has_agent_trace else None,
         "label": label,
-        "project_data_dir": project_data_dir,
+        "project_data_dir": project_data_dir if has_agent_trace else None,
         "git_note_head": note_head,
     }

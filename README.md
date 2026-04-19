@@ -6,9 +6,9 @@ This implementation follows the [Agent Trace](https://agent-trace.dev/) specific
 
 **How it behaves:**
 
-- **Local-first** — Hooks write to JSONL under `AGENT_TRACE_HOME` (default `~/.agent-trace/`). The repo only contains a small **`.agent-trace/project.json`** pointer (stable `project_id`). Data lives in `~/.agent-trace/projects/<project_id>/`.
-- **Optional remote** — Configure a named remote (`agent-trace remote`) and run **`agent-trace push` / `pull` / `sync`** when you want to mirror traces, ledgers, commit-links, and conversations to a remote repository storing the traces. Nothing syncs automatically during editing.
-- **Git notes** — `agent-trace notes …` attaches composable JSON to commits so attribution can travel with `git fetch` without any service.
+- **Local-first** — Hooks write JSONL under `AGENT_TRACE_HOME` (default `~/.agent-trace/`). Nothing is written into the repo. The `project_id` is derived from the repo's absolute path (Claude-Code convention: `/Users/jane/myrepo` → `-Users-jane-myrepo`), so data lives at `~/.agent-trace/projects/<project_id>/`.
+- **Git-like flow** — `agent-trace init` is zero-prompt and sets up everything locally (like `git init`). Add remotes later with `agent-trace remote add` and run **`agent-trace push` / `pull` / `sync`** explicitly when you want to share. Nothing syncs automatically during editing.
+- **Git notes** — `agent-trace notes …` attaches composable JSON to commits under `refs/notes/agent-trace`, so attribution travels with `git fetch` / `git push` once the notes refspec is configured (set up automatically for `origin` during `init`).
 
 Use **`agent-trace blame <file>`** for per-line **AI**, **HUMAN**, **MIXED**, or **UNKNOWN** labels from the ledger (and git note inline ledger when present). There is **no heuristic blame path**: if there is no ledger (and no usable git note), lines are **UNKNOWN**.
 
@@ -51,17 +51,17 @@ bash install.sh
 1. If run via curl, downloads the repo from GitHub and runs the installer
 2. Checks for Python 3.9+
 3. Copies Python source to `~/.agent-trace/lib/`
-4. Creates an executable at `~/.agent-trace/bin/agent-trace`
-5. Copies `.env.example` to `~/.agent-trace/.env` (if no `.env` exists)
-6. Installs the **file viewer** to `~/.agent-trace/viewer/` and creates `~/.agent-trace/bin/agent-trace-viewer`
+4. Creates executables at `~/.agent-trace/bin/agent-trace` and a short alias `~/.agent-trace/bin/at`
+5. Installs the **file viewer** to `~/.agent-trace/viewer/` and creates `~/.agent-trace/bin/agent-trace-viewer`
    - If `npm` is available, builds the frontend from source; otherwise uses the pre-built `dist/`
-7. Adds `~/.agent-trace/bin` to your shell PATH (zsh, bash, or fish)
-8. **Offers to set up global hooks** for Cursor and Claude Code (optional, per-tool prompt)
+6. Adds `~/.agent-trace/bin` to your shell PATH (zsh, bash, or fish)
+7. **Offers to set up global hooks** for Cursor and Claude Code (optional, per-tool prompt)
 
 After installing, restart your shell (or `source ~/.zshrc`) and verify:
 
 ```bash
 agent-trace --version
+at --version        # short alias, same binary
 ```
 
 ### Uninstall
@@ -78,18 +78,18 @@ Then remove the `# agent-trace` + `export PATH=...` lines from your `~/.zshrc` /
 
 ### `agent-trace init`
 
-Initialize tracing for the current project (interactive): project label, optional **remote** URL and token, **git notes** (refspecs + optional sections), **hooks** (Cursor, Claude Code, git post-commit / post-rewrite), and optional **summary** command for note enrichment.
+Zero-prompt initialization — like `git init`. Writes `project-config.json` for the repo (label defaults to the directory name), enables notes with default sections, installs git hooks (`post-commit`, `post-rewrite`) and per-tool hooks (Cursor, Claude Code) when a global hook is not already present, and auto-configures the git notes refspec (`refs/notes/agent-trace`) for `origin` if one exists.
 
-If **global hooks** are already configured for a tool (via `agent-trace hooks setup-global`), the init wizard skips the project-level hook prompt for that tool — global hooks make project-level hooks redundant.
+No prompts, no remote. If you want to share traces with a team, add a remote later with `agent-trace remote add`. Re-run with `agent-trace reset` to reconfigure interactively.
 
 ```bash
 cd my-project
-agent-trace init
+agent-trace init      # or: at init
 ```
 
 ### `agent-trace status`
 
-Show project id, storage paths, counts, hook status, remote/sync-related status, and whether unpushed data exists (git-style overview).
+Show project id, data paths, counts, hook status, remote/sync-related status, and whether unpushed data exists (git-style overview).
 
 ```bash
 agent-trace status
@@ -105,7 +105,7 @@ agent-trace doctor
 
 ### `agent-trace reset`
 
-Re-prompts for all settings (storage mode, project ID, auth token, hooks).
+Interactive reconfiguration — prompts for project label, notes sections, summary command, and hook installation. Remotes are managed separately (`agent-trace remote`).
 
 ```bash
 agent-trace reset
@@ -203,7 +203,7 @@ agent-trace context src/utils/parser.ts --lines 10-50 --query "why was this appr
 
 The JSON output includes per-segment fields: `start_line`, `end_line`, `attribution` (`ai`/`mixed`/`human`), `model_id`, `tool`, `trace_id`, `confidence`, `conversation_url`, `conversation_size`, and `preview`. When `--full` is set, `conversation_content` is also included.
 
-Conversation content is resolved from local `file://` paths (local mode) or fetched from the remote service (remote mode).
+Conversation content is resolved from local `file://` paths recorded alongside the trace.
 
 ---
 
@@ -319,29 +319,20 @@ List registered projects or adopt a repo directory and print its `project_id`.
 }
 ```
 
-### Service URL — `~/.agent-trace/.env`
+### Project identity — no in-repo file
 
-```bash
-# Service URL (default: http://localhost:5000)
-AGENT_TRACE_URL=http://localhost:5000
-```
+The `project_id` is derived from the canonical repo path (e.g. `/Users/jane/myrepo` → `-Users-jane-myrepo`). Nothing is written into the repo to identify it; every invocation recomputes the id from the working directory. Moving the repo changes the id — same as `git init`'ing a fresh copy.
 
-Edit this file after install to point at your service. See `.env.example` for reference.
+### Project settings — `~/.agent-trace/projects/<project_id>/project-config.json`
 
-### In-repo pointer — `.agent-trace/project.json`
-
-Checked in (small file). Contains **`project_id`** so the CLI resolves `~/.agent-trace/projects/<project_id>/`. May include notes-related fields depending on init.
-
-### Project settings — `AGENT_TRACE_HOME/projects/<project_id>/project-config.json`
-
-Created/managed by `agent-trace init`. Holds storage mode, optional service URL and token, `label`, `notes.*`, `summary.*`, remotes, etc. **Do not commit** this file; it stays under `AGENT_TRACE_HOME`.
+Created/managed by `agent-trace init`. Holds `label`, `notes.*`, `summary.*`, and per-project remote defaults. Lives under `AGENT_TRACE_HOME` — never committed.
 
 ### Resolution order
 
 | Setting | Priority |
 |---------|----------|
-| Auth token | `AGENT_TRACE_TOKEN` env > global config > project config |
-| Service URL | `AGENT_TRACE_URL` env / `.env` > project config > default (`http://localhost:5000`) |
+| Auth token | `AGENT_TRACE_TOKEN` env > global config |
+| Remote URL | Named remote from `agent-trace remote` (per-project) |
 
 ---
 
@@ -363,8 +354,8 @@ When global hooks are present, `agent-trace init` skips the per-tool hook prompt
 
 There are two kinds of hook events:
 
-1. **Trace-recording hooks** — after file edits, shell runs, and session start/end. Each event produces a trace record (stored locally or sent to the remote service). Traces include per-line content hashes and edit sequence numbers for deterministic attribution.
-2. **Conversation-sync hooks** — after the assistant has finished a full response. These do **not** create a trace; they only sync the full conversation transcript to the remote service (when storage is remote and the transcript path is local). This keeps conversation content up to date instead of capturing it mid-turn during tool use.
+1. **Trace-recording hooks** — after file edits, shell runs, and session start/end. Each event produces a trace record (written to JSONL under `AGENT_TRACE_HOME`). Traces include per-line content hashes and edit sequence numbers for deterministic attribution.
+2. **Conversation-sync hooks** — after the assistant has finished a full response. These do **not** create a trace; they refresh the local reference to the conversation transcript so later `agent-trace context` calls see the full turn. Sharing with a remote happens explicitly via `agent-trace push` / `sync`.
 
 ### Git hooks
 
@@ -390,7 +381,7 @@ Two git hooks are installed when you configure git hooks during `agent-trace ini
 ```
 
 - **Trace events:** `sessionStart`, `sessionEnd`, `afterFileEdit`, `afterTabFileEdit`, `afterShellExecution`
-- **Conversation sync only:** `afterAgentResponse` (no trace; syncs full transcript in remote mode)
+- **Conversation sync only:** `afterAgentResponse` (no trace; refreshes transcript reference)
 
 ### Claude Code — `.claude/settings.json` (project) or `~/.claude/settings.json` (global)
 
@@ -409,7 +400,7 @@ Two git hooks are installed when you configure git hooks during `agent-trace ini
 ```
 
 - **Trace events:** `SessionStart`, `SessionEnd`, `PostToolUse` (Write/Edit, Bash)
-- **Conversation sync only:** `Stop` (no trace; syncs full transcript in remote mode when the agent loop ends)
+- **Conversation sync only:** `Stop` (no trace; refreshes transcript reference when the agent loop ends)
 
 Existing hooks are **preserved** — agent-trace entries are merged in without overwriting anything.
 
@@ -422,13 +413,15 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
 ~/.claude/settings.json          # Claude Code global hooks (optional, via hooks setup-global)
 
 ~/.agent-trace/
-  .env                           # default service URL (from .env.example)
   bin/agent-trace                # CLI executable (on PATH)
+  bin/at                         # short alias → agent-trace
   bin/agent-trace-viewer         # viewer launcher (on PATH)
   lib/agent_trace/               # Python source
     __init__.py
     cli.py                       # CLI commands (argparse)
-    config.py                    # Global + project resolution (project.json → project_id)
+    config.py                    # Global + project settings
+    storage.py                   # Path-based project_id + AGENT_TRACE_HOME paths
+    registry.py                  # Optional metadata registry (first commit, origin, known_roots)
     hooks.py                     # Cursor, Claude Code & git hook setup (project + global)
     record.py                    # Trace recording from hooks
     trace.py                     # Trace record construction + per-line hashing
@@ -444,22 +437,23 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
     ...
   viewer/                        # file viewer (installed by install.sh)
   config.json                    # global config (auth_token)
+  projects.json                  # optional metadata registry
 
-~/.agent-trace/projects/<project_id>/
-  project-config.json            # project settings (not in git)
+~/.agent-trace/projects/<project_id>/     # project_id = sanitized absolute repo path
+  project-config.json            # project settings
   traces.jsonl
   commit-links.jsonl
   ledgers.jsonl
   session-state.json
-  sync-state.json                # push/pull cursors (when using remote)
+  session-summaries.jsonl
+  sync-state.json                # push/pull cursors (when using remotes)
 
-<your-project>/
-  .agent-trace/
-    project.json                 # checked-in: project_id (and optional note defaults)
+<your-project>/                  # NOTHING is written into the repo itself for identity
   .cursor/hooks.json             # Cursor project hooks (only if no global hooks)
   .claude/settings.json          # Claude Code project hooks (only if no global hooks)
   .git/hooks/post-commit         # agent-trace commit-link
   .git/hooks/post-rewrite        # agent-trace rewrite-ledger
+  .git/config                    # notes refspec added for `origin` so notes travel with push/fetch
 ```
 
 ## License

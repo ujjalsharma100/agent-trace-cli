@@ -40,39 +40,6 @@ def _resolve_conversation_local(url: str) -> str | None:
         return None
 
 
-def _resolve_conversation_remote(
-    url: str,
-    config: dict[str, Any],
-) -> str | None:
-    """Fetch conversation content from the remote service."""
-    import urllib.error
-    import urllib.request
-    import urllib.parse
-
-    from .config import get_auth_token, get_service_url
-
-    project_id = config.get("project_id")
-    auth_token = get_auth_token(config)
-    service_url = get_service_url(config)
-
-    if not project_id or not auth_token:
-        return None
-
-    params = urllib.parse.urlencode({"project_id": project_id, "url": url})
-    req = urllib.request.Request(
-        f"{service_url}/api/v1/conversations/content?{params}",
-        method="GET",
-    )
-    req.add_header("Authorization", f"Bearer {auth_token}")
-
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
-            return data.get("content")
-    except Exception:
-        return None
-
-
 def _compute_conversation_stats(content: str) -> dict[str, int]:
     """Compute size statistics for a conversation transcript."""
     lines = content.split("\n")
@@ -133,8 +100,6 @@ def get_context(
     Returns a list of context segments, each with attribution metadata
     and conversation info.
     """
-    from .config import get_project_config
-
     cwd = project_dir or os.getcwd()
 
     # Run blame in JSON mode to get structured attribution data
@@ -158,11 +123,6 @@ def get_context(
     attributions = blame_data.get("attributions", [])
     if not attributions:
         return []
-
-    # Determine storage mode for remote conversation resolution
-    config = get_project_config(project_dir=cwd)
-    if config is None:
-        config = {"storage": "local"}
 
     # Build context segments from attributions
     segments: list[dict[str, Any]] = []
@@ -226,15 +186,10 @@ def get_context(
         if conversation_url:
             segment["conversation_url"] = conversation_url
 
-        # Try to resolve conversation content
+        # Try to resolve conversation content (local file:// only)
         conversation_content = None
-        if conversation_url:
-            if conversation_url.startswith("file://"):
-                conversation_content = _resolve_conversation_local(conversation_url)
-            elif config.get("storage") == "remote":
-                conversation_content = _resolve_conversation_remote(
-                    conversation_url, config,
-                )
+        if conversation_url and conversation_url.startswith("file://"):
+            conversation_content = _resolve_conversation_local(conversation_url)
 
         if conversation_content:
             # Compute size stats

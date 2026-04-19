@@ -1,12 +1,15 @@
 """
-Configuration management for agent-trace (Phase 2).
+Configuration management for agent-trace.
 
-Three-tier layout:
+Two-tier layout:
 
-  1. Global            — <AGENT_TRACE_HOME>/config.json (tokens, defaults)
-  2. Per-project       — <AGENT_TRACE_HOME>/projects/<id>/project-config.json
-                         (storage mode, service_url, auth_token, notes.*, summary.*)
-  3. In-repo pointer   — <repo>/.agent-trace/project.json (stable project_id)
+  1. Global       — <AGENT_TRACE_HOME>/config.json (global auth token, preferences)
+  2. Per-project  — <AGENT_TRACE_HOME>/projects/<id>/project-config.json
+                    (label, notes.*, summary.*, remote.default)
+
+Project identity is derived from the git repo root (a sanitized absolute path),
+so no in-repo state is needed. Existence of the project-config.json file under
+the global project dir determines whether a repo is "initialized".
 
 ``AGENT_TRACE_HOME`` env var overrides the default ``~/.agent-trace`` (used by tests).
 
@@ -21,41 +24,12 @@ import stat
 from pathlib import Path
 
 from .storage import (
-    IN_REPO_DIR_NAME,
-    IN_REPO_POINTER_NAME,
     ensure_project_dir,
     get_agent_trace_home,
     get_global_config_file,
     get_project_config_path,
     resolve_project_id,
-    write_in_repo_pointer,
 )
-
-
-# -------------------------------------------------------------------
-# Load .env from the CLI tool's install directory (if present)
-# -------------------------------------------------------------------
-
-def _load_dotenv():
-    """Read key=value pairs from the .env next to the installed lib."""
-    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
-    if not env_path.is_file():
-        return
-    try:
-        for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip("'\"")
-            os.environ.setdefault(key, value)
-    except OSError:
-        pass
-
-_load_dotenv()
 
 
 # -------------------------------------------------------------------
@@ -79,11 +53,6 @@ class _GlobalConfigDirProxy:
 
 
 GLOBAL_CONFIG_DIR = _GlobalConfigDirProxy()
-
-PROJECT_CONFIG_DIR_NAME = IN_REPO_DIR_NAME
-PROJECT_CONFIG_FILE_NAME = IN_REPO_POINTER_NAME
-
-DEFAULT_SERVICE_URL = os.environ.get("AGENT_TRACE_URL", "http://localhost:5000").rstrip("/")
 
 
 # -------------------------------------------------------------------
@@ -113,7 +82,7 @@ def save_global_config(config: dict) -> None:
 
 
 # -------------------------------------------------------------------
-# Project config (lives in the global project dir)
+# Project config (lives in the global project dir, keyed by project_id)
 # -------------------------------------------------------------------
 
 def get_project_config(project_dir: str | None = None) -> dict | None:
@@ -135,12 +104,7 @@ def get_project_config(project_dir: str | None = None) -> dict | None:
 
 
 def save_project_config(config: dict, project_dir: str | None = None) -> None:
-    """Persist per-project settings and the in-repo pointer.
-
-    Resolves (or creates) a ``project_id`` for the repo, writes the settings to
-    ``<AGENT_TRACE_HOME>/projects/<id>/project-config.json``, and drops a
-    tiny pointer at ``<repo>/.agent-trace/project.json``.
-    """
+    """Persist per-project settings under ``<AGENT_TRACE_HOME>/projects/<id>/``."""
     if project_dir is None:
         project_dir = os.getcwd()
 
@@ -155,15 +119,13 @@ def save_project_config(config: dict, project_dir: str | None = None) -> None:
     cfg_path = get_project_config_path(pid)
     cfg_path.write_text(json.dumps(config, indent=2) + "\n")
 
-    write_in_repo_pointer(project_dir, pid)
-
 
 # -------------------------------------------------------------------
-# Auth token resolution
+# Auth token resolution (global only — projects don't store tokens anymore)
 # -------------------------------------------------------------------
 
-def get_auth_token(project_config: dict | None = None) -> str | None:
-    """Resolve auth token: env → global → project."""
+def get_auth_token() -> str | None:
+    """Resolve auth token: env → global config."""
     env = os.environ.get("AGENT_TRACE_TOKEN")
     if env:
         return env
@@ -172,14 +134,4 @@ def get_auth_token(project_config: dict | None = None) -> str | None:
     if global_cfg.get("auth_token"):
         return global_cfg["auth_token"]
 
-    if project_config and project_config.get("auth_token"):
-        return project_config["auth_token"]
-
     return None
-
-
-def get_service_url(project_config: dict | None = None) -> str:
-    """Resolve service URL: project config → env/default."""
-    if project_config and project_config.get("service_url"):
-        return project_config["service_url"].rstrip("/")
-    return DEFAULT_SERVICE_URL

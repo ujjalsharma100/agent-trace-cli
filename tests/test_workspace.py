@@ -90,7 +90,7 @@ class TestResolveFileProject(unittest.TestCase):
 
 
 class TestRegistry(unittest.TestCase):
-    def test_same_id_after_move(self) -> None:
+    def test_id_is_path_derived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             r1 = Path(tmp) / "r1"
             r1.mkdir()
@@ -98,11 +98,15 @@ class TestRegistry(unittest.TestCase):
             reg = Path(tmp) / "registry.json"
             with patch.object(registry_mod, "PROJECTS_FILE", reg):
                 a = lookup_or_create_project_id(str(r1))
+            # project_id = sanitized absolute path (Claude-Code convention)
+            self.assertEqual(a, os.path.realpath(str(r1)).replace(os.sep, "-"))
+            # Moving the repo changes the path, hence the id — just like ``git init``.
             r2 = Path(tmp) / "r2"
             os.rename(r1, r2)
             with patch.object(registry_mod, "PROJECTS_FILE", reg):
                 b = lookup_or_create_project_id(str(r2))
-            self.assertEqual(a, b)
+            self.assertEqual(b, os.path.realpath(str(r2)).replace(os.sep, "-"))
+            self.assertNotEqual(a, b)
 
 
 class TestGitRepoRootForPath(unittest.TestCase):

@@ -1,23 +1,18 @@
 """
-Central path resolution for agent-trace (Phase 2).
+Central path resolution for agent-trace.
 
 All per-project runtime data lives under ``<AGENT_TRACE_HOME>/projects/<project_id>/``.
-The repo keeps only a tiny ``.agent-trace/project.json`` pointer containing the
-stable ``project_id`` (resolved at init time).
+``project_id`` is derived from the canonical git repo root (absolute path with ``/``
+replaced by ``-``), so no in-repo pointer is needed — every invocation can
+recompute it from the working directory.
 
 ``AGENT_TRACE_HOME`` overrides the default ``~/.agent-trace`` (used by tests).
 """
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
-
-
-IN_REPO_DIR_NAME = ".agent-trace"
-IN_REPO_POINTER_NAME = "project.json"
-POINTER_VERSION = "1.0"
 
 
 def get_agent_trace_home() -> Path:
@@ -45,8 +40,18 @@ def get_detached_base_dir() -> Path:
 
 
 def _sanitize_id(project_id: str) -> str:
-    """Make a project_id safe for use as a directory name."""
-    return project_id.replace(":", "_").replace("/", "_").replace("\\", "_")
+    """Defensive sanitization — path-derived ids are already dash-only,
+    but anything unexpected (``:``, ``\\``, residual ``/``) gets flattened."""
+    return project_id.replace(":", "_").replace("/", "-").replace("\\", "-")
+
+
+def path_to_project_id(repo_root: str) -> str:
+    """Derive a stable project_id from an absolute repo path.
+
+    ``/Users/jane/Desktop/foo`` → ``-Users-jane-Desktop-foo`` (Claude-Code convention).
+    """
+    canon = os.path.realpath(repo_root)
+    return canon.replace(os.sep, "-")
 
 
 def get_project_dir(project_id: str) -> Path:
@@ -80,40 +85,12 @@ def get_session_state_path(project_id: str) -> Path:
 
 
 def get_session_summaries_path(project_id: str) -> Path:
-    """Append-only JSONL of per-session LLM summaries (Phase 6)."""
+    """Append-only JSONL of per-session LLM summaries."""
     return get_project_dir(project_id) / "session-summaries.jsonl"
 
 
 def get_project_config_path(project_id: str) -> Path:
     return get_project_dir(project_id) / "project-config.json"
-
-
-# -------------------------------------------------------------------
-# In-repo pointer (tiny .agent-trace/project.json, checked in)
-# -------------------------------------------------------------------
-
-def get_in_repo_pointer_path(repo_dir: str | os.PathLike[str]) -> Path:
-    return Path(repo_dir) / IN_REPO_DIR_NAME / IN_REPO_POINTER_NAME
-
-
-def read_in_repo_pointer(repo_dir: str | os.PathLike[str]) -> dict | None:
-    p = get_in_repo_pointer_path(repo_dir)
-    if not p.is_file():
-        return None
-    try:
-        data = json.loads(p.read_text())
-        if isinstance(data, dict):
-            return data
-    except (OSError, json.JSONDecodeError):
-        return None
-    return None
-
-
-def write_in_repo_pointer(repo_dir: str | os.PathLike[str], project_id: str) -> None:
-    p = get_in_repo_pointer_path(repo_dir)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"version": POINTER_VERSION, "project_id": project_id}
-    p.write_text(json.dumps(payload, indent=2) + "\n")
 
 
 # -------------------------------------------------------------------
@@ -125,30 +102,30 @@ def resolve_project_id(
     *,
     create: bool = False,
 ) -> str | None:
-    """Resolve a ``project_id`` for a repo directory.
+    """Resolve a deterministic ``project_id`` for a repo directory.
 
-    Priority:
-      1. In-repo pointer (``.agent-trace/project.json``).
-      2. Registry lookup by canonical repo root.
-      3. If ``create``, register a new project_id.
+    Uses the git repo root when available (so subdirectories inside a repo
+    resolve to the same id as the root). Falls back to the given directory's
+    real path if it's not inside a git repo.
+
+    When ``create`` is True, the registry gets a metadata entry (first commit,
+    origin url, known_roots) — useful for ``agent-trace projects``. When False,
+    returns an id without touching the registry.
     """
     if repo_dir is None:
         return None
-    repo_dir = str(repo_dir)
-
-    ptr = read_in_repo_pointer(repo_dir)
-    if ptr:
-        pid = ptr.get("project_id")
-        if isinstance(pid, str) and pid:
-            return pid
 
     from .trace import git_repo_root_for_path
-    from .registry import lookup_or_create_project_id, lookup_project_id_by_path
 
-    root = git_repo_root_for_path(repo_dir) or os.path.realpath(repo_dir)
-    pid = lookup_project_id_by_path(root)
-    if pid:
-        return pid
+    root = git_repo_root_for_path(str(repo_dir))
+    if not root:
+        root = os.path.realpath(str(repo_dir))
+
+    pid = path_to_project_id(root)
+
     if create:
-        return lookup_or_create_project_id(root)
-    return None
+        from .registry import register_project_metadata
+
+        register_project_metadata(root, pid)
+
+    return pid

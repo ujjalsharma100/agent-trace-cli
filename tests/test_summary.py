@@ -17,9 +17,9 @@ from agent_trace.record import record_from_stdin
 from agent_trace.storage import (
     ensure_project_dir,
     get_ledgers_path,
+    get_project_config_path,
     get_session_summaries_path,
     get_traces_path,
-    write_in_repo_pointer,
 )
 from agent_trace.summary import (
     append_summary,
@@ -37,12 +37,43 @@ def _tmp_dir() -> str:
     return tempfile.mkdtemp(dir=root)
 
 
-def _fake_repo_with_project(pid: str, parent: Path) -> Path:
-    """A directory with only ``.agent-trace/project.json`` (no git required for resolution)."""
+def _fake_repo_with_project(parent: Path) -> tuple[Path, str]:
+    """A git-initialized directory whose project_id is derived from its path.
+
+    A real ``git init`` is required so the repo is isolated from any outer
+    git boundary — the workspace-local temp root is itself inside a git repo,
+    so without this the id would resolve up to the parent.
+
+    Returns ``(repo_path, project_id)``.
+    """
+    from agent_trace.storage import path_to_project_id
+
     base = parent / "repo"
     base.mkdir(parents=True)
-    write_in_repo_pointer(str(base), pid)
-    return base
+    subprocess.run(["git", "init"], cwd=str(base), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(base), "config", "user.email", "t@t"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(base), "config", "user.name", "t"],
+        check=True,
+        capture_output=True,
+    )
+    (base / "f.txt").write_text("x\n")
+    subprocess.run(
+        ["git", "-C", str(base), "add", "f.txt"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(base), "commit", "-m", "init"],
+        check=True,
+        capture_output=True,
+    )
+    pid = path_to_project_id(str(base))
+    return base, pid
 
 
 def _minimal_trace_dict(tid: str, session_id: str) -> dict:
@@ -124,8 +155,7 @@ class TestMergeNoteSummaries(unittest.TestCase):
         self.tmp = _tmp_dir()
         self._p = patch.dict(os.environ, {"AGENT_TRACE_HOME": self.tmp})
         self._p.start()
-        self.pid = "merge-pid"
-        self.repo = _fake_repo_with_project(self.pid, Path(self.tmp))
+        self.repo, self.pid = _fake_repo_with_project(Path(self.tmp))
         ensure_project_dir(self.pid)
 
     def tearDown(self) -> None:
@@ -162,8 +192,7 @@ class TestSummaryHookIntegration(unittest.TestCase):
         self.tmp = _tmp_dir()
         self._p = patch.dict(os.environ, {"AGENT_TRACE_HOME": self.tmp})
         self._p.start()
-        self.pid = "hook-pid"
-        self.repo = _fake_repo_with_project(self.pid, Path(self.tmp))
+        self.repo, self.pid = _fake_repo_with_project(Path(self.tmp))
         ensure_project_dir(self.pid)
         py = (
             "import json,sys; json.load(sys.stdin); "
@@ -171,7 +200,6 @@ class TestSummaryHookIntegration(unittest.TestCase):
         )
         save_project_config(
             {
-                "storage": "local",
                 "summary": {
                     "enabled": True,
                     "command": f"{sys.executable} -c {repr(py)}",
@@ -212,10 +240,9 @@ class TestSummaryCLI(unittest.TestCase):
         self.tmp = _tmp_dir()
         self._p = patch.dict(os.environ, {"AGENT_TRACE_HOME": self.tmp})
         self._p.start()
-        self.pid = "cli-pid"
-        self.repo = _fake_repo_with_project(self.pid, Path(self.tmp))
+        self.repo, self.pid = _fake_repo_with_project(Path(self.tmp))
         ensure_project_dir(self.pid)
-        save_project_config({"storage": "local"}, str(self.repo))
+        save_project_config({}, str(self.repo))
 
     def tearDown(self) -> None:
         self._p.stop()
@@ -254,8 +281,7 @@ class TestRunSummaryGenerate(unittest.TestCase):
         self.tmp = _tmp_dir()
         self._p = patch.dict(os.environ, {"AGENT_TRACE_HOME": self.tmp})
         self._p.start()
-        self.pid = "gen-pid"
-        self.repo = _fake_repo_with_project(self.pid, Path(self.tmp))
+        self.repo, self.pid = _fake_repo_with_project(Path(self.tmp))
         ensure_project_dir(self.pid)
         py = (
             "import json,sys; json.load(sys.stdin); "
@@ -263,7 +289,6 @@ class TestRunSummaryGenerate(unittest.TestCase):
         )
         save_project_config(
             {
-                "storage": "local",
                 "summary": {
                     "enabled": True,
                     "command": f"{sys.executable} -c {repr(py)}",
