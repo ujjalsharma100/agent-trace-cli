@@ -12,7 +12,9 @@ from unittest.mock import patch
 from agent_trace import registry as registry_mod
 from agent_trace.record import (
     _claude_PostToolUse,
+    _claude_SessionStart,
     _cursor_afterFileEdit,
+    _model_from_claude_transcript_tail,
     _ranges_from_multiedit,
     _ranges_from_write,
 )
@@ -133,6 +135,81 @@ class TestClaudePostToolUse(unittest.TestCase):
         assert trace is not None
         meta = trace.get("metadata") or {}
         self.assertEqual(meta.get("cell_id"), "c7")
+
+    def test_posttooluse_uses_model_from_session_start(self) -> None:
+        """Claude PostToolUse stdin does not include model; SessionStart does."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _git_init_with_commit(tmp)
+            os.environ["AGENT_TRACE_HOME"] = tmp
+            try:
+                start = {
+                    "session_id": "sess-model",
+                    "cwd": tmp,
+                    "model": "claude-sonnet-4-20250514",
+                    "source": "startup",
+                }
+                with patch.object(registry_mod, "PROJECTS_FILE", Path(tmp) / "projects.json"):
+                    _, ev = _claude_SessionStart(start)
+                self.assertEqual(ev, "SessionStart")
+
+                fp = str(Path(tmp) / "tracked.py")
+                d = {
+                    "tool_name": "Write",
+                    "tool_input": {"file_path": fp, "content": "x = 1\n"},
+                    "session_id": "sess-model",
+                    "cwd": tmp,
+                }
+                with patch.object(registry_mod, "PROJECTS_FILE", Path(tmp) / "projects.json"):
+                    trace, ev = _claude_PostToolUse(d)
+                self.assertEqual(ev, "PostToolUse")
+                assert trace is not None
+                conv = trace["files"][0]["conversations"][0]
+                self.assertEqual(
+                    conv["contributor"]["model_id"],
+                    "anthropic/claude-sonnet-4-20250514",
+                )
+            finally:
+                del os.environ["AGENT_TRACE_HOME"]
+
+    def test_transcript_tail_prefers_latest_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tr = Path(tmp) / "session.jsonl"
+            tr.write_text(
+                '{"type":"assistant","message":{"model":"claude-old","role":"assistant"}}\n'
+                '{"type":"assistant","message":{"model":"claude-new","role":"assistant"}}\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(_model_from_claude_transcript_tail(str(tr)), "claude-new")
+
+    def test_posttooluse_prefers_transcript_model_over_session_start(self) -> None:
+        """Simulate /model: transcript has a newer model than SessionStart cache."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _git_init_with_commit(tmp)
+            os.environ["AGENT_TRACE_HOME"] = tmp
+            try:
+                tr = Path(tmp) / "t.jsonl"
+                tr.write_text(
+                    '{"type":"assistant","message":{"model":"claude-from-transcript","role":"assistant"}}\n',
+                    encoding="utf-8",
+                )
+                d = {
+                    "tool_name": "Write",
+                    "tool_input": {"file_path": str(Path(tmp) / "f.py"), "content": "1\n"},
+                    "session_id": "sess-tx",
+                    "cwd": tmp,
+                    "transcript_path": str(tr),
+                }
+                with patch.object(registry_mod, "PROJECTS_FILE", Path(tmp) / "projects.json"):
+                    trace, ev = _claude_PostToolUse(d)
+                self.assertEqual(ev, "PostToolUse")
+                assert trace is not None
+                conv = trace["files"][0]["conversations"][0]
+                self.assertEqual(
+                    conv["contributor"]["model_id"],
+                    "anthropic/claude-from-transcript",
+                )
+            finally:
+                del os.environ["AGENT_TRACE_HOME"]
 
 
 class TestCursorAfterFileEdit(unittest.TestCase):

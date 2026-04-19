@@ -30,10 +30,169 @@ from .trace import (
     resolve_file_project,
 )
 
+# Claude session JSONL can be large; only scan the tail for the latest ``message.model``.
+_TRANSCRIPT_TAIL_BYTES = 512 * 1024
+
 
 # -------------------------------------------------------------------
 # Session edit sequence tracking
 # -------------------------------------------------------------------
+
+def _remember_session_model(session_id: str, model: str | None, project_dir: str | None = None) -> None:
+    """Persist model name for a Claude session (PostToolUse does not include ``model``).
+
+    SessionStart includes ``model``; we also refresh from the session JSONL when it
+    contains a newer ``message.model`` (e.g. after ``/model``). Stored as
+    ``model:<session_id>`` so tool traces can set ``contributor.model_id``.
+    """
+    if not session_id or not model:
+        return
+    if project_dir is None:
+        project_dir = get_workspace_root()
+    pid = resolve_project_id(project_dir, create=True)
+    if not pid:
+        return
+    ensure_project_dir(pid)
+    state_path = get_session_state_path(pid)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state: dict = {}
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            state = {}
+    state[f"model:{session_id}"] = model
+    try:
+        state_path.write_text(json.dumps(state))
+    except OSError:
+        pass
+
+
+def _read_transcript_tail_text(path: Path, max_bytes: int) -> str:
+    """Read the last ``max_bytes`` of a file, dropping an initial partial line."""
+    try:
+        size = path.stat().st_size
+        if size <= max_bytes:
+            return path.read_text(encoding="utf-8", errors="replace")
+        with open(path, "rb") as f:
+            f.seek(max(0, size - max_bytes))
+            f.readline()  # discard incomplete first line
+            return f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _extract_model_from_transcript_obj(obj: object, depth: int = 0) -> str | None:
+    """Pull a model id from one Claude Code transcript JSONL object."""
+    if depth > 8 or not isinstance(obj, dict):
+        return None
+    msg = obj.get("message")
+    if isinstance(msg, dict):
+        for key in ("model", "modelId", "model_id"):
+            v = msg.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        inner = _extract_model_from_transcript_obj(msg, depth + 1)
+        if inner:
+            return inner
+    for key in ("model", "modelId", "model_id"):
+        v = obj.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    for nest in ("session", "metadata", "config"):
+        inner = obj.get(nest)
+        if isinstance(inner, dict):
+            got = _extract_model_from_transcript_obj(inner, depth + 1)
+            if got:
+                return got
+    return None
+
+
+def _model_from_claude_transcript_tail(transcript_path: str | None, *, max_bytes: int = _TRANSCRIPT_TAIL_BYTES) -> str | None:
+    """Latest model seen in the transcript file (assistant lines include ``message.model``).
+
+    Covers mid-session ``/model`` changes, which are not exposed on PostToolUse hooks.
+    Scans from the end of the file so the first match is chronologically latest.
+    """
+    if not transcript_path:
+        return None
+    try:
+        p = Path(transcript_path)
+        if not p.is_file():
+            return None
+        text = _read_transcript_tail_text(p, max_bytes)
+        if not text:
+            return None
+        for line in reversed(text.splitlines()):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            m = _extract_model_from_transcript_obj(obj)
+            if m:
+                return m
+        return None
+    except OSError:
+        return None
+
+
+def _session_model_from_state(session_id: str, project_dir: str | None = None) -> str | None:
+    """Return model string last recorded for this session, if any."""
+    if not session_id:
+        return None
+    if project_dir is None:
+        project_dir = get_workspace_root()
+    pid = resolve_project_id(project_dir, create=False)
+    if not pid:
+        return None
+    state_path = get_session_state_path(pid)
+    if not state_path.exists():
+        return None
+    try:
+        state = json.loads(state_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    v = state.get(f"model:{session_id}")
+    return str(v) if v else None
+
+
+def _claude_model(d: dict, project_dir: str | None) -> str | None:
+    """Resolve model: hook fields, then transcript (``/model`` / latest turn), then SessionStart cache."""
+    m = d.get("model") or d.get("model_id")
+    if m:
+        return str(m) if m else None
+    sid = d.get("session_id") or ""
+    m = _model_from_claude_transcript_tail(d.get("transcript_path"))
+    if m:
+        if sid and project_dir:
+            prev = _session_model_from_state(sid, project_dir)
+            if prev != m:
+                _remember_session_model(sid, m, project_dir)
+        return m
+    return _session_model_from_state(sid, project_dir)
+
+
+def _sync_claude_session_model_from_transcript(data: dict) -> None:
+    """Refresh SessionStart cache from transcript (e.g. after each Stop). No-op if unchanged."""
+    sid = data.get("session_id")
+    tp = data.get("transcript_path")
+    if not sid or not tp:
+        return
+    anchor = data.get("cwd") or os.getcwd()
+    res = resolve_file_project(".sessions", anchor_path=anchor)
+    repo = res.repo_root if res else None
+    if not repo:
+        return
+    m = _model_from_claude_transcript_tail(tp)
+    if not m:
+        return
+    prev = _session_model_from_state(str(sid), repo)
+    if prev != m:
+        _remember_session_model(str(sid), m, repo)
+
 
 def _get_next_sequence(session_id: str, project_dir: str | None = None) -> int:
     """Return the next edit sequence number for a session, incrementing atomically.
@@ -288,7 +447,7 @@ def _claude_PostToolUse(d):
         seq = _get_next_sequence(session_id, res.repo_root if res else None) if session_id else None
         return create_trace(
             "ai", ".shell-history",
-            model=d.get("model"),
+            model=_claude_model(d, res.repo_root if res else None),
             transcript=d.get("transcript_path"),
             metadata={
                 "session_id": d.get("session_id"),
@@ -342,7 +501,7 @@ def _claude_PostToolUse(d):
 
     return create_trace(
         "ai", fp,
-        model=d.get("model"),
+        model=_claude_model(d, res.repo_root if res else None),
         range_positions=rp,
         range_contents=rc,
         transcript=d.get("transcript_path"),
@@ -356,9 +515,13 @@ def _claude_PostToolUse(d):
 def _claude_SessionStart(d):
     anchor = d.get("cwd") or os.getcwd()
     res = resolve_file_project(".sessions", anchor_path=anchor)
+    repo = res.repo_root if res else None
+    m = d.get("model") or d.get("model_id")
+    if d.get("session_id") and m and repo:
+        _remember_session_model(str(d["session_id"]), str(m), repo)
     return create_trace(
         "ai", ".sessions",
-        model=d.get("model"),
+        model=_claude_model(d, repo),
         metadata={
             "event": "session_start",
             "session_id": d.get("session_id"),
@@ -372,9 +535,10 @@ def _claude_SessionStart(d):
 def _claude_SessionEnd(d):
     anchor = d.get("cwd") or os.getcwd()
     res = resolve_file_project(".sessions", anchor_path=anchor)
+    repo = res.repo_root if res else None
     return create_trace(
         "ai", ".sessions",
-        model=d.get("model"),
+        model=_claude_model(d, repo),
         metadata={
             "event": "session_end",
             "session_id": d.get("session_id"),
@@ -438,6 +602,7 @@ def record_from_stdin():
     # Session-end: optional pluggable summary (Phase 6); no trace record.
     # Conversation content syncs via ``agent-trace push``.
     if event in ("afterAgentResponse", "Stop", "stop"):
+        _sync_claude_session_model_from_transcript(data)
         try:
             from .summary import run_session_summary_hook
 
