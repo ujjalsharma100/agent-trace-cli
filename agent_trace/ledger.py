@@ -1,13 +1,23 @@
 """
-Attribution ledger — deterministic per-line code attribution at commit time.
+Attribution ledger — deterministic per-line AI attribution at commit time.
 
-The ledger is built by the post-commit hook immediately after ``git commit``.
-It compares committed file contents against trace-level line hashes to produce
-a definitive mapping from each changed line to its origin (AI, human, or mixed).
+Schema 2.0. Built by the post-commit hook immediately after ``git commit``.
 
-This replaces heuristic scoring for commits that have a ledger — the blame
-algorithm checks the ledger first and only falls back to heuristics when no
-ledger exists.
+Design:
+  * Only ``ai`` segments are recorded. Anything not recorded is implicitly
+    NO_ATTRIBUTION (we never claim "this was a human" — we only ever assert
+    "this matches an AI trace").
+  * Attribution is content-driven only: a line is AI if its SHA-256 line
+    hash matches a hash in a candidate trace AND the verbatim content also
+    matches (defence against trivial collisions).
+  * Range-claim heuristics are gone. Position-based "MIXED" inference was a
+    source of false positives (a user-inserted line falling inside the AI's
+    original range got marked MIXED with the AI's conversation).
+  * Staging window scoping: candidate traces are restricted to those
+    recorded *after the parent commit's author time*. Older traces never
+    participate, even if their content hashes happen to collide.
+  * Each AI segment carries `evidence` — the matched per-line hash + the
+    verbatim line content — so attribution can be audited manually.
 
 No external dependencies — stdlib only.
 """
@@ -41,6 +51,20 @@ def _git(*args: str, cwd: str | None = None) -> str | None:
     return None
 
 
+def _git_raw(*args: str, cwd: str | None = None) -> str | None:
+    """Run a git command and return raw stdout (not stripped), or None."""
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            capture_output=True, text=True, cwd=cwd, timeout=30,
+        )
+        if result.returncode == 0:
+            return result.stdout
+    except Exception:
+        pass
+    return None
+
+
 def _get_rename_map(
     parent_sha: str,
     commit_sha: str,
@@ -66,48 +90,27 @@ def _get_rename_map(
     return renames
 
 
-def _git_raw(*args: str, cwd: str | None = None) -> str | None:
-    """Run a git command and return raw stdout (not stripped), or None."""
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            capture_output=True, text=True, cwd=cwd, timeout=30,
-        )
-        if result.returncode == 0:
-            return result.stdout
-    except Exception:
-        pass
-    return None
-
-
 # -------------------------------------------------------------------
 # Diff parsing
 # -------------------------------------------------------------------
 
 def _parse_diff_ranges(diff_output: str) -> list[tuple[int, int]]:
-    """Parse unified diff ``@@`` headers to find added/modified line ranges.
-
-    Returns a list of ``(start_line, end_line)`` tuples (1-indexed) for
-    lines that are new or changed in the *new* side of the diff.
-    """
+    """Parse unified diff ``@@`` headers to find added/modified line ranges
+    on the *new* side. Returns ``[(start_line, end_line), …]``, 1-indexed."""
     ranges: list[tuple[int, int]] = []
-    # Match @@ -old_start[,old_count] +new_start[,new_count] @@
     hunk_re = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
     in_hunk = False
-    hunk_new_start = 0
     current_new_line = 0
     add_start: int | None = None
 
     for line in diff_output.split("\n"):
         m = hunk_re.match(line)
         if m:
-            # Flush any open add range from previous hunk
             if add_start is not None:
                 ranges.append((add_start, current_new_line - 1))
                 add_start = None
-            hunk_new_start = int(m.group(1))
-            current_new_line = hunk_new_start
+            current_new_line = int(m.group(1))
             in_hunk = True
             continue
 
@@ -115,28 +118,22 @@ def _parse_diff_ranges(diff_output: str) -> list[tuple[int, int]]:
             continue
 
         if line.startswith("\\"):
-            # "\ No newline at end of file"
             continue
 
         if line.startswith("+"):
-            # Added line
             if add_start is None:
                 add_start = current_new_line
             current_new_line += 1
         elif line.startswith("-"):
-            # Deleted line — flush any add range
             if add_start is not None:
                 ranges.append((add_start, current_new_line - 1))
                 add_start = None
-            # Deleted lines don't advance new-side counter
         else:
-            # Context line
             if add_start is not None:
                 ranges.append((add_start, current_new_line - 1))
                 add_start = None
             current_new_line += 1
 
-    # Flush final add range
     if add_start is not None:
         ranges.append((add_start, current_new_line - 1))
 
@@ -147,24 +144,107 @@ def _parse_diff_ranges(diff_output: str) -> list[tuple[int, int]]:
 # Line hashing
 # -------------------------------------------------------------------
 
-def _compute_file_line_hashes(content: str) -> dict[int, str]:
-    """Compute per-line hashes for every line in a file.
+def _line_hash(line: str) -> str:
+    h = hashlib.sha256(line.encode("utf-8")).hexdigest()[:16]
+    return f"sha256:{h}"
 
-    Returns ``{line_number: "sha256:..."}``, 1-indexed.
-    """
+
+def _compute_file_lines(content: str) -> list[str]:
+    """Return file content as a list of lines, 0-indexed (line N → result[N-1])."""
     lines = content.split("\n")
-    # Strip trailing empty line from trailing newline
     if lines and lines[-1] == "":
         lines = lines[:-1]
-    result: dict[int, str] = {}
-    for i, line in enumerate(lines):
-        h = hashlib.sha256(line.encode("utf-8")).hexdigest()[:16]
-        result[i + 1] = f"sha256:{h}"
-    return result
+    return lines
+
+
+def _is_trivial(line: str) -> bool:
+    """Empty / whitespace-only lines collide across all files; treated specially."""
+    return line.strip() == ""
 
 
 # -------------------------------------------------------------------
-# Trace indexing
+# Trace candidate selection (staging window)
+# -------------------------------------------------------------------
+
+def _parse_iso(s: str | None) -> datetime | None:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _find_candidate_traces(
+    project_dir: str,
+    parent_sha: str | None,
+    parent_committed_at: str | None,
+    committed_at: str | None,
+) -> list[dict[str, Any]]:
+    """Return traces eligible to attribute the current commit.
+
+    Eligibility (must satisfy all):
+      * Trace's ``vcs.revision`` equals ``parent_sha`` (or no parent — first
+        commit), or trace has no vcs at all (recorded outside a git context).
+      * Trace's ``timestamp`` is strictly after ``parent_committed_at`` (the
+        previous commit's author time). This is the staging window — older
+        traces never participate even if their hashes happen to collide.
+      * Trace's ``timestamp`` is no later than ``committed_at`` plus a small
+        buffer (covers commits made seconds after the trace was recorded).
+    """
+    from .storage import get_traces_path, resolve_project_id
+
+    pid = resolve_project_id(project_dir, create=False)
+    if not pid:
+        return []
+    traces_path = get_traces_path(pid)
+    if not traces_path.exists():
+        return []
+
+    all_traces: list[dict[str, Any]] = []
+    try:
+        for raw in traces_path.read_text().splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                all_traces.append(json.loads(raw))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        return []
+
+    lower = _parse_iso(parent_committed_at)
+    upper_base = _parse_iso(committed_at)
+    upper = (upper_base + timedelta(minutes=10)) if upper_base else None
+
+    candidates: list[dict[str, Any]] = []
+    for t in all_traces:
+        # Revision check
+        if parent_sha:
+            vcs = t.get("vcs") or {}
+            rev = vcs.get("revision")
+            if rev and rev != parent_sha:
+                continue
+        # else first commit — accept any vcs
+
+        # Time window check
+        ts = _parse_iso(t.get("timestamp"))
+        if ts is None:
+            # Reject undated traces — non-determinism risk
+            continue
+        if lower is not None and ts <= lower:
+            continue
+        if upper is not None and ts > upper:
+            continue
+
+        candidates.append(t)
+
+    return candidates
+
+
+# -------------------------------------------------------------------
+# Trace hash index (with content)
 # -------------------------------------------------------------------
 
 def _trace_file_matches(
@@ -172,7 +252,7 @@ def _trace_file_matches(
     primary: str,
     alternates: list[str] | None,
 ) -> bool:
-    """Whether trace file path ``fpath`` refers to ``primary`` or an alternate (e.g. pre-rename)."""
+    """Whether trace's file path refers to ``primary`` or an alternate (e.g. pre-rename)."""
     if fpath == primary or fpath.endswith(primary) or primary.endswith(fpath):
         return True
     if alternates:
@@ -186,12 +266,13 @@ def _build_trace_hash_index(
     traces: list[dict[str, Any]],
     file_path: str,
     alternate_paths: list[str] | None = None,
+    cross_file: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """Build a map from line content hash → trace metadata.
+    """Map ``hash → {trace_id, model_id, tool, conversation_url, content, edit_sequence}``.
 
-    For each candidate trace that touches ``file_path``, extract all
-    ``line_hashes`` entries and map ``hash_value → {trace_id, model_id,
-    tool, conversation_url, edit_sequence}``.
+    Each entry includes the verbatim ``content`` from the trace, used both
+    as a collision guard (we require content equality, not just hash) and
+    as evidence in the resulting ledger.
 
     When multiple traces claim the same hash, the one with the highest
     ``edit_sequence`` wins (latest edit takes precedence).
@@ -202,19 +283,17 @@ def _build_trace_hash_index(
         trace_id = trace.get("id", "")
         meta = trace.get("metadata") or {}
         edit_seq = meta.get("edit_sequence")
-
-        # Extract model_id and conversation_url from first conversation
-        model_id = None
-        conversation_url = None
         tool = trace.get("tool")
 
         for fe in trace.get("files", []):
             if not isinstance(fe, dict):
                 continue
             fpath = fe.get("path", "")
-            if not _trace_file_matches(fpath, file_path, alternate_paths):
+            if not cross_file and not _trace_file_matches(fpath, file_path, alternate_paths):
                 continue
 
+            model_id: str | None = None
+            conversation_url: str | None = None
             for conv in fe.get("conversations", []):
                 if not isinstance(conv, dict):
                     continue
@@ -233,13 +312,19 @@ def _build_trace_hash_index(
                         h = lh.get("hash", "")
                         if not h:
                             continue
+                        content = lh.get("content")
+                        # Reject hashes recorded without content — schema 2.0
+                        # requires content for deterministic match.
+                        if content is None:
+                            continue
 
                         existing = index.get(h)
                         if existing is not None:
-                            # Tiebreak by edit_sequence (highest wins)
                             existing_seq = existing.get("edit_sequence")
-                            if edit_seq is not None and (existing_seq is None or edit_seq > existing_seq):
-                                pass  # Will overwrite below
+                            if edit_seq is not None and (
+                                existing_seq is None or edit_seq > existing_seq
+                            ):
+                                pass  # overwrite below
                             else:
                                 continue
 
@@ -248,216 +333,11 @@ def _build_trace_hash_index(
                             "model_id": model_id,
                             "tool": tool,
                             "conversation_url": conversation_url,
+                            "content": content,
                             "edit_sequence": edit_seq,
                         }
 
     return index
-
-
-def _build_cross_file_hash_index(
-    traces: list[dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    """Build a map from line content hash → trace metadata across ALL files.
-
-    Unlike ``_build_trace_hash_index``, this does NOT filter by file path.
-    Used as a fallback when no traces directly claim a file — catches cases
-    where AI-generated code was moved to a different file before committing.
-    """
-    index: dict[str, dict[str, Any]] = {}
-
-    for trace in traces:
-        trace_id = trace.get("id", "")
-        meta = trace.get("metadata") or {}
-        edit_seq = meta.get("edit_sequence")
-
-        model_id = None
-        conversation_url = None
-        tool = trace.get("tool")
-
-        for fe in trace.get("files", []):
-            if not isinstance(fe, dict):
-                continue
-
-            for conv in fe.get("conversations", []):
-                if not isinstance(conv, dict):
-                    continue
-                contributor = conv.get("contributor") or {}
-                if contributor.get("model_id") and not model_id:
-                    model_id = contributor["model_id"]
-                if conv.get("url") and not conversation_url:
-                    conversation_url = conv["url"]
-
-                for r in conv.get("ranges", []):
-                    if not isinstance(r, dict):
-                        continue
-                    for lh in r.get("line_hashes", []):
-                        if not isinstance(lh, dict):
-                            continue
-                        h = lh.get("hash", "")
-                        if not h:
-                            continue
-
-                        existing = index.get(h)
-                        if existing is not None:
-                            existing_seq = existing.get("edit_sequence")
-                            if edit_seq is not None and (existing_seq is None or edit_seq > existing_seq):
-                                pass  # Will overwrite below
-                            else:
-                                continue
-
-                        index[h] = {
-                            "trace_id": trace_id,
-                            "model_id": model_id,
-                            "tool": tool,
-                            "conversation_url": conversation_url,
-                            "edit_sequence": edit_seq,
-                        }
-
-    return index
-
-
-def _build_range_claim_index(
-    traces: list[dict[str, Any]],
-    file_path: str,
-    alternate_paths: list[str] | None = None,
-) -> dict[int, list[dict[str, Any]]]:
-    """Build a map from line_number → list of trace claims.
-
-    For each trace that touches ``file_path``, check all ranges and record
-    which line numbers they claim.
-    """
-    index: dict[int, list[dict[str, Any]]] = {}
-
-    for trace in traces:
-        trace_id = trace.get("id", "")
-        meta = trace.get("metadata") or {}
-
-        model_id = None
-        conversation_url = None
-        tool = trace.get("tool")
-
-        for fe in trace.get("files", []):
-            if not isinstance(fe, dict):
-                continue
-            fpath = fe.get("path", "")
-            if not _trace_file_matches(fpath, file_path, alternate_paths):
-                continue
-
-            for conv in fe.get("conversations", []):
-                if not isinstance(conv, dict):
-                    continue
-                contributor = conv.get("contributor") or {}
-                if contributor.get("model_id") and not model_id:
-                    model_id = contributor["model_id"]
-                if conv.get("url") and not conversation_url:
-                    conversation_url = conv["url"]
-
-                for r in conv.get("ranges", []):
-                    if not isinstance(r, dict):
-                        continue
-                    start = r.get("start_line")
-                    end = r.get("end_line")
-                    if start is None or end is None:
-                        continue
-                    try:
-                        start = int(start)
-                        end = int(end)
-                    except (ValueError, TypeError):
-                        continue
-
-                    claim = {
-                        "trace_id": trace_id,
-                        "model_id": model_id,
-                        "tool": tool,
-                        "conversation_url": conversation_url,
-                        "edit_sequence": meta.get("edit_sequence"),
-                    }
-                    for ln in range(start, end + 1):
-                        index.setdefault(ln, []).append(claim)
-
-    return index
-
-
-# -------------------------------------------------------------------
-# Candidate trace finder
-# -------------------------------------------------------------------
-
-def _find_candidate_traces(
-    project_dir: str,
-    parent_sha: str | None,
-    committed_at: str | None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Find traces that could have contributed to the current commit.
-
-    Returns ``(revision_matched, timestamp_matched)`` — two separate lists:
-
-    - **revision_matched**: Traces whose ``vcs.revision`` equals the parent
-      SHA.  These were recorded against the exact version of the files that
-      existed before this commit, so both their hash data AND range claims
-      are valid.
-    - **timestamp_matched**: Traces found via time-window fallback.  Their
-      ranges refer to a potentially different file version, so only their
-      content hashes should be used (not range claims).
-    """
-    from .storage import get_traces_path, resolve_project_id
-
-    pid = resolve_project_id(project_dir, create=False)
-    if not pid:
-        return [], []
-    traces_path = get_traces_path(pid)
-    if not traces_path.exists():
-        return [], []
-
-    all_traces: list[dict[str, Any]] = []
-    try:
-        for line in traces_path.read_text().splitlines():
-            line = line.strip()
-            if line:
-                try:
-                    all_traces.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        return [], []
-
-    revision_matched: list[dict[str, Any]] = []
-    timestamp_matched: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-
-    # Strategy 1: Match by parent revision (strongest — range claims valid)
-    if parent_sha:
-        for t in all_traces:
-            vcs = t.get("vcs") or {}
-            if vcs.get("revision") == parent_sha:
-                tid = t.get("id", "")
-                if tid and tid not in seen_ids:
-                    revision_matched.append(t)
-                    seen_ids.add(tid)
-
-    # Strategy 2: Time window fallback (hash matching only — no range claims)
-    if committed_at:
-        try:
-            commit_dt = datetime.fromisoformat(committed_at)
-            window_start = commit_dt - timedelta(hours=24)
-            window_end = commit_dt + timedelta(hours=1)
-            for t in all_traces:
-                tid = t.get("id", "")
-                if tid in seen_ids:
-                    continue
-                ts_str = t.get("timestamp")
-                if not ts_str:
-                    continue
-                try:
-                    ts = datetime.fromisoformat(ts_str)
-                    if window_start <= ts <= window_end:
-                        timestamp_matched.append(t)
-                        seen_ids.add(tid)
-                except (ValueError, TypeError):
-                    continue
-        except (ValueError, TypeError):
-            pass
-
-    return revision_matched, timestamp_matched
 
 
 # -------------------------------------------------------------------
@@ -465,21 +345,29 @@ def _find_candidate_traces(
 # -------------------------------------------------------------------
 
 def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] | None:
-    """Build a per-line attribution ledger for the current HEAD commit.
+    """Build a per-line AI-attribution ledger for the current HEAD commit.
+
+    Returns the ledger dict, or None if there is nothing changed or no
+    attributable lines.
 
     Algorithm:
-      1. Get HEAD and parent SHAs, changed files, commit date
-      2. Find candidate traces from local storage
+      1. Resolve commit + parent SHAs and their author times.
+      2. Find candidate traces in the staging window
+         (``parent_committed_at`` < trace.timestamp ≤ committed_at + 10min,
+         and ``vcs.revision`` matches parent if present).
       3. For each changed file:
-         a. Read committed content from git
-         b. Parse diff to find changed line ranges
-         c. Compute per-line hashes for committed content
-         d. Build hash index and range claim index from traces
-         e. Attribute each changed line: hash match → ai, range claim → mixed, else → human
-         f. Merge contiguous lines with same attribution into segments
-      4. Build and return ledger dict
-
-    Returns None if no data available (no parent, no changed files, etc.).
+         a. Read committed content; compute per-line hash + content.
+         b. Build a hash index over candidate traces (file-scoped first;
+            cross-file fallback only if file-scoped is empty).
+         c. For each line in the diff's added range:
+              * Skip trivial lines (empty/whitespace) — they're handled in
+                a fill pass after.
+              * If the line's hash matches an index entry AND the indexed
+                content equals the line's content → AI of that trace.
+              * Otherwise: do not record (implicit NO_ATTRIBUTION).
+         d. Fill pass: a trivial line attributed to AI iff both immediate
+            non-trivial neighbours are AI of the same trace.
+         e. Merge contiguous same-trace lines into segments with evidence.
     """
     if project_dir is None:
         import os
@@ -491,19 +379,21 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
 
     parent_sha = _git("rev-parse", "HEAD^", cwd=project_dir)
     committed_at = _git("log", "-1", "--format=%aI", "HEAD", cwd=project_dir)
+    parent_committed_at = (
+        _git("log", "-1", "--format=%aI", parent_sha, cwd=project_dir)
+        if parent_sha else None
+    )
 
-    # Get changed files
     if parent_sha:
         changed_out = _git("diff", "--name-only", "HEAD^", "HEAD", cwd=project_dir)
     else:
-        # Initial commit
-        changed_out = _git("diff", "--name-only", "--diff-filter=ACMR",
-                           "4b825dc642cb6eb9a060e54bf899d15f3f4b7b18", "HEAD",
-                           cwd=project_dir)
-
+        changed_out = _git(
+            "diff", "--name-only", "--diff-filter=ACMR",
+            "4b825dc642cb6eb9a060e54bf899d15f3f4b7b18", "HEAD",
+            cwd=project_dir,
+        )
     if not changed_out:
         return None
-
     changed_files = [f for f in changed_out.splitlines() if f.strip()]
     if not changed_files:
         return None
@@ -512,20 +402,10 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
         _get_rename_map(parent_sha, commit_sha, project_dir) if parent_sha else {}
     )
 
-    # Find candidate traces (may be empty for pure-human commits).
-    # revision_matched: traces at parent revision → range claims valid
-    # timestamp_matched: traces in time window → hash matching only
-    revision_matched, timestamp_matched = _find_candidate_traces(
-        project_dir, parent_sha, committed_at,
+    candidates = _find_candidate_traces(
+        project_dir, parent_sha, parent_committed_at, committed_at,
     )
-    all_candidates = revision_matched + timestamp_matched
 
-    # Hash of empty/whitespace-only lines — too common to be meaningful
-    _TRIVIAL_HASHES: set[str] = set()
-    for trivial in ("", " ", "\t", "  ", "    ", "\t\t"):
-        _TRIVIAL_HASHES.add(f"sha256:{hashlib.sha256(trivial.encode('utf-8')).hexdigest()[:16]}")
-
-    # Collect all trace IDs used
     used_trace_ids: set[str] = set()
     files_attributions: dict[str, dict[str, Any]] = {}
 
@@ -535,118 +415,108 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
         if old_p:
             alt_paths = [old_p]
 
-        # Read committed file content
         file_content = _git_raw("show", f"HEAD:{file_path}", cwd=project_dir)
         if file_content is None:
             continue
 
-        # Get diff for this file
         if parent_sha:
-            diff_output = _git_raw("diff", "HEAD^", "HEAD", "--", file_path, cwd=project_dir)
+            diff_output = _git_raw(
+                "diff", "HEAD^", "HEAD", "--", file_path, cwd=project_dir,
+            )
         else:
-            diff_output = _git_raw("diff", "4b825dc642cb6eb9a060e54bf899d15f3f4b7b18",
-                                   "HEAD", "--", file_path, cwd=project_dir)
+            diff_output = _git_raw(
+                "diff", "4b825dc642cb6eb9a060e54bf899d15f3f4b7b18",
+                "HEAD", "--", file_path, cwd=project_dir,
+            )
 
-        diff_ranges: list[tuple[int, int]] = []
-        if diff_output:
-            diff_ranges = _parse_diff_ranges(diff_output)
-
+        diff_ranges: list[tuple[int, int]] = (
+            _parse_diff_ranges(diff_output) if diff_output else []
+        )
         if not diff_ranges:
             continue
 
-        # Build the set of changed line numbers
         changed_lines: set[int] = set()
         for start, end in diff_ranges:
             for ln in range(start, end + 1):
                 changed_lines.add(ln)
 
-        # Compute line hashes for the committed file
-        file_line_hashes = _compute_file_line_hashes(file_content)
+        file_lines = _compute_file_lines(file_content)
 
-        # Hash index: use ALL candidates (revision + timestamp).
-        # Content-hash matching is position-independent so it's safe
-        # across file versions.
-        trace_hash_index = _build_trace_hash_index(
-            all_candidates, file_path, alternate_paths=alt_paths,
+        # File-scoped index first
+        hash_index = _build_trace_hash_index(
+            candidates, file_path, alternate_paths=alt_paths,
         )
+        # Cross-file fallback (still inside staging window)
+        if not hash_index:
+            hash_index = _build_trace_hash_index(
+                candidates, file_path, alternate_paths=alt_paths, cross_file=True,
+            )
 
-        # Range claim index: ONLY from revision-matched traces.
-        # Range claims are position-based and only valid when the trace
-        # describes the same version of the file (parent revision).
-        range_claim_index = _build_range_claim_index(
-            revision_matched, file_path, alternate_paths=alt_paths,
-        )
+        # Per-line attribution
+        # line_attr[ln] = {"trace_id", "model_id", "conversation_url", "hash", "content"}  (only AI lines)
+        # trivial[ln] = True for empty/whitespace lines (handled in fill pass)
+        line_attr: dict[int, dict[str, Any]] = {}
+        trivial: set[int] = set()
 
-        # Cross-file hash fallback: if no traces directly claim this file,
-        # search all traces' line hashes regardless of file path.
-        # Only use revision-matched traces for cross-file to avoid
-        # picking up hashes from unrelated sessions.
-        if not trace_hash_index and not range_claim_index:
-            trace_hash_index = _build_cross_file_hash_index(revision_matched)
-            # If still empty, try timestamp-matched as a last resort
-            if not trace_hash_index:
-                trace_hash_index = _build_cross_file_hash_index(timestamp_matched)
-
-        # Attribute each changed line
-        line_attrs: list[dict[str, Any]] = []
         for ln in sorted(changed_lines):
-            line_hash = file_line_hashes.get(ln)
-            if not line_hash:
+            if ln < 1 or ln > len(file_lines):
                 continue
-
-            # Skip trivial (empty / whitespace-only) lines — their hashes
-            # match across all traces and carry no authorship signal.
-            if line_hash in _TRIVIAL_HASHES:
-                line_attrs.append({
-                    "line": ln,
-                    "type": "human",
-                    "trace_id": None,
-                    "model_id": None,
-                    "conversation_url": None,
-                })
+            content = file_lines[ln - 1]
+            if _is_trivial(content):
+                trivial.add(ln)
                 continue
+            h = _line_hash(content)
+            entry = hash_index.get(h)
+            if entry is None:
+                continue
+            # Content equality guard against truncated-hash collisions
+            if entry.get("content") != content:
+                continue
+            tid = entry.get("trace_id")
+            if not tid:
+                continue
+            line_attr[ln] = {
+                "trace_id": tid,
+                "model_id": entry.get("model_id"),
+                "conversation_url": entry.get("conversation_url"),
+                "hash": h,
+                "content": content,
+            }
+            used_trace_ids.add(tid)
 
-            # Check hash index first (strongest signal — exact content match)
-            trace_meta = trace_hash_index.get(line_hash)
-            if trace_meta:
-                attr_type = "ai"
-                meta = trace_meta
-                used_trace_ids.add(meta["trace_id"])
-            elif ln in range_claim_index:
-                # Line is in a trace's range but content hash didn't match
-                # → human edited an AI-originated region
-                attr_type = "mixed"
-                claims = range_claim_index[ln]
-                # Pick the claim with highest edit_sequence
-                best = max(claims, key=lambda c: c.get("edit_sequence") or -1)
-                meta = best
-                used_trace_ids.add(meta["trace_id"])
-            else:
-                attr_type = "human"
-                meta = {}
+        # Fill pass: trivial line is AI iff both neighbours are AI of same trace
+        for ln in sorted(trivial):
+            prev = line_attr.get(ln - 1)
+            nxt = line_attr.get(ln + 1)
+            if prev and nxt and prev["trace_id"] == nxt["trace_id"]:
+                line_attr[ln] = {
+                    "trace_id": prev["trace_id"],
+                    "model_id": prev["model_id"],
+                    "conversation_url": prev["conversation_url"],
+                    "hash": _line_hash(file_lines[ln - 1]),
+                    "content": file_lines[ln - 1],
+                }
 
-            line_attrs.append({
-                "line": ln,
-                "type": attr_type,
-                "trace_id": meta.get("trace_id"),
-                "model_id": meta.get("model_id"),
-                "conversation_url": meta.get("conversation_url"),
-            })
-
-        if not line_attrs:
+        if not line_attr:
             continue
 
-        # Merge contiguous lines with same attribution into segments
-        segments = _merge_line_attrs(line_attrs)
-        files_attributions[file_path] = {"line_attributions": segments}
+        segments = _merge_into_segments(line_attr)
+        if segments:
+            files_attributions[file_path] = {"line_attributions": segments}
 
     if not files_attributions:
-        return None
+        # Still produce a ledger record with empty files so the commit is
+        # known (no AI lines found). Useful for audit ("we ran, found nothing").
+        # But to keep storage tight, only emit when there's at least one trace
+        # in the staging window OR something attributable was attempted.
+        if not candidates:
+            return None
 
     ledger: dict[str, Any] = {
-        "version": "1.0",
+        "version": "2.0",
         "commit_sha": commit_sha,
         "parent_sha": parent_sha,
+        "parent_committed_at": parent_committed_at,
         "committed_at": committed_at,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "trace_ids": sorted(used_trace_ids),
@@ -656,32 +526,39 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
     return ledger
 
 
-def _merge_line_attrs(line_attrs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge contiguous lines with the same attribution type and trace into segments."""
-    if not line_attrs:
+def _merge_into_segments(line_attr: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge contiguous lines with the same trace_id into AI segments with evidence."""
+    if not line_attr:
         return []
 
     segments: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
 
-    for la in line_attrs:
+    for ln in sorted(line_attr.keys()):
+        la = line_attr[ln]
+        evidence_entry = {
+            "line": ln,
+            "hash": la["hash"],
+            "content": la["content"],
+        }
         if (
             current is not None
-            and current["end_line"] + 1 == la["line"]
-            and current["type"] == la["type"]
-            and current.get("trace_id") == la.get("trace_id")
+            and current["end_line"] + 1 == ln
+            and current["trace_id"] == la["trace_id"]
         ):
-            current["end_line"] = la["line"]
+            current["end_line"] = ln
+            current["evidence"].append(evidence_entry)
         else:
             if current is not None:
                 segments.append(current)
             current = {
-                "start_line": la["line"],
-                "end_line": la["line"],
-                "type": la["type"],
-                "trace_id": la.get("trace_id"),
+                "start_line": ln,
+                "end_line": ln,
+                "type": "ai",
+                "trace_id": la["trace_id"],
                 "model_id": la.get("model_id"),
                 "conversation_url": la.get("conversation_url"),
+                "evidence": [evidence_entry],
             }
 
     if current is not None:
@@ -708,10 +585,7 @@ def store_ledger_local(ledger: dict[str, Any], project_dir: str) -> None:
 
 
 def load_local_ledgers(project_dir: str) -> dict[str, dict[str, Any]]:
-    """Load all ledgers from ``<AGENT_TRACE_HOME>/projects/<id>/ledgers.jsonl``.
-
-    Returns a dict keyed by ``commit_sha``.
-    """
+    """Load all ledgers from disk, keyed by ``commit_sha``."""
     from .storage import get_ledgers_path, resolve_project_id
 
     pid = resolve_project_id(project_dir, create=False)
@@ -724,14 +598,15 @@ def load_local_ledgers(project_dir: str) -> dict[str, dict[str, Any]]:
     try:
         for line in ledgers_path.read_text().splitlines():
             line = line.strip()
-            if line:
-                try:
-                    ledger = json.loads(line)
-                    sha = ledger.get("commit_sha", "")
-                    if sha:
-                        ledgers[sha] = ledger
-                except json.JSONDecodeError:
-                    continue
+            if not line:
+                continue
+            try:
+                ledger = json.loads(line)
+                sha = ledger.get("commit_sha", "")
+                if sha:
+                    ledgers[sha] = ledger
+            except json.JSONDecodeError:
+                continue
     except OSError:
         pass
     return ledgers

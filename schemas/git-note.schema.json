@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/schemas/git-note.schema.json",
   "title": "GitNotePayload",
-  "description": "JSON blob under refs/notes/agent-trace. Core fields are always present when notes are enabled; ledger, summary, and prompts are optional independent sections.",
+  "description": "JSON blob under refs/notes/agent-trace. Schema 2.0: stats only count AI lines (anything else is implicitly NO_ATTRIBUTION).",
   "type": "object",
   "required": ["version", "trace_ids", "ledger_hash", "stats"],
   "additionalProperties": false,
   "properties": {
     "version": {
       "type": "string",
-      "const": "1.0"
+      "const": "2.0"
     },
     "trace_ids": {
       "type": "array",
@@ -21,17 +21,16 @@
     },
     "stats": {
       "type": "object",
-      "required": ["ai_lines", "human_lines", "mixed_lines"],
+      "required": ["ai_lines"],
       "additionalProperties": false,
       "properties": {
         "ai_lines": { "type": "integer", "minimum": 0 },
-        "human_lines": { "type": "integer", "minimum": 0 },
-        "mixed_lines": { "type": "integer", "minimum": 0 }
+        "total_changed_lines": { "type": "integer", "minimum": 0 }
       }
     },
     "ledger": {
       "type": "object",
-      "description": "Inline per-line attribution (optional)",
+      "description": "Inline per-line attribution (optional, AI segments only)",
       "required": ["files"],
       "additionalProperties": false,
       "properties": {
@@ -46,14 +45,15 @@
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["start_line", "end_line", "type"],
+                  "required": ["start_line", "end_line", "type", "trace_id"],
                   "additionalProperties": true,
                   "properties": {
                     "start_line": { "type": "integer", "minimum": 1 },
                     "end_line": { "type": "integer", "minimum": 1 },
-                    "type": { "type": "string" },
+                    "type": { "type": "string", "const": "ai" },
                     "trace_id": { "type": "string" },
-                    "model_id": { "type": "string" }
+                    "model_id": { "type": "string" },
+                    "conversation_url": { "type": "string" }
                   }
                 }
               }

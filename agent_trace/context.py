@@ -108,7 +108,7 @@ def get_context(
         start_line=start_line,
         end_line=end_line,
         json_output=True,
-        show_unknown=True,
+        show_no_attribution=True,
         project_dir=cwd,
     )
 
@@ -141,26 +141,21 @@ def get_context(
             or attribution_label == "AI"
             or contributor_type == "ai"
         )
-        is_mixed = (
-            kind == "MIXED"
-            or attribution_label == "Mixed"
-            or contributor_type == "mixed"
-        )
 
-        if not is_ai and not is_mixed:
-            # Human or no attribution — include as a simple segment
+        if not is_ai:
+            # Anything that isn't a verified AI match is NO_ATTRIBUTION.
             segments.append({
                 "start_line": attr_start,
                 "end_line": attr_end,
-                "attribution": "human",
+                "attribution": "no_attribution",
             })
             continue
 
-        # AI or Mixed attribution — resolve conversation context
+        # AI attribution — resolve conversation context
         segment: dict[str, Any] = {
             "start_line": attr_start,
             "end_line": attr_end,
-            "attribution": "mixed" if is_mixed else "ai",
+            "attribution": "ai",
         }
 
         # Attribution metadata
@@ -224,7 +219,6 @@ def get_context(
 _BOLD = "\033[1m"
 _DIM = "\033[2m"
 _GREEN = "\033[32m"
-_YELLOW = "\033[33m"
 _CYAN = "\033[36m"
 _RESET = "\033[0m"
 
@@ -239,19 +233,17 @@ def format_text(file_path: str, segments: list[dict[str, Any]], full: bool = Fal
     for seg in segments:
         start = seg.get("start_line", 0)
         end = seg.get("end_line", 0)
-        attribution = seg.get("attribution", "human")
+        attribution = seg.get("attribution", "no_attribution")
 
         if start == end:
             lr = f"L{start}"
         else:
             lr = f"L{start}-{end}"
 
-        if attribution == "human":
-            lines.append(f"  {lr:<14}{_DIM}Human{_RESET}")
+        if attribution != "ai":
+            lines.append(f"  {lr:<14}{_DIM}No attribution{_RESET}")
             continue
 
-        # AI or Mixed
-        label = "AI" if attribution == "ai" else "Mixed"
         model_id = seg.get("model_id", "")
         tool = seg.get("tool", "")
 
@@ -259,8 +251,7 @@ def format_text(file_path: str, segments: list[dict[str, Any]], full: bool = Fal
         if tool:
             model_tool = f"{model_id} via {tool}" if model_id else tool
 
-        color = _GREEN if attribution == "ai" else _YELLOW
-        lines.append(f"  {lr:<14}{color}{label}{_RESET} ({model_tool})")
+        lines.append(f"  {lr:<14}{_GREEN}AI{_RESET} ({model_tool})")
 
         # Conversation size
         conv_size = seg.get("conversation_size")

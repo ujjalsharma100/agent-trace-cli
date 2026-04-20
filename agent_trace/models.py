@@ -24,13 +24,22 @@ def schemas_dir() -> Path:
 class LineHash:
     line_offset: int
     hash: str
+    content: str
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> LineHash:
-        return cls(line_offset=int(d["line_offset"]), hash=str(d["hash"]))
+        return cls(
+            line_offset=int(d["line_offset"]),
+            hash=str(d["hash"]),
+            content=str(d.get("content", "")),
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"line_offset": self.line_offset, "hash": self.hash}
+        return {
+            "line_offset": self.line_offset,
+            "hash": self.hash,
+            "content": self.content,
+        }
 
 
 @dataclass
@@ -172,34 +181,72 @@ class Trace:
 
 
 @dataclass
-class LineSegment:
-    start_line: int
-    end_line: int
-    type: str
-    trace_id: str | None = None
-    model_id: str | None = None
-    conversation_url: str | None = None
+class LineEvidence:
+    """Per-line audit trail: hash and content of each AI-attributed line."""
+
+    line: int
+    hash: str
+    content: str
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> LineSegment:
+    def from_dict(cls, d: dict[str, Any]) -> LineEvidence:
         return cls(
-            start_line=int(d["start_line"]),
-            end_line=int(d["end_line"]),
-            type=str(d["type"]),
-            trace_id=d.get("trace_id"),
-            model_id=d.get("model_id"),
-            conversation_url=d.get("conversation_url"),
+            line=int(d["line"]),
+            hash=str(d["hash"]),
+            content=str(d.get("content", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        return {"line": self.line, "hash": self.hash, "content": self.content}
+
+
+@dataclass
+class LineSegment:
+    """An AI-attributed run of lines. Schema 2.0: only AI segments exist;
+    anything not in a segment is implicitly NO_ATTRIBUTION."""
+
+    start_line: int
+    end_line: int
+    trace_id: str
+    type: str = "ai"
+    model_id: str | None = None
+    conversation_url: str | None = None
+    evidence: list[LineEvidence] | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> LineSegment:
+        ev_raw = d.get("evidence")
+        evidence: list[LineEvidence] | None = None
+        if isinstance(ev_raw, list):
+            evidence = [
+                LineEvidence.from_dict(cast(dict[str, Any], x))
+                for x in ev_raw
+                if isinstance(x, dict)
+            ]
+        return cls(
+            start_line=int(d["start_line"]),
+            end_line=int(d["end_line"]),
+            type=str(d.get("type", "ai")),
+            trace_id=str(d["trace_id"]),
+            model_id=d.get("model_id"),
+            conversation_url=d.get("conversation_url"),
+            evidence=evidence,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
             "start_line": self.start_line,
             "end_line": self.end_line,
             "type": self.type,
             "trace_id": self.trace_id,
-            "model_id": self.model_id,
-            "conversation_url": self.conversation_url,
         }
+        if self.model_id is not None:
+            out["model_id"] = self.model_id
+        if self.conversation_url is not None:
+            out["conversation_url"] = self.conversation_url
+        if self.evidence is not None:
+            out["evidence"] = [e.to_dict() for e in self.evidence]
+        return out
 
 
 @dataclass
@@ -228,6 +275,7 @@ class Ledger:
     created_at: str
     trace_ids: list[str]
     files: dict[str, FileLedger]
+    parent_committed_at: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Ledger:
@@ -241,6 +289,7 @@ class Ledger:
             version=str(d["version"]),
             commit_sha=str(d["commit_sha"]),
             parent_sha=d.get("parent_sha"),
+            parent_committed_at=d.get("parent_committed_at"),
             committed_at=d.get("committed_at"),
             created_at=str(d["created_at"]),
             trace_ids=[str(x) for x in d.get("trace_ids", [])],
@@ -248,7 +297,7 @@ class Ledger:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "version": self.version,
             "commit_sha": self.commit_sha,
             "parent_sha": self.parent_sha,
@@ -257,6 +306,9 @@ class Ledger:
             "trace_ids": list(self.trace_ids),
             "files": {k: v.to_dict() for k, v in self.files.items()},
         }
+        if self.parent_committed_at is not None:
+            out["parent_committed_at"] = self.parent_committed_at
+        return out
 
 
 # --- Commit link (commit-links.jsonl) ---
@@ -307,24 +359,25 @@ class CommitLink:
 
 @dataclass
 class GitNoteStats:
+    """Schema 2.0: only AI-line counts are tracked. Everything else is
+    implicitly NO_ATTRIBUTION. ``total_changed_lines`` is optional context."""
+
     ai_lines: int
-    human_lines: int
-    mixed_lines: int
+    total_changed_lines: int | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> GitNoteStats:
+        total = d.get("total_changed_lines")
         return cls(
             ai_lines=int(d["ai_lines"]),
-            human_lines=int(d["human_lines"]),
-            mixed_lines=int(d["mixed_lines"]),
+            total_changed_lines=int(total) if total is not None else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "ai_lines": self.ai_lines,
-            "human_lines": self.human_lines,
-            "mixed_lines": self.mixed_lines,
-        }
+        out: dict[str, Any] = {"ai_lines": self.ai_lines}
+        if self.total_changed_lines is not None:
+            out["total_changed_lines"] = self.total_changed_lines
+        return out
 
 
 @dataclass

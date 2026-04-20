@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/schemas/trace-record.schema.json",
   "title": "TraceRecord",
-  "description": "One line in traces.jsonl. v2.0 documents metadata.edit_sequence and per-range line_hashes; v1.0 records remain valid.",
+  "description": "One line in traces.jsonl. Schema 2.0: per-line content stored alongside hash for deterministic auditable attribution.",
   "type": "object",
   "required": ["version", "id", "timestamp", "tool", "files"],
   "additionalProperties": false,
   "properties": {
     "version": {
       "type": "string",
-      "enum": ["1.0", "2.0"]
+      "enum": ["2.0"]
     },
     "id": { "type": "string", "minLength": 1 },
     "timestamp": { "type": "string", "description": "ISO-8601 timestamp" },
@@ -54,14 +54,15 @@
     },
     "lineHash": {
       "type": "object",
-      "required": ["line_offset", "hash"],
+      "required": ["line_offset", "hash", "content"],
       "additionalProperties": false,
       "properties": {
         "line_offset": { "type": "integer", "minimum": 0 },
         "hash": {
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{16}$"
-        }
+        },
+        "content": { "type": "string" }
       }
     },
     "range": {

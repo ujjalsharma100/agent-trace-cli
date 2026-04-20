@@ -45,7 +45,7 @@ def get_agent_trace_blame(
         result_json = blame_module.blame_file(
             file_path_for_blame,
             json_output=True,
-            show_unknown=True,
+            show_no_attribution=True,
             project_dir=project_root,
         )
     except TypeError:
@@ -56,7 +56,7 @@ def get_agent_trace_blame(
             result_json = blame_module.blame_file(
                 file_path_for_blame,
                 json_output=True,
-                show_unknown=True,
+                show_no_attribution=True,
             )
         finally:
             os.chdir(orig_cwd)

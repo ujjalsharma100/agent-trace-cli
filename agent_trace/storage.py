@@ -93,6 +93,11 @@ def get_project_config_path(project_id: str) -> Path:
     return get_project_dir(project_id) / "project-config.json"
 
 
+def get_attribution_state_path(project_id: str) -> Path:
+    """Per-project attribution-window cursor (last commit timestamp seen)."""
+    return get_project_dir(project_id) / "attribution-state.json"
+
+
 # -------------------------------------------------------------------
 # Repo-dir → project_id resolution
 # -------------------------------------------------------------------

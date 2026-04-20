@@ -234,13 +234,14 @@ def normalize_model_id(model: str | None) -> str | None:
 
 
 def compute_line_hashes(content: str) -> list[dict]:
-    """Compute per-line SHA-256 hashes for position-independent line tracking.
+    """Compute per-line SHA-256 hashes plus the verbatim line content.
 
-    Each line is hashed individually so that the ledger can match committed
-    lines back to the trace that produced them, even if surrounding lines
-    shifted.
+    Each line is hashed individually so the ledger can match committed lines
+    back to the trace that produced them, even if surrounding lines shifted.
+    The literal ``content`` is stored alongside the hash so attribution can
+    be audited (and so hash collisions can be disambiguated).
 
-    Returns a list of ``{"line_offset": 0, "hash": "sha256:..."}`` dicts.
+    Returns a list of ``{"line_offset": 0, "hash": "sha256:...", "content": "..."}``.
     """
     lines = content.split("\n")
     # Strip trailing empty line caused by trailing newline
@@ -249,7 +250,11 @@ def compute_line_hashes(content: str) -> list[dict]:
     result: list[dict] = []
     for i, line in enumerate(lines):
         h = hashlib.sha256(line.encode("utf-8")).hexdigest()[:16]
-        result.append({"line_offset": i, "hash": f"sha256:{h}"})
+        result.append({
+            "line_offset": i,
+            "hash": f"sha256:{h}",
+            "content": line,
+        })
     return result
 
 
@@ -355,7 +360,7 @@ def create_trace(
         conversation["url"] = conversation_url
 
     trace: dict = {
-        "version": "1.0",
+        "version": "2.0",
         "id": str(uuid.uuid4()),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tool": get_tool_info(),

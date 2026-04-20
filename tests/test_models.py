@@ -77,9 +77,10 @@ class TestTraceSchema(unittest.TestCase):
 class TestLedgerAndCommitLink(unittest.TestCase):
     def test_ledger_roundtrip(self) -> None:
         raw = {
-            "version": "1.0",
+            "version": "2.0",
             "commit_sha": "abc123",
             "parent_sha": "def456",
+            "parent_committed_at": "2026-04-12T11:59:00+00:00",
             "committed_at": "2026-04-12T12:00:00+00:00",
             "created_at": "2026-04-12T12:00:01+00:00",
             "trace_ids": ["tid-1"],
@@ -92,7 +93,6 @@ class TestLedgerAndCommitLink(unittest.TestCase):
                             "type": "ai",
                             "trace_id": "tid-1",
                             "model_id": "anthropic/claude-3-5-sonnet-20241022",
-                            "conversation_url": None,
                         }
                     ]
                 }
@@ -120,10 +120,10 @@ class TestLedgerAndCommitLink(unittest.TestCase):
 class TestGitNoteRemotesSync(unittest.TestCase):
     def test_git_note_roundtrip(self) -> None:
         raw = {
-            "version": "1.0",
+            "version": "2.0",
             "trace_ids": ["u1"],
             "ledger_hash": "sha256:" + "ab" * 32,
-            "stats": {"ai_lines": 1, "human_lines": 0, "mixed_lines": 0},
+            "stats": {"ai_lines": 1},
             "prompts": ["fix auth"],
         }
         gn = GitNote.from_dict(raw)

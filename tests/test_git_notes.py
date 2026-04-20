@@ -49,7 +49,7 @@ def _git_init_with_commit(repo: Path) -> str:
 class TestBuildNote(unittest.TestCase):
     def test_schema_valid(self) -> None:
         leg = {
-            "version": "1.0",
+            "version": "2.0",
             "commit_sha": "a" * 40,
             "parent_sha": None,
             "committed_at": None,
@@ -87,7 +87,7 @@ class TestBuildNote(unittest.TestCase):
             include_prompts=True,
         )
         _validate(note, "git-note.schema.json")
-        self.assertEqual(note["version"], "1.0")
+        self.assertEqual(note["version"], "2.0")
         self.assertIn("ledger", note)
         self.assertIn("prompts", note)
 
@@ -108,16 +108,21 @@ class TestGitNotesRepo(unittest.TestCase):
             repo = Path(tmp)
             sha = _git_init_with_commit(repo)
             leg = {
-                "version": "1.0",
+                "version": "2.0",
                 "commit_sha": sha,
                 "parent_sha": None,
                 "committed_at": None,
                 "created_at": "2026-01-01T00:00:00+00:00",
-                "trace_ids": [],
+                "trace_ids": ["tid1"],
                 "files": {
                     "f.txt": {
                         "line_attributions": [
-                            {"start_line": 1, "end_line": 1, "type": "human"},
+                            {
+                                "start_line": 1,
+                                "end_line": 1,
+                                "type": "ai",
+                                "trace_id": "tid1",
+                            },
                         ],
                     },
                 },
@@ -155,10 +160,10 @@ class TestBlameNoteFallback(unittest.TestCase):
             },
         ]
         note = {
-            "version": "1.0",
+            "version": "2.0",
             "trace_ids": [],
             "ledger_hash": "sha256:" + "ab" * 32,
-            "stats": {"ai_lines": 1, "human_lines": 0, "mixed_lines": 0},
+            "stats": {"ai_lines": 1},
             "ledger": {
                 "files": {
                     "f.py": {

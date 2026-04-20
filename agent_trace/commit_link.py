@@ -189,7 +189,7 @@ def create_commit_link(project_dir: str | None = None) -> dict | None:
         project_dir, parent_sha, changed_files
     )
 
-    # Always build the attribution ledger — even for pure-human commits.
+    # Always build the attribution ledger — even when nothing is AI-attributed.
     ledger = None
     try:
         ledger = build_attribution_ledger(project_dir)

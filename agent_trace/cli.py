@@ -715,7 +715,7 @@ def cmd_blame(args):
         line=getattr(args, "line", None),
         start_line=start_line,
         end_line=end_line,
-        show_unknown=getattr(args, "show_unknown", False),
+        show_no_attribution=getattr(args, "show_no_attribution", False),
         require_attribution=getattr(args, "require_attribution", False),
         json_output=getattr(args, "json", False),
         project_dir=project_dir,
@@ -1361,16 +1361,16 @@ def main():
     sub_blame.add_argument("--json", action="store_true", default=False,
                            help="Output as JSON")
     sub_blame.add_argument(
-        "--show-unknown",
+        "--show-no-attribution",
         action="store_true",
         default=False,
-        help="Include lines with no ledger (UNKNOWN); default is to omit them",
+        help="Include lines not attributed to AI (NO_ATTRIBUTION); default is to omit them",
     )
     sub_blame.add_argument(
         "--require-attribution",
         action="store_true",
         default=False,
-        help="Exit with non-zero status if any line is UNKNOWN (for CI)",
+        help="Exit with non-zero status if any line is NO_ATTRIBUTION (for CI)",
     )
 
     # context <file>

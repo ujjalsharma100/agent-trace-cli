@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/schemas/ledger.schema.json",
   "title": "AttributionLedger",
-  "description": "One line in ledgers.jsonl. v2.0 schema documents the same shape produced since v1.0; the embedded version field may remain 1.0 until a format bump.",
+  "description": "One line in ledgers.jsonl. Schema 2.0: only AI segments are recorded. Anything not recorded is implicitly NO_ATTRIBUTION. Each AI segment carries per-line evidence (hash + content) for audit.",
   "type": "object",
   "required": [
     "version",
@@ -17,10 +17,11 @@
   "properties": {
     "version": {
       "type": "string",
-      "enum": ["1.0", "2.0"]
+      "enum": ["2.0"]
     },
     "commit_sha": { "type": "string", "minLength": 1 },
     "parent_sha": { "type": ["string", "null"] },
+    "parent_committed_at": { "type": ["string", "null"] },
     "committed_at": { "type": ["string", "null"] },
     "created_at": { "type": "string" },
     "trace_ids": {
@@ -33,20 +34,34 @@
     }
   },
   "$defs": {
+    "lineEvidence": {
+      "type": "object",
+      "required": ["line", "hash", "content"],
+      "additionalProperties": false,
+      "properties": {
+        "line": { "type": "integer", "minimum": 1 },
+        "hash": { "type": "string" },
+        "content": { "type": "string" }
+      }
+    },
     "lineSegment": {
       "type": "object",
-      "required": ["start_line", "end_line", "type"],
+      "required": ["start_line", "end_line", "type", "trace_id"],
       "additionalProperties": false,
       "properties": {
         "start_line": { "type": "integer", "minimum": 1 },
         "end_line": { "type": "integer", "minimum": 1 },
         "type": {
           "type": "string",
-          "enum": ["ai", "human", "mixed"]
+          "const": "ai"
         },
-        "trace_id": { "type": ["string", "null"] },
+        "trace_id": { "type": "string", "minLength": 1 },
         "model_id": { "type": ["string", "null"] },
-        "conversation_url": { "type": ["string", "null"] }
+        "conversation_url": { "type": ["string", "null"] },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/lineEvidence" }
+        }
       }
     },
     "fileAttribution": {

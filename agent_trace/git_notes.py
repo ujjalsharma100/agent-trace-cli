@@ -54,24 +54,22 @@ def _ledger_to_dict(ledger: Ledger | dict[str, Any]) -> dict[str, Any]:
 
 
 def _stats_from_ledger(ledger: dict[str, Any]) -> dict[str, int]:
-    ai = human = mixed = 0
+    """Schema 2.0: only AI lines are counted. Anything else is implicitly
+    NO_ATTRIBUTION and isn't stored, so there's nothing to tally."""
+    ai = 0
     for _fp, fl in ledger.get("files", {}).items():
         if not isinstance(fl, dict):
             continue
         for seg in fl.get("line_attributions", []):
             if not isinstance(seg, dict):
                 continue
-            t = str(seg.get("type", "")).lower()
+            if str(seg.get("type", "")).lower() != "ai":
+                continue
             start = int(seg.get("start_line", 0))
             end = int(seg.get("end_line", 0))
             n = max(0, end - start + 1) if start and end else 0
-            if t == "ai":
-                ai += n
-            elif t == "mixed":
-                mixed += n
-            elif t == "human":
-                human += n
-    return {"ai_lines": ai, "human_lines": human, "mixed_lines": mixed}
+            ai += n
+    return {"ai_lines": ai}
 
 
 def _prompts_from_traces(traces: list[Trace], *, max_chars: int = 500) -> list[str]:
@@ -105,7 +103,7 @@ def build_note(
     h = ledger_dict_hash(led)
     stats = _stats_from_ledger(led)
     note: dict[str, Any] = {
-        "version": "1.0",
+        "version": "2.0",
         "trace_ids": trace_ids,
         "ledger_hash": h,
         "stats": stats,

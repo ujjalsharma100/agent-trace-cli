@@ -19,10 +19,10 @@ class TestBlameDeterministic(unittest.TestCase):
         self.assertEqual(m[0]["start_line"], 1)
         self.assertEqual(m[0]["end_line"], 4)
 
-    def test_merge_adjacent_unknown_combines(self) -> None:
+    def test_merge_adjacent_no_attribution_combines(self) -> None:
         a = [
-            {"start_line": 1, "end_line": 1, "kind": "UNKNOWN", "trace_id": None, "source": None},
-            {"start_line": 2, "end_line": 2, "kind": "UNKNOWN", "trace_id": None, "source": None},
+            {"start_line": 1, "end_line": 1, "kind": "NO_ATTRIBUTION", "trace_id": None, "source": None},
+            {"start_line": 2, "end_line": 2, "kind": "NO_ATTRIBUTION", "trace_id": None, "source": None},
         ]
         m = blame._merge_attributions(a)
         self.assertEqual(len(m), 1)
@@ -61,7 +61,7 @@ class TestBlameDeterministic(unittest.TestCase):
         self.assertEqual(attr[0]["kind"], "AI")
         self.assertEqual(attr[0]["trace_id"], "tid")
 
-    def test_unknown_when_no_ledger(self) -> None:
+    def test_no_attribution_when_no_ledger(self) -> None:
         sha = "b" * 40
         seg = [{
             "commit_sha": sha,
@@ -73,14 +73,14 @@ class TestBlameDeterministic(unittest.TestCase):
         }]
         out = blame._attribute_deterministic(seg, "x.py", {}, [])
         self.assertEqual(len(out), 1)
-        self.assertEqual(out[0]["kind"], "UNKNOWN")
+        self.assertEqual(out[0]["kind"], "NO_ATTRIBUTION")
 
-    def test_filter_unknown(self) -> None:
+    def test_filter_no_attribution(self) -> None:
         attrs = [
             {"kind": "AI", "start_line": 1, "end_line": 1},
-            {"kind": "UNKNOWN", "start_line": 2, "end_line": 2},
+            {"kind": "NO_ATTRIBUTION", "start_line": 2, "end_line": 2},
         ]
-        f = blame._filter_unknown(attrs, show_unknown=False)
+        f = blame._filter_no_attribution(attrs, show_no_attribution=False)
         self.assertEqual(len(f), 1)
         self.assertEqual(f[0]["kind"], "AI")
 

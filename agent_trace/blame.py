@@ -1,8 +1,10 @@
 """
 CLI blame command — show AI attribution for file lines.
 
-Deterministic only: per-commit ledger (``.agent-trace/ledgers.jsonl``) plus
-UNKNOWN when no ledger covers the line. No heuristics or remote blame API.
+Schema 2.0: attribution is binary. A line is either AI (with a matching
+ledger segment backed by hash + content evidence) or NO_ATTRIBUTION
+(everything else). No MIXED, HUMAN, or UNKNOWN labels — we never claim
+"this was a human"; we only ever assert "this matches an AI trace".
 """
 
 from __future__ import annotations
@@ -43,17 +45,15 @@ def _merge_ledgers_from_git_notes(
 
 
 def _attribution_type_label(attr_type: str) -> str:
-    return {"ai": "AI", "human": "Human", "mixed": "Mixed"}.get(attr_type, attr_type)
+    if attr_type == "ai":
+        return "AI"
+    return "No attribution"
 
 
 def _ledger_kind(attr_type: str) -> str:
     if attr_type == "ai":
         return "AI"
-    if attr_type == "mixed":
-        return "MIXED"
-    if attr_type == "human":
-        return "HUMAN"
-    return "UNKNOWN"
+    return "NO_ATTRIBUTION"
 
 
 def _ranges_overlap(
@@ -104,7 +104,11 @@ def _attribute_from_ledger(
                 for clamped_orig_start, clamped_orig_end, la in overlapping:
                     final_start = clamped_orig_start + offset
                     final_end = clamped_orig_end + offset
-                    attr_type = la.get("type", "unknown")
+                    attr_type = la.get("type", "ai")
+                    # Schema 2.0 only allows "ai" segments; anything else is
+                    # invalid data and is skipped (treated as NO_ATTRIBUTION).
+                    if attr_type != "ai":
+                        continue
                     kind = _ledger_kind(attr_type)
                     trace_id = la.get("trace_id")
                     trace_rec = trace_by_id.get(trace_id) if trace_id else None
@@ -133,6 +137,7 @@ def _attribute_from_ledger(
                             "start_line": la.get("start_line"),
                             "end_line": la.get("end_line"),
                         },
+                        "evidence": la.get("evidence"),
                         "commit_sha": commit_sha,
                         "signals": ["ledger"],
                         "source": "ledger",
@@ -165,12 +170,12 @@ def _attribute_from_ledger(
     return attributed, remaining
 
 
-def _unknown_entry(seg: dict[str, Any]) -> dict[str, Any]:
+def _no_attribution_entry(seg: dict[str, Any]) -> dict[str, Any]:
     return {
         "start_line": seg["start_line"],
         "end_line": seg["end_line"],
-        "kind": "UNKNOWN",
-        "attribution_label": "Unknown",
+        "kind": "NO_ATTRIBUTION",
+        "attribution_label": "No attribution",
         "trace_id": None,
         "timestamp": None,
         "model_id": None,
@@ -198,9 +203,9 @@ def _attribute_deterministic(
             blame_segments, ledgers, file_path, traces=traces,
         )
 
-    unknown_results = [_unknown_entry(seg) for seg in remaining]
+    gap_results = [_no_attribution_entry(seg) for seg in remaining]
 
-    all_results = ledger_results + unknown_results
+    all_results = ledger_results + gap_results
     all_results.sort(key=lambda a: (a.get("start_line", 0), a.get("end_line", 0)))
     return all_results
 
@@ -227,7 +232,6 @@ def _merge_attributions(attributions: list[dict[str, Any]]) -> list[dict[str, An
 _BOLD = "\033[1m"
 _DIM = "\033[2m"
 _GREEN = "\033[32m"
-_YELLOW = "\033[33m"
 _RESET = "\033[0m"
 
 
@@ -247,16 +251,12 @@ def _format_terminal(file_path: str, attributions: list[dict[str, Any]]) -> str:
         start = attr.get("start_line", 0)
         end = attr.get("end_line", 0)
         lr = _format_line_range(start, end)
-        kind = attr.get("kind", "UNKNOWN")
+        kind = attr.get("kind", "NO_ATTRIBUTION")
 
         if kind == "AI":
             tag = f"{_GREEN}[AI]{_RESET}"
-        elif kind == "MIXED":
-            tag = f"{_YELLOW}[MIXED]{_RESET}"
-        elif kind == "HUMAN":
-            tag = f"{_DIM}[HUMAN]{_RESET}"
         else:
-            tag = f"{_DIM}[UNKNOWN]{_RESET}"
+            tag = f"{_DIM}[NO ATTRIBUTION]{_RESET}"
 
         model_id = attr.get("model_id") or ""
         tool = attr.get("tool")
@@ -270,7 +270,7 @@ def _format_terminal(file_path: str, attributions: list[dict[str, Any]]) -> str:
         if tool_name:
             model_tool = f"{model_id} via {tool_name}" if model_id else tool_name
 
-        if kind == "UNKNOWN":
+        if kind == "NO_ATTRIBUTION":
             lines.append(f"  {lr:<12}{tag}")
             continue
 
@@ -338,22 +338,24 @@ def _format_json(file_path: str, attributions: list[dict[str, Any]]) -> str:
             entry["source"] = attr["source"]
         if attr.get("attribution_label"):
             entry["attribution_label"] = attr["attribution_label"]
+        if attr.get("evidence"):
+            entry["evidence"] = attr["evidence"]
         clean.append(entry)
 
     return json.dumps({"file": file_path, "attributions": clean}, indent=2)
 
 
-def _filter_unknown(
+def _filter_no_attribution(
     attributions: list[dict[str, Any]],
-    show_unknown: bool,
+    show_no_attribution: bool,
 ) -> list[dict[str, Any]]:
-    if show_unknown:
+    if show_no_attribution:
         return attributions
-    return [a for a in attributions if a.get("kind") != "UNKNOWN"]
+    return [a for a in attributions if a.get("kind") != "NO_ATTRIBUTION"]
 
 
-def _has_unknown(attributions: list[dict[str, Any]]) -> bool:
-    return any(a.get("kind") == "UNKNOWN" for a in attributions)
+def _has_no_attribution(attributions: list[dict[str, Any]]) -> bool:
+    return any(a.get("kind") == "NO_ATTRIBUTION" for a in attributions)
 
 
 def blame_file(
@@ -362,7 +364,7 @@ def blame_file(
     line: int | None = None,
     start_line: int | None = None,
     end_line: int | None = None,
-    show_unknown: bool = False,
+    show_no_attribution: bool = False,
     require_attribution: bool = False,
     json_output: bool = False,
     project_dir: str | None = None,
@@ -425,15 +427,15 @@ def blame_file(
     raw_attrs = _attribute_deterministic(segments, rel_path, ledgers, traces)
     attributions = _merge_attributions(raw_attrs)
 
-    if require_attribution and _has_unknown(attributions):
+    if require_attribution and _has_no_attribution(attributions):
         print(
-            "agent-trace blame: unknown attribution for one or more lines "
-            "(ledger missing or incomplete).",
+            "agent-trace blame: no AI attribution for one or more lines "
+            "(ledger missing, or lines were not written by a tracked AI tool).",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    out = _filter_unknown(attributions, show_unknown)
+    out = _filter_no_attribution(attributions, show_no_attribution)
 
     if json_output:
         return _format_json(rel_path, out)

@@ -55,13 +55,18 @@ class TestBuildTraceHashIndexRenames(unittest.TestCase):
                 "conversations": [{
                     "contributor": {"model_id": "m"},
                     "ranges": [{
-                        "line_hashes": [{"hash": "sha256:abc123"}],
+                        "line_hashes": [{
+                            "line_offset": 0,
+                            "hash": "sha256:abc123",
+                            "content": "print('hi')",
+                        }],
                     }],
                 }],
             }],
         }
         idx = _build_trace_hash_index([trace], "new/name.py", alternate_paths=["legacy/name.py"])
         self.assertIn("sha256:abc123", idx)
+        self.assertEqual(idx["sha256:abc123"]["content"], "print('hi')")
 
 
 if __name__ == "__main__":
