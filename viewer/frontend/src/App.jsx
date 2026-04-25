@@ -72,7 +72,7 @@ export default function App() {
         <div className="sidebar-header">
           <h2>Agent Trace</h2>
           <div className="project-name" title={project.root}>
-            {project.label || project.root.replace(/^.*\//, '') || project.root}
+            {project.root.replace(/^.*\//, '') || project.root}
           </div>
           <div className="project-meta">
             {project.storage} · {project.has_agent_trace ? 'Traced' : 'No traces'}

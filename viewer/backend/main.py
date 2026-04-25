@@ -3,7 +3,7 @@
 Agent-trace file viewer backend — stdlib HTTP server.
 
 Serves:
-  - /api/project   — project root, AGENT_TRACE_HOME, project_id, label, git_note_head, …
+  - /api/project   — project root, AGENT_TRACE_HOME, project_id, git_note_head, …
   - /api/health    — health check
   - /api/tree      — list dirs/files (?path=...)
   - /api/file      — file content (?path=...)

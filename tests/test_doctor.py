@@ -45,7 +45,7 @@ class TestDoctor(unittest.TestCase):
 
         os.environ["AGENT_TRACE_HOME"] = str(home)
         os.chdir(repo)
-        save_project_config({"label": "doc-test"})
+        save_project_config({})
 
         cmd_doctor(type("Args", (), {})())
 
@@ -64,7 +64,7 @@ class TestDoctor(unittest.TestCase):
 
         os.environ["AGENT_TRACE_HOME"] = str(home)
         os.chdir(repo)
-        save_project_config({"label": "x"})
+        save_project_config({})
         cfg = get_project_config()
         assert cfg is not None
         cfg["summary"] = {"enabled": True, "command": ""}

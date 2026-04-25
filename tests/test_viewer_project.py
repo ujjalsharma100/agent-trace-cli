@@ -42,11 +42,10 @@ class TestViewerProjectInfo(unittest.TestCase):
 
         os.environ["AGENT_TRACE_HOME"] = str(home)
         os.chdir(repo)
-        save_project_config({"label": "my-label"})
+        save_project_config({})
 
         info = get_project_info(str(repo))
         self.assertTrue(info.get("has_agent_trace"))
-        self.assertEqual(info.get("label"), "my-label")
         self.assertTrue(info.get("project_id"))
         self.assertTrue(str(info.get("agent_trace_home", "")))
         self.assertIn("projects", str(info.get("project_data_dir", "")))

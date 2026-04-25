@@ -5,7 +5,7 @@ Two-tier layout:
 
   1. Global       — <AGENT_TRACE_HOME>/config.json (global auth token, preferences)
   2. Per-project  — <AGENT_TRACE_HOME>/projects/<id>/project-config.json
-                    (label, notes.*, summary.*, remote.default)
+                    (notes.*, summary.*, remote.default)
 
 Project identity is derived from the git repo root (a sanitized absolute path),
 so no in-repo state is needed. Existence of the project-config.json file under

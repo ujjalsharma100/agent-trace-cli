@@ -78,7 +78,7 @@ Then remove the `# agent-trace` + `export PATH=...` lines from your `~/.zshrc` /
 
 ### `agent-trace init`
 
-Zero-prompt initialization — like `git init`. Writes `project-config.json` for the repo (label defaults to the directory name), enables notes with default sections, installs git hooks (`post-commit`, `post-rewrite`) and per-tool hooks (Cursor, Claude Code) when a global hook is not already present, and auto-configures the git notes refspec (`refs/notes/agent-trace`) for `origin` if one exists.
+Zero-prompt initialization — like `git init`. Writes `project-config.json` for the repo, enables notes with default sections, installs git hooks (`post-commit`, `post-rewrite`) and per-tool hooks (Cursor, Claude Code) when a global hook is not already present, and auto-configures the git notes refspec (`refs/notes/agent-trace`) for `origin` if one exists.
 
 No prompts, no remote. If you want to share traces with a team, add a remote later with `agent-trace remote add`. Re-run with `agent-trace reset` to reconfigure interactively.
 
@@ -105,7 +105,7 @@ agent-trace doctor
 
 ### `agent-trace reset`
 
-Interactive reconfiguration — prompts for project label, notes sections, summary command, and hook installation. Remotes are managed separately (`agent-trace remote`).
+Interactive reconfiguration — prompts for notes sections, summary command, and hook installation. Remotes are managed separately (`agent-trace remote`).
 
 ```bash
 agent-trace reset
@@ -325,7 +325,7 @@ The `project_id` is derived from the canonical repo path (e.g. `/Users/jane/myre
 
 ### Project settings — `~/.agent-trace/projects/<project_id>/project-config.json`
 
-Created/managed by `agent-trace init`. Holds `label`, `notes.*`, `summary.*`, and per-project remote defaults. Lives under `AGENT_TRACE_HOME` — never committed.
+Created/managed by `agent-trace init`. Holds `notes.*`, `summary.*`, and per-project remote defaults. Lives under `AGENT_TRACE_HOME` — never committed.
 
 ### Resolution order
 

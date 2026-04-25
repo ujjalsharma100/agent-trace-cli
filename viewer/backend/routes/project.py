@@ -63,12 +63,6 @@ def get_project_info(project_root: str) -> dict[str, Any]:
     cfg = _read_json(cfg_path)
 
     has_agent_trace = cfg is not None
-    label = None
-    if cfg:
-        lab = cfg.get("label")
-        if isinstance(lab, str) and lab.strip():
-            label = lab.strip()
-
     note_head: dict[str, Any] | None = None
     if os.path.isdir(os.path.join(root, ".git")):
         note_head = _git_note_for_head(root)
@@ -78,7 +72,6 @@ def get_project_info(project_root: str) -> dict[str, Any]:
         "agent_trace_home": home,
         "has_agent_trace": has_agent_trace,
         "project_id": project_id if has_agent_trace else None,
-        "label": label,
         "project_data_dir": project_data_dir if has_agent_trace else None,
         "git_note_head": note_head,
     }

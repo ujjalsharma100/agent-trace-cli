@@ -165,10 +165,7 @@ def cmd_init(_args):
         print("Create at least one commit, then run 'agent-trace init' again.", file=sys.stderr)
         sys.exit(1)
 
-    label = os.path.basename(os.path.abspath(cwd))
-
     project_config: dict = {
-        "label": label,
         "notes": {
             "enabled": True,
             "include_ledger": True,
@@ -184,7 +181,6 @@ def cmd_init(_args):
 
     print("Initializing agent-trace...\n")
     print(f"  Project id:   {pid}")
-    print(f"  Label:        {label}")
     print(f"  Data dir:     {get_project_config_path(pid).parent if pid else '?'}")
 
     # Git notes — defaults on, include all sections
@@ -438,9 +434,6 @@ def cmd_status(_args):
     pid = resolve_project_id(os.getcwd(), create=False)
 
     print("agent-trace status\n")
-    if config.get("label"):
-        print(f"  Label:      {config['label']}")
-
     if pid:
         print(f"  Project:    {pid}")
         print(f"  Data dir:   {get_project_dir(pid)}")
@@ -511,7 +504,7 @@ def cmd_status(_args):
 # ===================================================================
 
 def cmd_reset(_args):
-    """Reconfigure label, notes sections, hooks, and git-notes refspecs."""
+    """Reconfigure notes sections, hooks, and git-notes refspecs."""
     config = get_project_config()
     if config is None:
         print("agent-trace is not set up for this project.")
@@ -519,10 +512,6 @@ def cmd_reset(_args):
         return
 
     print("Resetting agent-trace configuration...\n")
-
-    cwd = os.getcwd()
-    default_label = config.get("label") or os.path.basename(os.path.abspath(cwd))
-    label = _prompt("Project label", default=default_label).strip() or default_label
 
     notes_cfg = config.get("notes") or {}
     notes_enabled = _confirm(
@@ -545,7 +534,7 @@ def cmd_reset(_args):
         )
 
     new_config = dict(config)
-    new_config["label"] = label
+    new_config.pop("label", None)
     new_config["notes"] = new_notes
     save_project_config(new_config)
     print("\nConfiguration updated.\n")
