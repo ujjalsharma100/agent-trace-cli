@@ -30,7 +30,12 @@ def _load_local_traces(project_dir: str) -> list[dict[str, Any]]:
     return traces
 
 
-def _load_conversation_summary(url: str | None, max_chars: int = 200) -> str | None:
+def _load_conversation_preview(url: str | None, max_chars: int = 200) -> str | None:
+    """First ``max_chars`` of the transcript file at ``url`` (a ``file://`` URL).
+
+    Distinct from a generated summary — this is just a raw head-of-file
+    preview used as a fallback when no summary is configured/available.
+    """
     if not url or not url.startswith("file://"):
         return None
     local_path = url[7:]

@@ -64,7 +64,7 @@
     },
     "summary": {
       "type": "object",
-      "description": "Map of file path to summary prose (optional)",
+      "description": "Map of conversation_url (file:// URL of the agent transcript) to summary prose (optional)",
       "additionalProperties": { "type": "string" }
     },
     "prompts": {

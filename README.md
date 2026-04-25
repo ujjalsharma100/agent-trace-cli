@@ -316,7 +316,25 @@ Build and manage JSON under **`refs/notes/agent-trace`** so teammates can receiv
 
 ### `agent-trace summary` — `enable` | `disable` | `generate` | `show`
 
-Optional pluggable summaries (user-defined command) for session or commit note sections.
+Optional pluggable summaries of the agent's conversation transcript. When enabled, agent-trace pipes the raw transcript file (whatever the agent writes to `transcript_path` — Claude Code JSONL, Cursor's equivalent, etc.) on stdin to your configured command. The command's stdout is treated as the summary text and stored keyed by `conversation_url` (`file://<transcript_path>`).
+
+```bash
+# Enable: command takes transcript text on stdin, prints summary text on stdout.
+agent-trace summary enable --command 'my-summarizer'
+agent-trace summary enable --command 'my-summarizer' --timeout 60
+
+# Manually regenerate for one URL or for every URL touched by a session.
+agent-trace summary generate --conversation-url 'file:///path/to/transcript.jsonl'
+agent-trace summary generate --session-id <conversation_id>
+
+# Inspect summaries attached to a commit.
+agent-trace summary show              # HEAD
+agent-trace summary show <commit>
+
+agent-trace summary disable
+```
+
+The schema of the transcript is opaque to agent-trace — your command decides how to parse it. Storage is `~/.agent-trace/projects/<id>/session-summaries.jsonl`; latest row per `conversation_url` wins. `agent-trace blame` and `agent-trace context` will show the summary in place of the raw transcript preview / URL when one exists.
 
 ### `agent-trace projects` | `adopt`
 

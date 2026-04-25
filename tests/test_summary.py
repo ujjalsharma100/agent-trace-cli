@@ -1,4 +1,4 @@
-"""Tests for pluggable session summaries (Phase 6)."""
+"""Tests for URL-keyed transcript summaries."""
 
 from __future__ import annotations
 
@@ -12,19 +12,18 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_trace.config import get_project_config, save_project_config
-from agent_trace.models import Trace
 from agent_trace.record import record_from_stdin
 from agent_trace.storage import (
     ensure_project_dir,
     get_ledgers_path,
-    get_project_config_path,
     get_session_summaries_path,
     get_traces_path,
 )
 from agent_trace.summary import (
     append_summary,
-    generate_summary,
+    generate_summary_text,
     get_summary_for_commit,
+    latest_summary_by_url,
     merge_note_summaries,
     run_summary_generate,
 )
@@ -38,14 +37,7 @@ def _tmp_dir() -> str:
 
 
 def _fake_repo_with_project(parent: Path) -> tuple[Path, str]:
-    """A git-initialized directory whose project_id is derived from its path.
-
-    A real ``git init`` is required so the repo is isolated from any outer
-    git boundary — the workspace-local temp root is itself inside a git repo,
-    so without this the id would resolve up to the parent.
-
-    Returns ``(repo_path, project_id)``.
-    """
+    """A git-initialized directory whose project_id is derived from its path."""
     from agent_trace.storage import path_to_project_id
 
     base = parent / "repo"
@@ -76,38 +68,74 @@ def _fake_repo_with_project(parent: Path) -> tuple[Path, str]:
     return base, pid
 
 
-def _minimal_trace_dict(tid: str, session_id: str) -> dict:
+def _trace_with_url(tid: str, session_id: str, url: str) -> dict:
     return {
         "version": "2.0",
         "id": tid,
         "timestamp": "2026-04-01T12:00:00+00:00",
-        "tool": {"name": "cursor"},
-        "files": [{"path": "f.py", "conversations": []}],
+        "tool": {"name": "claude-code"},
+        "files": [
+            {
+                "path": "f.py",
+                "conversations": [
+                    {
+                        "contributor": {"type": "ai", "model_id": "claude"},
+                        "ranges": [{"start_line": 1, "end_line": 1}],
+                        "url": url,
+                    }
+                ],
+            }
+        ],
         "metadata": {"session_id": session_id, "conversation_id": session_id},
     }
 
 
-class TestGenerateSummary(unittest.TestCase):
-    def test_echo_json(self) -> None:
-        tr = Trace.from_dict(_minimal_trace_dict("t1", "s1"))
-        py = (
-            "import json,sys; json.load(sys.stdin); "
-            "print(json.dumps({'f.py': 'summary text'}))"
-        )
-        cmd = f"{sys.executable} -c {repr(py)}"
-        out = generate_summary([tr], cmd, timeout_seconds=30)
-        self.assertIsNotNone(out)
-        assert out is not None
-        self.assertEqual(out.get("f.py"), "summary text")
+def _ledger_with_url(commit_sha: str, url: str, trace_id: str = "tid1") -> dict:
+    return {
+        "version": "1.0",
+        "commit_sha": commit_sha,
+        "parent_sha": "p" * 40,
+        "committed_at": None,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "trace_ids": [trace_id],
+        "files": {
+            "f.py": {
+                "line_attributions": [
+                    {
+                        "start_line": 1,
+                        "end_line": 1,
+                        "type": "ai",
+                        "trace_id": trace_id,
+                        "conversation_url": url,
+                    }
+                ]
+            }
+        },
+    }
+
+
+class TestGenerateSummaryText(unittest.TestCase):
+    def test_echo_text(self) -> None:
+        out = generate_summary_text("hello world", "cat", timeout_seconds=10)
+        self.assertEqual(out, "hello world")
+
+    def test_empty_text(self) -> None:
+        self.assertIsNone(generate_summary_text("", "cat", timeout_seconds=10))
 
     def test_timeout_kills(self) -> None:
-        tr = Trace.from_dict(_minimal_trace_dict("t1", "s1"))
         cmd = f"{sys.executable} -c \"import time; time.sleep(60)\""
-        out = generate_summary([tr], cmd, timeout_seconds=1)
-        self.assertIsNone(out)
+        self.assertIsNone(generate_summary_text("x", cmd, timeout_seconds=1))
+
+    def test_nonzero_exit(self) -> None:
+        cmd = f"{sys.executable} -c \"import sys; sys.exit(1)\""
+        self.assertIsNone(generate_summary_text("x", cmd, timeout_seconds=10))
+
+    def test_blank_stdout(self) -> None:
+        cmd = f"{sys.executable} -c \"pass\""
+        self.assertIsNone(generate_summary_text("x", cmd, timeout_seconds=10))
 
 
-class TestSessionSummariesStorage(unittest.TestCase):
+class TestAppendAndLookup(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp()
         self._p = patch.dict(os.environ, {"AGENT_TRACE_HOME": self.tmp})
@@ -118,34 +146,30 @@ class TestSessionSummariesStorage(unittest.TestCase):
     def tearDown(self) -> None:
         self._p.stop()
 
-    def test_append_and_latest_for_commit(self) -> None:
-        append_summary(self.pid, "sess-a", {"a.py": "one"})
-        append_summary(self.pid, "sess-a", {"a.py": "two"})
-        lp = get_ledgers_path(self.pid)
+    def test_latest_wins(self) -> None:
+        url = "file:///tmp/transcript.jsonl"
+        append_summary(self.pid, url, "first")
+        append_summary(self.pid, url, "second")
+        m = latest_summary_by_url(self.pid)
+        self.assertEqual(m[url], "second")
+
+    def test_summary_for_commit_walks_ledger_urls(self) -> None:
+        url = "file:///tmp/transcript-x.jsonl"
+        append_summary(self.pid, url, "the summary")
         commit_sha = "c" * 40
-        ledger = {
-            "version": "1.0",
-            "commit_sha": commit_sha,
-            "parent_sha": "p" * 40,
-            "committed_at": None,
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "trace_ids": ["tid1"],
-            "files": {},
-        }
-        lp.write_text(json.dumps(ledger) + "\n")
-        tp = get_traces_path(self.pid)
-        tp.write_text(json.dumps(_minimal_trace_dict("tid1", "sess-a")) + "\n")
-        merged = get_summary_for_commit(self.pid, commit_sha)
-        self.assertIsNotNone(merged)
-        assert merged is not None
-        self.assertEqual(merged.get("a.py"), "two")
+        get_ledgers_path(self.pid).write_text(
+            json.dumps(_ledger_with_url(commit_sha, url)) + "\n",
+        )
+        out = get_summary_for_commit(self.pid, commit_sha)
+        self.assertIsNotNone(out)
+        assert out is not None
+        self.assertEqual(out, {url: "the summary"})
 
     def test_failed_command_does_not_append(self) -> None:
         path = get_session_summaries_path(self.pid)
         path.write_text("")
         before = path.read_text()
-        tr = Trace.from_dict(_minimal_trace_dict("t1", "s1"))
-        out = generate_summary([tr], f"{sys.executable} -c \"import sys; sys.exit(1)\"")
+        out = generate_summary_text("x", f"{sys.executable} -c \"import sys; sys.exit(1)\"")
         self.assertIsNone(out)
         self.assertEqual(path.read_text(), before)
 
@@ -161,30 +185,16 @@ class TestMergeNoteSummaries(unittest.TestCase):
     def tearDown(self) -> None:
         self._p.stop()
 
-    def test_static_plus_session(self) -> None:
+    def test_url_keyed(self) -> None:
         sha = "a" * 40
-        append_summary(self.pid, "s1", {"dyn.py": "from session"})
+        url = "file:///tmp/transcript-merge.jsonl"
+        append_summary(self.pid, url, "from session")
         get_ledgers_path(self.pid).write_text(
-            json.dumps(
-                {
-                    "version": "1.0",
-                    "commit_sha": sha,
-                    "parent_sha": None,
-                    "committed_at": None,
-                    "created_at": "2026-01-01T00:00:00+00:00",
-                    "trace_ids": ["z1"],
-                    "files": {},
-                },
-            )
-            + "\n",
+            json.dumps(_ledger_with_url(sha, url, trace_id="z1")) + "\n",
         )
-        get_traces_path(self.pid).write_text(json.dumps(_minimal_trace_dict("z1", "s1")) + "\n")
-        led = {"commit_sha": sha, "trace_ids": ["z1"]}
-        m = merge_note_summaries(str(self.repo), led, {"static.txt": "static"})
-        self.assertIsNotNone(m)
-        assert m is not None
-        self.assertEqual(m["static.txt"], "static")
-        self.assertEqual(m["dyn.py"], "from session")
+        # Static map argument is accepted for caller compat but ignored.
+        m = merge_note_summaries(str(self.repo), {"commit_sha": sha}, {"static.txt": "x"})
+        self.assertEqual(m, {url: "from session"})
 
 
 class TestSummaryHookIntegration(unittest.TestCase):
@@ -194,33 +204,29 @@ class TestSummaryHookIntegration(unittest.TestCase):
         self._p.start()
         self.repo, self.pid = _fake_repo_with_project(Path(self.tmp))
         ensure_project_dir(self.pid)
-        py = (
-            "import json,sys; json.load(sys.stdin); "
-            "print(json.dumps({'hooked.py': 'from hook'}))"
-        )
         save_project_config(
             {
                 "summary": {
                     "enabled": True,
-                    "command": f"{sys.executable} -c {repr(py)}",
+                    "command": "cat",
                     "timeout_seconds": 30,
                 },
             },
             str(self.repo),
         )
-        get_traces_path(self.pid).write_text(
-            json.dumps(_minimal_trace_dict("ht1", "conv-99")) + "\n",
-        )
+        self.transcript = Path(self.tmp) / "transcript.jsonl"
+        self.transcript.write_text("user: hi\nassistant: hello\n")
 
     def tearDown(self) -> None:
         self._p.stop()
 
-    def test_after_agent_response_writes_jsonl(self) -> None:
+    def test_stop_hook_reads_transcript_and_writes_jsonl(self) -> None:
         payload = json.dumps(
             {
-                "hook_event_name": "afterAgentResponse",
-                "conversation_id": "conv-99",
+                "hook_event_name": "Stop",
+                "session_id": "conv-99",
                 "cwd": str(self.repo),
+                "transcript_path": str(self.transcript),
             },
         )
         import io
@@ -231,8 +237,9 @@ class TestSummaryHookIntegration(unittest.TestCase):
         self.assertTrue(path.is_file())
         line = path.read_text().strip()
         row = json.loads(line)
+        self.assertEqual(row["conversation_url"], f"file://{self.transcript}")
+        self.assertIn("hello", row["summary"])
         self.assertEqual(row["session_id"], "conv-99")
-        self.assertEqual(row["summaries"]["hooked.py"], "from hook")
 
 
 class TestSummaryCLI(unittest.TestCase):
@@ -283,30 +290,28 @@ class TestRunSummaryGenerate(unittest.TestCase):
         self._p.start()
         self.repo, self.pid = _fake_repo_with_project(Path(self.tmp))
         ensure_project_dir(self.pid)
-        py = (
-            "import json,sys; json.load(sys.stdin); "
-            "print(json.dumps({'g.py': 'generated'}))"
-        )
         save_project_config(
-            {
-                "summary": {
-                    "enabled": True,
-                    "command": f"{sys.executable} -c {repr(py)}",
-                },
-            },
+            {"summary": {"enabled": True, "command": "cat"}},
             str(self.repo),
         )
+        self.transcript = Path(self.tmp) / "g-transcript.jsonl"
+        self.transcript.write_text("session content here")
+        self.url = f"file://{self.transcript}"
         get_traces_path(self.pid).write_text(
-            json.dumps(_minimal_trace_dict("g1", "sess-gen")) + "\n",
+            json.dumps(_trace_with_url("g1", "sess-gen", self.url)) + "\n",
         )
 
     def tearDown(self) -> None:
         self._p.stop()
 
-    def test_manual_generate(self) -> None:
-        out = run_summary_generate(str(self.repo), "sess-gen")
+    def test_generate_by_session_id(self) -> None:
+        out = run_summary_generate(str(self.repo), session_id="sess-gen")
         self.assertIsNotNone(out)
         assert out is not None
-        self.assertEqual(out["g.py"], "generated")
+        self.assertEqual(out[self.url], "session content here")
         path = get_session_summaries_path(self.pid)
-        self.assertIn("generated", path.read_text())
+        self.assertIn("session content here", path.read_text())
+
+    def test_generate_by_url(self) -> None:
+        out = run_summary_generate(str(self.repo), conversation_url=self.url)
+        self.assertEqual(out, {self.url: "session content here"})

@@ -1452,13 +1452,21 @@ def cmd_summary(args):
         return
 
     if action == "generate":
-        sid = getattr(args, "session_id", None) or ""
-        if not str(sid).strip():
-            print("agent-trace summary generate: session_id required", file=sys.stderr)
+        url = (getattr(args, "conversation_url", None) or "").strip()
+        sid = (getattr(args, "session_id", None) or "").strip()
+        if not (url or sid):
+            print(
+                "agent-trace summary generate: --conversation-url URL or --session-id SID required",
+                file=sys.stderr,
+            )
             sys.exit(1)
-        out = run_summary_generate(cwd, str(sid))
+        out = run_summary_generate(
+            cwd,
+            conversation_url=url or None,
+            session_id=sid or None,
+        )
         if out is None:
-            print("agent-trace summary generate: failed or no traces for session", file=sys.stderr)
+            print("agent-trace summary generate: failed or no transcript", file=sys.stderr)
             sys.exit(1)
         print(json.dumps(out, indent=2))
         return
@@ -1870,14 +1878,17 @@ def main():
     ns_npull = notes_sub.add_parser("pull", help="Fetch refs/notes/agent-trace from a remote")
     ns_npull.add_argument("--remote", default="origin")
 
-    sub_summary = sub.add_parser("summary", help="Pluggable session summaries (command reads stdin JSON)")
+    sub_summary = sub.add_parser(
+        "summary",
+        help="Pluggable transcript summaries (command reads raw transcript on stdin, prints summary on stdout)",
+    )
     sum_sub = sub_summary.add_subparsers(dest="summary_action", metavar="ACTION", required=True)
     s_en = sum_sub.add_parser("enable", help="Enable and set the summary command")
     s_en.add_argument(
         "--command",
         dest="summary_command",
         required=True,
-        help="Executable: JSON on stdin, JSON object on stdout",
+        help="Executable: raw transcript on stdin, summary text on stdout",
     )
     s_en.add_argument(
         "--timeout",
@@ -1887,9 +1898,26 @@ def main():
         help="Timeout seconds (default 30)",
     )
     sum_sub.add_parser("disable", help="Disable session-end summaries")
-    s_gen = sum_sub.add_parser("generate", help="Re-run summary for a session id")
-    s_gen.add_argument("session_id", help="conversation_id / session_id")
-    s_show = sum_sub.add_parser("show", help="Show merged file summaries for a commit")
+    s_gen = sum_sub.add_parser(
+        "generate",
+        help="Re-run summary for a conversation URL or every URL in a session",
+    )
+    s_gen.add_argument(
+        "--conversation-url",
+        dest="conversation_url",
+        default=None,
+        help="A specific conversation_url (e.g. file:///path/to/transcript.jsonl)",
+    )
+    s_gen.add_argument(
+        "--session-id",
+        dest="session_id",
+        default=None,
+        help="conversation_id / session_id; regenerates every URL referenced by traces in that session",
+    )
+    s_show = sum_sub.add_parser(
+        "show",
+        help="Show {conversation_url: summary} for a commit",
+    )
     s_show.add_argument("commit", nargs="?", default="HEAD", help="Commit (default HEAD)")
 
     args = parser.parse_args()

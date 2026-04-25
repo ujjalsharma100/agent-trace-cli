@@ -22,6 +22,8 @@ import sys
 from typing import Any
 
 from .blame import blame_file
+from .summary import latest_summary_by_url
+from .storage import resolve_project_id
 
 
 # ===================================================================
@@ -102,6 +104,9 @@ def get_context(
     """
     cwd = project_dir or os.getcwd()
 
+    pid = resolve_project_id(cwd, create=False)
+    summary_lookup = latest_summary_by_url(pid) if pid else {}
+
     # Run blame in JSON mode to get structured attribution data
     blame_json = blame_file(
         file_path,
@@ -181,6 +186,11 @@ def get_context(
         if conversation_url:
             segment["conversation_url"] = conversation_url
 
+        # Pluggable summary (URL-keyed) takes precedence over the raw preview.
+        summary_text = summary_lookup.get(conversation_url) if conversation_url else None
+        if summary_text:
+            segment["summary"] = summary_text
+
         # Try to resolve conversation content (local file:// only)
         conversation_content = None
         if conversation_url and conversation_url.startswith("file://"):
@@ -191,8 +201,9 @@ def get_context(
             segment["conversation_size"] = _compute_conversation_stats(
                 conversation_content,
             )
-            # Always include preview
-            segment["preview"] = _extract_preview(conversation_content)
+            # Preview is only useful as a fallback when no summary exists.
+            if not summary_text:
+                segment["preview"] = _extract_preview(conversation_content)
 
             # Include full content only when requested
             if full:
@@ -200,7 +211,8 @@ def get_context(
         else:
             # No content available — still include URL if present
             segment["conversation_size"] = None
-            segment["preview"] = None
+            if not summary_text:
+                segment["preview"] = None
 
         # Pass through query for subagent instruction forwarding
         if query:
@@ -253,9 +265,13 @@ def format_text(file_path: str, segments: list[dict[str, Any]], full: bool = Fal
 
         lines.append(f"  {lr:<14}{_GREEN}AI{_RESET} ({model_tool})")
 
-        # Conversation size
+        summary = seg.get("summary")
+        if summary:
+            lines.append(f"                Summary: {summary}")
+
+        # Conversation size — only useful alongside the raw preview fallback.
         conv_size = seg.get("conversation_size")
-        if conv_size:
+        if conv_size and not summary:
             chars = conv_size["characters"]
             conv_lines = conv_size["lines"]
             turns = conv_size["turns"]
@@ -264,10 +280,9 @@ def format_text(file_path: str, segments: list[dict[str, Any]], full: bool = Fal
                 f"{conv_lines:,} lines, {turns} turns{_RESET}"
             )
 
-        # Preview
+        # Preview — only when no generated summary is available.
         preview = seg.get("preview")
-        if preview:
-            # Show preview on one line, truncated
+        if preview and not summary:
             preview_line = preview.replace("\n", " ").strip()
             if len(preview_line) > 120:
                 preview_line = preview_line[:120] + "..."
