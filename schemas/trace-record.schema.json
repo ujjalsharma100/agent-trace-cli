@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/schemas/trace-record.schema.json",
   "title": "TraceRecord",
-  "description": "One line in traces.jsonl. Schema 2.0: per-line content stored alongside hash for deterministic auditable attribution.",
+  "description": "One line in traces.jsonl. Schema 2.0: per-line full SHA-256 hashes give cryptographic uniqueness for deterministic attribution.",
   "type": "object",
   "required": ["version", "id", "timestamp", "tool", "files"],
   "additionalProperties": false,
@@ -54,15 +54,14 @@
     },
     "lineHash": {
       "type": "object",
-      "required": ["line_offset", "hash", "content"],
+      "required": ["line_offset", "hash"],
       "additionalProperties": false,
       "properties": {
         "line_offset": { "type": "integer", "minimum": 0 },
         "hash": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{16}$"
-        },
-        "content": { "type": "string" }
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
       }
     },
     "range": {
@@ -74,7 +73,7 @@
         "end_line": { "type": "integer", "minimum": 1 },
         "content_hash": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{16}$"
+          "pattern": "^sha256:[0-9a-f]{64}$"
         },
         "line_hashes": {
           "type": "array",

@@ -145,7 +145,7 @@ def _parse_diff_ranges(diff_output: str) -> list[tuple[int, int]]:
 # -------------------------------------------------------------------
 
 def _line_hash(line: str) -> str:
-    h = hashlib.sha256(line.encode("utf-8")).hexdigest()[:16]
+    h = hashlib.sha256(line.encode("utf-8")).hexdigest()
     return f"sha256:{h}"
 
 
@@ -268,11 +268,10 @@ def _build_trace_hash_index(
     alternate_paths: list[str] | None = None,
     cross_file: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """Map ``hash → {trace_id, model_id, tool, conversation_url, content, edit_sequence}``.
+    """Map ``hash → {trace_id, model_id, tool, conversation_url, edit_sequence}``.
 
-    Each entry includes the verbatim ``content`` from the trace, used both
-    as a collision guard (we require content equality, not just hash) and
-    as evidence in the resulting ledger.
+    Full 256-bit SHA-256 hashes give cryptographic uniqueness, so a hash
+    match is sufficient for attribution — no content equality guard needed.
 
     When multiple traces claim the same hash, the one with the highest
     ``edit_sequence`` wins (latest edit takes precedence).
@@ -312,11 +311,6 @@ def _build_trace_hash_index(
                         h = lh.get("hash", "")
                         if not h:
                             continue
-                        content = lh.get("content")
-                        # Reject hashes recorded without content — schema 2.0
-                        # requires content for deterministic match.
-                        if content is None:
-                            continue
 
                         existing = index.get(h)
                         if existing is not None:
@@ -333,7 +327,6 @@ def _build_trace_hash_index(
                             "model_id": model_id,
                             "tool": tool,
                             "conversation_url": conversation_url,
-                            "content": content,
                             "edit_sequence": edit_seq,
                         }
 
@@ -362,8 +355,8 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
          c. For each line in the diff's added range:
               * Skip trivial lines (empty/whitespace) — they're handled in
                 a fill pass after.
-              * If the line's hash matches an index entry AND the indexed
-                content equals the line's content → AI of that trace.
+              * If the line's full SHA-256 hash matches an index entry →
+                AI of that trace.
               * Otherwise: do not record (implicit NO_ATTRIBUTION).
          d. Fill pass: a trivial line attributed to AI iff both immediate
             non-trivial neighbours are AI of the same trace.
@@ -468,9 +461,6 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
             h = _line_hash(content)
             entry = hash_index.get(h)
             if entry is None:
-                continue
-            # Content equality guard against truncated-hash collisions
-            if entry.get("content") != content:
                 continue
             tid = entry.get("trace_id")
             if not tid:

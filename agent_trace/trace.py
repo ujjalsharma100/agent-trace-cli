@@ -234,42 +234,37 @@ def normalize_model_id(model: str | None) -> str | None:
 
 
 def compute_line_hashes(content: str) -> list[dict]:
-    """Compute per-line SHA-256 hashes plus the verbatim line content.
+    """Compute per-line full SHA-256 hashes.
 
     Each line is hashed individually so the ledger can match committed lines
     back to the trace that produced them, even if surrounding lines shifted.
-    The literal ``content`` is stored alongside the hash so attribution can
-    be audited (and so hash collisions can be disambiguated).
+    Full 256-bit hashes guarantee cryptographic uniqueness, so no separate
+    line content is stored — the hash alone is the line's identity.
 
-    Returns a list of ``{"line_offset": 0, "hash": "sha256:...", "content": "..."}``.
+    Returns a list of ``{"line_offset": 0, "hash": "sha256:..."}``.
     """
     lines = content.split("\n")
-    # Strip trailing empty line caused by trailing newline
     if lines and lines[-1] == "":
         lines = lines[:-1]
     result: list[dict] = []
     for i, line in enumerate(lines):
-        h = hashlib.sha256(line.encode("utf-8")).hexdigest()[:16]
+        h = hashlib.sha256(line.encode("utf-8")).hexdigest()
         result.append({
             "line_offset": i,
             "hash": f"sha256:{h}",
-            "content": line,
         })
     return result
 
 
 def compute_content_hash(content: str) -> str:
-    """SHA-256 hash (truncated) for dedup / verification.
-
-    Uses 16 hex chars (64 bits) — collision-safe for any realistic project.
-    Backward-compatible: old 8-char hashes still work with prefix matching.
+    """Full SHA-256 hash of normalized content for dedup / verification.
 
     Normalization: CRLF/CR → LF, and trailing newline stripped so that the
     same logical content hashes identically whether stored (e.g. tool
     new_string with trailing \\n) or matched (e.g. \"\\n\".join(blame lines)).
     """
     normalized = content.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
-    h = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    h = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return f"sha256:{h}"
 
 

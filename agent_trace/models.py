@@ -24,21 +24,18 @@ def schemas_dir() -> Path:
 class LineHash:
     line_offset: int
     hash: str
-    content: str
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> LineHash:
         return cls(
             line_offset=int(d["line_offset"]),
             hash=str(d["hash"]),
-            content=str(d.get("content", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "line_offset": self.line_offset,
             "hash": self.hash,
-            "content": self.content,
         }
 
 
