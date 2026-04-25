@@ -89,6 +89,13 @@ from .remote import (
     show_remote as remote_show,
 )
 from .sync import pull as sync_pull, push as sync_push, status as sync_status
+from .summary_presets import (
+    DEFAULT_OLLAMA_MODEL,
+    PRESET_ALIASES,
+    build_preset_command,
+    list_summary_presets,
+    run_summary_preset,
+)
 
 VERSION = "0.1.0"
 
@@ -1440,6 +1447,68 @@ def cmd_summary(args):
         print("Session summaries enabled.")
         return
 
+    if action == "presets":
+        rows = list_summary_presets()
+        print("Built-in summary presets:\n")
+        for row in rows:
+            alias = row["alias"]
+            desc = row["description"]
+            if row.get("needs_model"):
+                dm = row.get("default_model") or DEFAULT_OLLAMA_MODEL
+                print(f"  {alias:<16} {desc} (model required; default: {dm})")
+            else:
+                print(f"  {alias:<16} {desc}")
+        print()
+        print("Configure one with:")
+        print("  agent-trace summary use <preset> [--model <name>] [--timeout <seconds>]")
+        return
+
+    if action == "use":
+        cfg = get_project_config(cwd)
+        if cfg is None:
+            print("agent-trace: project not initialised (run agent-trace init)", file=sys.stderr)
+            sys.exit(1)
+        alias = (getattr(args, "preset_alias", None) or "").strip()
+        if alias not in PRESET_ALIASES:
+            print(
+                f"agent-trace summary use: unknown preset '{alias}'. "
+                "Run 'agent-trace summary presets'.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        model = getattr(args, "model", None)
+        if alias != "ollama-summary" and model:
+            print(
+                "agent-trace summary use: --model is only valid with ollama-summary",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        command = build_preset_command(alias, model=model)
+        cfg.setdefault("summary", {})
+        cfg["summary"]["enabled"] = True
+        cfg["summary"]["command"] = command
+        to = getattr(args, "summary_timeout", None)
+        if to is not None:
+            cfg["summary"]["timeout_seconds"] = int(to)
+        save_project_config(cfg, cwd)
+        print(f"Session summaries enabled using preset '{alias}'.")
+        print(f"summary.command = {command}")
+        return
+
+    if action == "preset-run":
+        alias = (getattr(args, "preset_alias", None) or "").strip()
+        model = getattr(args, "model", None)
+        transcript_text = sys.stdin.read()
+        code = run_summary_preset(alias, transcript_text, model=model)
+        if code != 0:
+            print(
+                "agent-trace summary preset-run: failed "
+                f"(preset={alias}, ensure required tool is installed and authenticated)",
+                file=sys.stderr,
+            )
+            sys.exit(code)
+        return
+
     if action == "disable":
         cfg = get_project_config(cwd)
         if cfg is None:
@@ -1897,6 +1966,27 @@ def main():
         default=None,
         help="Timeout seconds (default 30)",
     )
+    sum_sub.add_parser("presets", help="List built-in summary presets")
+    s_use = sum_sub.add_parser("use", help="Enable a built-in summary preset")
+    s_use.add_argument("preset_alias", choices=PRESET_ALIASES, help="Preset alias")
+    s_use.add_argument(
+        "--model",
+        default=None,
+        help="Model name for ollama-summary (ignored by other presets)",
+    )
+    s_use.add_argument(
+        "--timeout",
+        dest="summary_timeout",
+        type=int,
+        default=None,
+        help="Timeout seconds (default 30)",
+    )
+    s_pr = sum_sub.add_parser(
+        "preset-run",
+        help=argparse.SUPPRESS,  # internal: summary.command target for built-in presets
+    )
+    s_pr.add_argument("preset_alias", choices=PRESET_ALIASES)
+    s_pr.add_argument("--model", default=None)
     sum_sub.add_parser("disable", help="Disable session-end summaries")
     s_gen = sum_sub.add_parser(
         "generate",

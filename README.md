@@ -323,6 +323,14 @@ Optional pluggable summaries of the agent's conversation transcript. When enable
 agent-trace summary enable --command 'my-summarizer'
 agent-trace summary enable --command 'my-summarizer' --timeout 60
 
+# Discover built-in presets (local CLI tools)
+agent-trace summary presets
+
+# Configure a built-in preset
+agent-trace summary use claude-summary
+agent-trace summary use cursor-summary
+agent-trace summary use ollama-summary --model llama3.1:8b
+
 # Manually regenerate for one URL or for every URL touched by a session.
 agent-trace summary generate --conversation-url 'file:///path/to/transcript.jsonl'
 agent-trace summary generate --session-id <conversation_id>
@@ -335,6 +343,12 @@ agent-trace summary disable
 ```
 
 The schema of the transcript is opaque to agent-trace — your command decides how to parse it. Storage is `~/.agent-trace/projects/<id>/session-summaries.jsonl`; latest row per `conversation_url` wins. `agent-trace blame` and `agent-trace context` will show the summary in place of the raw transcript preview / URL when one exists.
+
+Built-in preset aliases:
+
+- `claude-summary` → runs `claude -p "<prompt>"`
+- `cursor-summary` → runs `cursor agent -p "<prompt>" --trust`
+- `ollama-summary` → runs `ollama run <model> "<prompt>"` (`--model` optional; default `llama3.1:8b`)
 
 ### `agent-trace projects` | `adopt`
 

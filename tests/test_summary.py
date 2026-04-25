@@ -27,6 +27,7 @@ from agent_trace.summary import (
     merge_note_summaries,
     run_summary_generate,
 )
+from agent_trace.summary_presets import build_preset_command
 
 
 def _tmp_dir() -> str:
@@ -281,6 +282,73 @@ class TestSummaryCLI(unittest.TestCase):
         sm = cfg.get("summary") or {}
         self.assertTrue(sm.get("enabled"))
         self.assertEqual(sm.get("command"), "cat")
+
+    def test_use_builtin_claude_preset(self) -> None:
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agent_trace.cli",
+                "summary",
+                "use",
+                "claude-summary",
+            ],
+            cwd=str(self.repo),
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "AGENT_TRACE_HOME": self.tmp,
+                "PYTHONPATH": str(Path(__file__).resolve().parent.parent),
+            },
+        )
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        cfg = get_project_config(str(self.repo))
+        self.assertIsNotNone(cfg)
+        assert cfg is not None
+        sm = cfg.get("summary") or {}
+        self.assertTrue(sm.get("enabled"))
+        self.assertEqual(sm.get("command"), "agent-trace summary preset-run claude-summary")
+
+    def test_use_builtin_ollama_preset_with_model(self) -> None:
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agent_trace.cli",
+                "summary",
+                "use",
+                "ollama-summary",
+                "--model",
+                "qwen2.5-coder:7b",
+            ],
+            cwd=str(self.repo),
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "AGENT_TRACE_HOME": self.tmp,
+                "PYTHONPATH": str(Path(__file__).resolve().parent.parent),
+            },
+        )
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        cfg = get_project_config(str(self.repo))
+        self.assertIsNotNone(cfg)
+        assert cfg is not None
+        sm = cfg.get("summary") or {}
+        self.assertTrue(sm.get("enabled"))
+        self.assertEqual(
+            sm.get("command"),
+            "agent-trace summary preset-run ollama-summary --model qwen2.5-coder:7b",
+        )
+
+
+class TestSummaryPresetHelpers(unittest.TestCase):
+    def test_build_preset_command_defaults(self) -> None:
+        self.assertEqual(
+            build_preset_command("ollama-summary"),
+            "agent-trace summary preset-run ollama-summary --model llama3.1:8b",
+        )
 
 
 class TestRunSummaryGenerate(unittest.TestCase):
