@@ -70,6 +70,19 @@
     "prompts": {
       "type": "array",
       "items": { "type": "string" }
+    },
+    "all_session_conversations": {
+      "type": "array",
+      "description": "Every conversation_url from traces in the commit staging window (not only lines attributed in the commit), with optional stored summary per URL",
+      "items": {
+        "type": "object",
+        "required": ["conversation_url", "summary"],
+        "additionalProperties": false,
+        "properties": {
+          "conversation_url": { "type": "string" },
+          "summary": { "type": ["string", "null"] }
+        }
+      }
     }
   }
 }

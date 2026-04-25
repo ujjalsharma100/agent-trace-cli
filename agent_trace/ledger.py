@@ -243,6 +243,24 @@ def _find_candidate_traces(
     return candidates
 
 
+def list_traces_in_staging_window(
+    project_dir: str,
+    parent_sha: str | None,
+    parent_committed_at: str | None,
+    committed_at: str | None,
+) -> list[dict[str, Any]]:
+    """Return all local trace records in the same eligibility window as
+    :func:`build_attribution_ledger` (VCS revision + time bounds).
+
+    Used for git notes ``all_session_conversations``: every conversation URL
+    from traces in the staging window, not only lines that ended up in the
+    commit.
+    """
+    return _find_candidate_traces(
+        project_dir, parent_sha, parent_committed_at, committed_at,
+    )
+
+
 # -------------------------------------------------------------------
 # Trace hash index (with content)
 # -------------------------------------------------------------------

@@ -181,6 +181,7 @@ def cmd_init(_args):
             "include_ledger": True,
             "include_summary": True,
             "include_prompts": True,
+            "all_session_conversations": False,
         },
     }
     save_project_config(project_config)
@@ -542,6 +543,10 @@ def cmd_reset(_args):
             "Include prompt previews in notes?",
             default=bool(notes_cfg.get("include_prompts", True)),
         )
+        new_notes["all_session_conversations"] = _confirm(
+            "Include all session conversations in notes (staging window, not only attributed lines)?",
+            default=bool(notes_cfg.get("all_session_conversations", False)),
+        )
 
     new_config = dict(config)
     new_config.pop("label", None)
@@ -577,6 +582,7 @@ _DEFAULT_NOTES_CONFIG = {
     "include_ledger": True,
     "include_summary": True,
     "include_prompts": True,
+    "all_session_conversations": False,
 }
 
 _CONFIG_FIELDS = {
@@ -584,6 +590,7 @@ _CONFIG_FIELDS = {
     "notes.include-ledger",
     "notes.include-summary",
     "notes.include-prompts",
+    "notes.all-session-conversations",
     "summary.enabled",
     "summary.command",
     "summary.timeout-seconds",
@@ -743,6 +750,7 @@ def _interactive_reset_field(field: str) -> None:
         "notes.include-ledger": True,
         "notes.include-summary": True,
         "notes.include-prompts": True,
+        "notes.all-session-conversations": False,
         "summary.enabled": False,
         "global.capture-detached-edits": False,
     }
@@ -761,6 +769,7 @@ def _interactive_reset_field(field: str) -> None:
             "include_ledger": _prompt_reset_bool("notes.include-ledger", True),
             "include_summary": _prompt_reset_bool("notes.include-summary", True),
             "include_prompts": _prompt_reset_bool("notes.include-prompts", True),
+            "all_session_conversations": _prompt_reset_bool("notes.all-session-conversations", False),
         }
         save_project_config(cfg)
         return
@@ -1390,11 +1399,19 @@ def cmd_sync(args):
 # ===================================================================
 
 
-def _resolve_note_section_flags(args, cwd: str) -> tuple[bool, bool, bool]:
-    """Merge ``--include-*`` / ``--no-include-*`` with project ``notes.*`` defaults."""
-    from .git_notes import project_notes_flags
+def _resolve_note_section_flags(
+    args,
+    cwd: str,
+) -> tuple[bool, bool, bool, bool]:
+    """Merge ``--include-*`` / ``--no-include-*`` with project ``notes.*`` defaults.
+
+    Returns ``(include_ledger, include_summary, include_prompts,
+    include_all_session_conversations)``.
+    """
+    from .git_notes import all_session_conversations_enabled, project_notes_flags
 
     d_l, d_s, d_p = project_notes_flags(cwd)
+    d_asc = all_session_conversations_enabled(cwd)
 
     def one(name: str, default: bool) -> bool:
         t = getattr(args, f"include_{name}", False)
@@ -1415,6 +1432,7 @@ def _resolve_note_section_flags(args, cwd: str) -> tuple[bool, bool, bool]:
         one("ledger", d_l),
         one("summary", d_s),
         one("prompts", d_p),
+        one("all_session_conversations", d_asc),
     )
 
 
@@ -1604,7 +1622,7 @@ def cmd_notes(args):
                 file=sys.stderr,
             )
             sys.exit(1)
-        il, isum, ipr = _resolve_note_section_flags(args, cwd)
+        il, isum, ipr, iasc = _resolve_note_section_flags(args, cwd)
         from .git_notes import load_traces_for_ids
 
         tid_list = [str(x) for x in led.get("trace_ids", [])]
@@ -1617,6 +1635,11 @@ def cmd_notes(args):
             nc = cfg.get("notes") or {}
             static_s = nc.get("summaries") if isinstance(nc.get("summaries"), dict) else None
             summaries = merge_note_summaries(cwd, led, static_s)
+        asc = None
+        if iasc:
+            from .summary import all_session_conversations_for_ledger
+
+            asc = all_session_conversations_for_ledger(cwd, led)
         note = build_note(
             led,
             traces,
@@ -1624,6 +1647,8 @@ def cmd_notes(args):
             include_summary=isum,
             include_prompts=ipr,
             summaries=summaries,
+            include_all_session_conversations=iasc,
+            all_session_conversations=asc,
         )
         if attach_note(sha, note, cwd):
             print(f"Attached note to {sha}")
@@ -1637,19 +1662,20 @@ def cmd_notes(args):
         if not range_spec:
             print("agent-trace notes rebuild: <range> required (e.g. HEAD~10..HEAD)", file=sys.stderr)
             sys.exit(1)
-        il, isum, ipr = _resolve_note_section_flags(args, cwd)
+        il, isum, ipr, iasc = _resolve_note_section_flags(args, cwd)
         n = rebuild_notes_for_range(
             cwd,
             range_spec,
             include_ledger=il,
             include_summary=isum,
             include_prompts=ipr,
+            include_all_session_conversations=iasc,
         )
         print(f"Rebuilt notes for {n} commit(s)")
         return
 
     if action == "backfill":
-        il, isum, ipr = _resolve_note_section_flags(args, cwd)
+        il, isum, ipr, iasc = _resolve_note_section_flags(args, cwd)
         since = getattr(args, "since", None)
         n = backfill_notes(
             cwd,
@@ -1657,6 +1683,7 @@ def cmd_notes(args):
             include_ledger=il,
             include_summary=isum,
             include_prompts=ipr,
+            include_all_session_conversations=iasc,
         )
         print(f"Backfilled notes for {n} commit(s)")
         return
@@ -1674,8 +1701,14 @@ def cmd_notes(args):
             sections.append("summary")
         if getattr(args, "strip_prompts", False):
             sections.append("prompts")
+        if getattr(args, "strip_all_session_conversations", False):
+            sections.append("all_session_conversations")
         if not sections:
-            print("agent-trace notes strip: specify at least one of --ledger --summary --prompts", file=sys.stderr)
+            print(
+                "agent-trace notes strip: specify at least one of "
+                "--ledger --summary --prompts --all-session-conversations",
+                file=sys.stderr,
+            )
             sys.exit(1)
         if strip_sections(sha, sections, cwd):
             print(f"Stripped {', '.join(sections)} from note on {sha}")
@@ -1916,6 +1949,16 @@ def main():
     ns_attach.add_argument("--no-include-summary", action="store_true")
     ns_attach.add_argument("--include-prompts", action="store_true")
     ns_attach.add_argument("--no-include-prompts", action="store_true")
+    ns_attach.add_argument(
+        "--include-all-session-conversations",
+        action="store_true",
+        help="Include all_session_conversations section (staging window)",
+    )
+    ns_attach.add_argument(
+        "--no-include-all-session-conversations",
+        action="store_true",
+        help="Omit all_session_conversations section",
+    )
 
     ns_rebuild = notes_sub.add_parser("rebuild", help="Rebuild notes from local ledgers for a commit range")
     ns_rebuild.add_argument("range_spec", help="Range for git rev-list (e.g. HEAD~10..HEAD)")
@@ -1925,6 +1968,8 @@ def main():
     ns_rebuild.add_argument("--no-include-summary", action="store_true")
     ns_rebuild.add_argument("--include-prompts", action="store_true")
     ns_rebuild.add_argument("--no-include-prompts", action="store_true")
+    ns_rebuild.add_argument("--include-all-session-conversations", action="store_true")
+    ns_rebuild.add_argument("--no-include-all-session-conversations", action="store_true")
 
     ns_backfill = notes_sub.add_parser("backfill", help="Rebuild notes for commits (optional --since)")
     ns_backfill.add_argument("--since", default=None, help="git rev-list --since (e.g. 2026-01-01)")
@@ -1934,12 +1979,19 @@ def main():
     ns_backfill.add_argument("--no-include-summary", action="store_true")
     ns_backfill.add_argument("--include-prompts", action="store_true")
     ns_backfill.add_argument("--no-include-prompts", action="store_true")
+    ns_backfill.add_argument("--include-all-session-conversations", action="store_true")
+    ns_backfill.add_argument("--no-include-all-session-conversations", action="store_true")
 
     ns_strip = notes_sub.add_parser("strip", help="Remove optional sections from a note")
     ns_strip.add_argument("commit", nargs="?", default="HEAD")
     ns_strip.add_argument("--ledger", dest="strip_ledger", action="store_true")
     ns_strip.add_argument("--summary", dest="strip_summary", action="store_true")
     ns_strip.add_argument("--prompts", dest="strip_prompts", action="store_true")
+    ns_strip.add_argument(
+        "--all-session-conversations",
+        dest="strip_all_session_conversations",
+        action="store_true",
+    )
 
     ns_npush = notes_sub.add_parser("push", help="Push refs/notes/agent-trace to a remote")
     ns_npush.add_argument("--remote", default="origin")

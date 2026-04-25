@@ -208,6 +208,59 @@ def merge_note_summaries(
     return get_summary_for_commit(pid, sha)
 
 
+def all_session_conversations_for_ledger(
+    project_dir: str,
+    ledger: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    """Build ``all_session_conversations`` for a git note: every distinct
+    ``conversation_url`` from traces in the same staging window as the ledger,
+    with the latest stored summary per URL (if any).
+
+    Unlike :func:`get_summary_for_commit`, this is not limited to URLs that
+    appear in attributed line segments.
+    """
+    from .ledger import list_traces_in_staging_window
+
+    parent_sha = ledger.get("parent_sha")
+    parent_at = ledger.get("parent_committed_at")
+    committed_at = ledger.get("committed_at")
+    raw = list_traces_in_staging_window(
+        project_dir,
+        str(parent_sha) if parent_sha else None,
+        str(parent_at) if parent_at else None,
+        str(committed_at) if committed_at else None,
+    )
+    urls: list[str] = []
+    seen: set[str] = set()
+    for t in raw:
+        for fe in t.get("files") or []:
+            if not isinstance(fe, dict):
+                continue
+            for conv in fe.get("conversations") or []:
+                if not isinstance(conv, dict):
+                    continue
+                url = conv.get("url")
+                if isinstance(url, str) and url and url not in seen:
+                    seen.add(url)
+                    urls.append(url)
+    if not urls:
+        return None
+    pid = resolve_project_id(project_dir, create=False)
+    if not pid:
+        return [{"conversation_url": u, "summary": None} for u in urls]
+    by_url = latest_summary_by_url(pid)
+    out: list[dict[str, Any]] = []
+    for u in urls:
+        s = by_url.get(u)
+        row: dict[str, Any] = {"conversation_url": u}
+        if s is not None:
+            row["summary"] = s
+        else:
+            row["summary"] = None
+        out.append(row)
+    return out
+
+
 def _conversation_urls_for_session(project_id: str, session_id: str) -> list[str]:
     """All distinct ``conversation_url``s referenced by traces in this session, in first-seen order."""
     path = get_traces_path(project_id)

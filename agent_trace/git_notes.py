@@ -1,7 +1,8 @@
 """
 Git notes for agent-trace (``refs/notes/agent-trace``).
 
-Attaches JSON metadata per commit with composable sections (core, ledger, summary, prompts).
+Attaches JSON metadata per commit with composable sections
+(core, ledger, summary, prompts, all_session_conversations).
 Stdlib only.
 """
 
@@ -96,6 +97,8 @@ def build_note(
     include_summary: bool,
     include_prompts: bool,
     summaries: dict[str, str] | None = None,
+    include_all_session_conversations: bool = False,
+    all_session_conversations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the note JSON. Core fields always present; optional sections per flags."""
     led = _ledger_to_dict(ledger)
@@ -118,6 +121,8 @@ def build_note(
         pr = _prompts_from_traces(traces)
         if pr:
             note["prompts"] = pr
+    if include_all_session_conversations and all_session_conversations:
+        note["all_session_conversations"] = list(all_session_conversations)
     return note
 
 
@@ -196,12 +201,13 @@ def list_notes(repo_dir: str, range_spec: str | None = None) -> Iterator[tuple[s
 
 
 def strip_sections(commit_sha: str, sections: list[str], repo_dir: str) -> bool:
-    """Remove optional sections (``ledger``, ``summary``, ``prompts``) from the note."""
+    """Remove optional sections (``ledger``, ``summary``, ``prompts``,
+    ``all_session_conversations``) from the note."""
     note = read_note(commit_sha, repo_dir)
     if not note:
         return False
     for sec in sections:
-        if sec in ("ledger", "summary", "prompts"):
+        if sec in ("ledger", "summary", "prompts", "all_session_conversations"):
             note.pop(sec, None)
     return attach_note(commit_sha, note, repo_dir)
 
@@ -224,6 +230,12 @@ def project_notes_flags(project_dir: str) -> tuple[bool, bool, bool]:
         bool(nc.get("include_summary", False)),
         bool(nc.get("include_prompts", False)),
     )
+
+
+def all_session_conversations_enabled(project_dir: str) -> bool:
+    """Whether to embed ``all_session_conversations`` in notes (default: off)."""
+    nc = _notes_config(project_dir)
+    return bool(nc.get("all_session_conversations", False))
 
 
 def _load_local_traces_raw(project_dir: str) -> list[dict[str, Any]]:
@@ -276,13 +288,15 @@ def attach_note_after_ledger(project_dir: str, ledger: dict[str, Any]) -> bool:
         include_ledger = bool(nc.get("include_ledger", True))
         include_summary = bool(nc.get("include_summary", False))
         include_prompts = bool(nc.get("include_prompts", False))
-        from .summary import merge_note_summaries
+        include_asc = bool(nc.get("all_session_conversations", False))
+        from .summary import all_session_conversations_for_ledger, merge_note_summaries
 
         static_s = nc.get("summaries") if isinstance(nc.get("summaries"), dict) else None
         summaries = merge_note_summaries(project_dir, ledger, static_s)
 
         tid_list = [str(x) for x in ledger.get("trace_ids", [])]
         traces = load_traces_for_ids(project_dir, tid_list)
+        asc = all_session_conversations_for_ledger(project_dir, ledger) if include_asc else None
         note = build_note(
             ledger,
             traces,
@@ -290,6 +304,8 @@ def attach_note_after_ledger(project_dir: str, ledger: dict[str, Any]) -> bool:
             include_summary=include_summary,
             include_prompts=include_prompts,
             summaries=summaries,
+            include_all_session_conversations=include_asc,
+            all_session_conversations=asc,
         )
         sha = str(ledger.get("commit_sha", ""))
         if not sha:
@@ -306,6 +322,7 @@ def rebuild_notes_for_range(
     include_ledger: bool | None = None,
     include_summary: bool | None = None,
     include_prompts: bool | None = None,
+    include_all_session_conversations: bool | None = None,
 ) -> int:
     """Rebuild notes from local ledgers for commits in ``range_spec``. Returns count updated."""
     from .ledger import load_local_ledgers
@@ -314,7 +331,12 @@ def rebuild_notes_for_range(
     il = include_ledger if include_ledger is not None else bool(nc.get("include_ledger", True))
     isum = include_summary if include_summary is not None else bool(nc.get("include_summary", False))
     ipr = include_prompts if include_prompts is not None else bool(nc.get("include_prompts", False))
-    from .summary import merge_note_summaries
+    iasc = (
+        include_all_session_conversations
+        if include_all_session_conversations is not None
+        else bool(nc.get("all_session_conversations", False))
+    )
+    from .summary import all_session_conversations_for_ledger, merge_note_summaries
 
     static_s = nc.get("summaries") if isinstance(nc.get("summaries"), dict) else None
 
@@ -331,6 +353,7 @@ def rebuild_notes_for_range(
         tid_list = [str(x) for x in led.get("trace_ids", [])]
         traces = load_traces_for_ids(project_dir, tid_list)
         summaries = merge_note_summaries(project_dir, led, static_s)
+        asc = all_session_conversations_for_ledger(project_dir, led) if iasc else None
         note = build_note(
             led,
             traces,
@@ -338,6 +361,8 @@ def rebuild_notes_for_range(
             include_summary=isum,
             include_prompts=ipr,
             summaries=summaries,
+            include_all_session_conversations=iasc,
+            all_session_conversations=asc,
         )
         if attach_note(sha, note, project_dir):
             count += 1
@@ -351,6 +376,7 @@ def backfill_notes(
     include_ledger: bool | None = None,
     include_summary: bool | None = None,
     include_prompts: bool | None = None,
+    include_all_session_conversations: bool | None = None,
 ) -> int:
     """Rebuild notes for commits touching the repo since a date (``git rev-list --since``)."""
     parts: list[str] = ["rev-list"]
@@ -371,7 +397,12 @@ def backfill_notes(
     il = include_ledger if include_ledger is not None else bool(nc.get("include_ledger", True))
     isum = include_summary if include_summary is not None else bool(nc.get("include_summary", False))
     ipr = include_prompts if include_prompts is not None else bool(nc.get("include_prompts", False))
-    from .summary import merge_note_summaries
+    iasc = (
+        include_all_session_conversations
+        if include_all_session_conversations is not None
+        else bool(nc.get("all_session_conversations", False))
+    )
+    from .summary import all_session_conversations_for_ledger, merge_note_summaries
 
     static_s = nc.get("summaries") if isinstance(nc.get("summaries"), dict) else None
 
@@ -384,6 +415,7 @@ def backfill_notes(
         tid_list = [str(x) for x in led.get("trace_ids", [])]
         traces = load_traces_for_ids(project_dir, tid_list)
         summaries = merge_note_summaries(project_dir, led, static_s)
+        asc = all_session_conversations_for_ledger(project_dir, led) if iasc else None
         note = build_note(
             led,
             traces,
@@ -391,6 +423,8 @@ def backfill_notes(
             include_summary=isum,
             include_prompts=ipr,
             summaries=summaries,
+            include_all_session_conversations=iasc,
+            all_session_conversations=asc,
         )
         if attach_note(sha, note, project_dir):
             count += 1

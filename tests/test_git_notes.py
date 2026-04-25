@@ -91,6 +91,53 @@ class TestBuildNote(unittest.TestCase):
         self.assertIn("ledger", note)
         self.assertIn("prompts", note)
 
+    def test_all_session_conversations_schema(self) -> None:
+        leg = {
+            "version": "2.0",
+            "commit_sha": "a" * 40,
+            "parent_sha": None,
+            "committed_at": None,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "trace_ids": ["tid1"],
+            "files": {
+                "x.py": {
+                    "line_attributions": [
+                        {
+                            "start_line": 1,
+                            "end_line": 1,
+                            "type": "ai",
+                            "trace_id": "tid1",
+                        },
+                    ],
+                },
+            },
+        }
+        tr = Trace.from_dict(
+            {
+                "version": "2.0",
+                "id": "tid1",
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "tool": {"name": "c"},
+                "files": [],
+            },
+        )
+        asc = [
+            {"conversation_url": "file:///tmp/a.jsonl", "summary": "s1"},
+            {"conversation_url": "file:///tmp/b.jsonl", "summary": None},
+        ]
+        note = git_notes.build_note(
+            leg,
+            [tr],
+            include_ledger=False,
+            include_summary=False,
+            include_prompts=False,
+            include_all_session_conversations=True,
+            all_session_conversations=asc,
+        )
+        _validate(note, "git-note.schema.json")
+        self.assertEqual(len(note.get("all_session_conversations", [])), 2)
+        self.assertIsNone(note["all_session_conversations"][1]["summary"])
+
     def test_ledger_hash_stable(self) -> None:
         leg = {"a": 1, "b": [3, 2]}
         h1 = git_notes.ledger_dict_hash(leg)

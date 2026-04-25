@@ -42,6 +42,7 @@ class TestConfigCommand(unittest.TestCase):
                     "include_ledger": True,
                     "include_summary": True,
                     "include_prompts": True,
+                    "all_session_conversations": False,
                 },
                 "summary": {
                     "enabled": True,
@@ -92,6 +93,7 @@ class TestConfigCommand(unittest.TestCase):
                 "include_ledger": True,
                 "include_summary": True,
                 "include_prompts": True,
+                "all_session_conversations": False,
             },
         )
 

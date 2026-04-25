@@ -404,6 +404,7 @@ class GitNote:
     ledger: GitNoteLedgerSection | None = None
     summary: dict[str, str] | None = None
     prompts: list[str] | None = None
+    all_session_conversations: list[dict[str, Any]] | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> GitNote:
@@ -415,6 +416,10 @@ class GitNote:
         pr: list[str] | None = None
         if isinstance(prompts, list):
             pr = [str(x) for x in prompts]
+        asc = d.get("all_session_conversations")
+        asc_list: list[dict[str, Any]] | None = None
+        if isinstance(asc, list):
+            asc_list = [cast(dict[str, Any], x) for x in asc if isinstance(x, dict)]
         return cls(
             version=str(d["version"]),
             trace_ids=[str(x) for x in d.get("trace_ids", [])],
@@ -423,6 +428,7 @@ class GitNote:
             ledger=ledger_sec,
             summary=dict(summary) if isinstance(summary, dict) else None,
             prompts=pr,
+            all_session_conversations=asc_list,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -438,6 +444,8 @@ class GitNote:
             out["summary"] = dict(self.summary)
         if self.prompts is not None:
             out["prompts"] = list(self.prompts)
+        if self.all_session_conversations is not None:
+            out["all_session_conversations"] = [dict(x) for x in self.all_session_conversations]
         return out
 
 
