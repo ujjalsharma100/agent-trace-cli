@@ -7,6 +7,9 @@ Commands:
     agent-trace init              Initialize tracing for the current project
     agent-trace status            Show tracing status
     agent-trace reset             Reconfigure tracing settings
+    agent-trace config show       Show persisted configuration
+    agent-trace config set        Set one configuration field
+    agent-trace config reset      Reset one configuration field/group
     agent-trace hooks setup-global  Install global hooks for all tools
     agent-trace hooks remove-global Remove global hooks
     agent-trace hooks status      Show global hook status
@@ -556,6 +559,333 @@ def cmd_reset(_args):
     if os.path.isdir(".git") and _confirm("Reinstall git hooks?", default=False):
         configure_git_hooks()
         print("  -> Git hooks reinstalled.")
+
+
+# ===================================================================
+# config
+# ===================================================================
+
+_DEFAULT_NOTES_CONFIG = {
+    "enabled": True,
+    "include_ledger": True,
+    "include_summary": True,
+    "include_prompts": True,
+}
+
+_CONFIG_FIELDS = {
+    "notes.enabled",
+    "notes.include-ledger",
+    "notes.include-summary",
+    "notes.include-prompts",
+    "summary.enabled",
+    "summary.command",
+    "summary.timeout-seconds",
+    "remote.default",
+    "global.auth-token",
+    "global.capture-detached-edits",
+}
+
+_CONFIG_RESET_TARGETS = _CONFIG_FIELDS | {"notes", "summary"}
+
+
+def _parse_config_bool(value: str) -> bool:
+    v = str(value).strip().lower()
+    if v in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
+        return True
+    if v in {"0", "false", "no", "n", "off", "disable", "disabled"}:
+        return False
+    raise ValueError("expected a boolean value (true/false)")
+
+
+def _redact_config_value(value):
+    if isinstance(value, dict):
+        redacted = {}
+        for key, val in value.items():
+            lk = str(key).lower()
+            if lk in {"auth_token", "token"} or "secret" in lk:
+                redacted[key] = "(set)" if val else val
+            elif lk == "tokens" and isinstance(val, dict):
+                redacted[key] = {name: "(set)" for name in val}
+            else:
+                redacted[key] = _redact_config_value(val)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_config_value(item) for item in value]
+    return value
+
+
+def _project_config_or_exit() -> tuple[str, dict]:
+    from .storage import resolve_project_id
+
+    cfg = get_project_config()
+    if cfg is None:
+        print("agent-trace is not set up for this project.", file=sys.stderr)
+        print("Run 'agent-trace init' to get started.", file=sys.stderr)
+        sys.exit(1)
+    pid = resolve_project_id(os.getcwd(), create=False)
+    if not pid:
+        print("agent-trace config: no project id", file=sys.stderr)
+        sys.exit(1)
+    return pid, cfg
+
+
+def _load_safe_remotes(project_id: str) -> dict:
+    try:
+        from .remote import _load_remotes
+    except ImportError:
+        return {}
+    return _redact_config_value(_load_remotes(project_id))
+
+
+def _hook_config_status() -> dict:
+    cursor_global = has_global_cursor_hooks()
+    claude_global = has_global_claude_hooks()
+    cursor_project = os.path.exists(".cursor/hooks.json")
+    claude_project = os.path.exists(".claude/settings.json")
+    git_post_commit = False
+    git_post_rewrite = False
+    try:
+        if os.path.exists(".git/hooks/post-commit"):
+            with open(".git/hooks/post-commit") as f:
+                git_post_commit = "agent-trace commit-link" in f.read()
+    except OSError:
+        pass
+    try:
+        if os.path.exists(".git/hooks/post-rewrite"):
+            with open(".git/hooks/post-rewrite") as f:
+                git_post_rewrite = "agent-trace rewrite-ledger" in f.read()
+    except OSError:
+        pass
+    return {
+        "cursor": {"global": cursor_global, "project": cursor_project},
+        "claude": {"global": claude_global, "project": claude_project},
+        "git": {
+            "post_commit": git_post_commit,
+            "post_rewrite": git_post_rewrite,
+        },
+    }
+
+
+def _full_config_snapshot() -> dict:
+    from .storage import get_project_dir, resolve_project_id
+
+    cfg = get_project_config()
+    pid = resolve_project_id(os.getcwd(), create=False)
+    snapshot = {
+        "global": {
+            "config": _redact_config_value(get_global_config()),
+        },
+        "project": None,
+        "hooks": _hook_config_status(),
+    }
+    if pid and cfg is not None:
+        snapshot["project"] = {
+            "id": pid,
+            "data_dir": str(get_project_dir(pid)),
+            "config": cfg,
+            "remotes": _load_safe_remotes(pid),
+        }
+    return snapshot
+
+
+def _print_config_snapshot(snapshot: dict) -> None:
+    print("agent-trace config\n")
+    project = snapshot.get("project")
+    if project:
+        print(f"  Project:  {project['id']}")
+        print(f"  Data dir: {project['data_dir']}")
+        print("\n  Project config:")
+        print(_indent_json(project.get("config") or {}))
+        print("\n  Remotes:")
+        print(_indent_json(project.get("remotes") or {}))
+    else:
+        print("  Project:  not initialized")
+
+    print("\n  Global config:")
+    print(_indent_json(snapshot.get("global", {}).get("config") or {}))
+    print("\n  Hooks:")
+    print(_indent_json(snapshot.get("hooks") or {}))
+
+
+def _indent_json(value: dict) -> str:
+    text = json.dumps(value, indent=2, sort_keys=True)
+    return "\n".join(f"    {line}" for line in text.splitlines())
+
+
+def _cleanup_empty_mapping(config: dict, key: str) -> None:
+    if isinstance(config.get(key), dict) and not config[key]:
+        del config[key]
+
+
+def _bool_to_text(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _prompt_reset_bool(field: str, default_value: bool) -> bool:
+    raw = _prompt(
+        f"Reset {field} (press Enter for default)",
+        default=_bool_to_text(default_value),
+    )
+    return _parse_config_bool(raw)
+
+
+def _interactive_reset_field(field: str) -> None:
+    """Interactive reset flow: Enter accepts reset defaults."""
+    bool_defaults = {
+        "notes.enabled": True,
+        "notes.include-ledger": True,
+        "notes.include-summary": True,
+        "notes.include-prompts": True,
+        "summary.enabled": False,
+        "global.capture-detached-edits": False,
+    }
+    clear_targets = {
+        "summary",
+        "summary.command",
+        "summary.timeout-seconds",
+        "remote.default",
+        "global.auth-token",
+    }
+
+    if field == "notes":
+        _pid, cfg = _project_config_or_exit()
+        cfg["notes"] = {
+            "enabled": _prompt_reset_bool("notes.enabled", True),
+            "include_ledger": _prompt_reset_bool("notes.include-ledger", True),
+            "include_summary": _prompt_reset_bool("notes.include-summary", True),
+            "include_prompts": _prompt_reset_bool("notes.include-prompts", True),
+        }
+        save_project_config(cfg)
+        return
+
+    if field in bool_defaults:
+        chosen = _prompt_reset_bool(field, bool_defaults[field])
+        _set_config_field(field, _bool_to_text(chosen))
+        return
+
+    if field in clear_targets:
+        if not _confirm(f"Reset {field} to default (clear current value)?", default=True):
+            print("No changes made.")
+            return
+        _reset_config_field(field)
+        return
+
+    # Fallback: if new reset targets are added in future.
+    _reset_config_field(field)
+
+
+def _set_config_field(field: str, value: str) -> None:
+    if field not in _CONFIG_FIELDS:
+        raise ValueError(f"unknown field '{field}'")
+
+    if field.startswith("global."):
+        cfg = get_global_config()
+        if field == "global.auth-token":
+            cfg["auth_token"] = value
+        elif field == "global.capture-detached-edits":
+            cfg["capture_detached_edits"] = _parse_config_bool(value)
+        save_global_config(cfg)
+        return
+
+    pid, cfg = _project_config_or_exit()
+    if field.startswith("notes."):
+        notes = cfg.setdefault("notes", {})
+        key = field.split(".", 1)[1].replace("-", "_")
+        notes[key] = _parse_config_bool(value)
+    elif field == "summary.enabled":
+        sm = cfg.setdefault("summary", {})
+        sm["enabled"] = _parse_config_bool(value)
+    elif field == "summary.command":
+        if not value.strip():
+            raise ValueError("summary.command cannot be blank")
+        sm = cfg.setdefault("summary", {})
+        sm["enabled"] = True
+        sm["command"] = value
+    elif field == "summary.timeout-seconds":
+        timeout = int(value)
+        if timeout <= 0:
+            raise ValueError("summary.timeout-seconds must be positive")
+        cfg.setdefault("summary", {})["timeout_seconds"] = timeout
+    elif field == "remote.default":
+        from .remote import set_default_remote
+
+        set_default_remote(pid, value)
+        return
+    save_project_config(cfg)
+
+
+def _reset_config_field(field: str) -> None:
+    if field not in _CONFIG_RESET_TARGETS:
+        raise ValueError(f"unknown reset target '{field}'")
+
+    if field.startswith("global."):
+        cfg = get_global_config()
+        if field == "global.auth-token":
+            cfg.pop("auth_token", None)
+        elif field == "global.capture-detached-edits":
+            cfg.pop("capture_detached_edits", None)
+        save_global_config(cfg)
+        return
+
+    _pid, cfg = _project_config_or_exit()
+    if field == "notes":
+        cfg["notes"] = dict(_DEFAULT_NOTES_CONFIG)
+    elif field.startswith("notes."):
+        notes = cfg.setdefault("notes", {})
+        key = field.split(".", 1)[1].replace("-", "_")
+        notes[key] = _DEFAULT_NOTES_CONFIG[key]
+    elif field == "summary":
+        cfg.pop("summary", None)
+    elif field == "summary.enabled":
+        cfg.setdefault("summary", {})["enabled"] = False
+    elif field == "summary.command":
+        if isinstance(cfg.get("summary"), dict):
+            cfg["summary"].pop("command", None)
+            _cleanup_empty_mapping(cfg, "summary")
+    elif field == "summary.timeout-seconds":
+        if isinstance(cfg.get("summary"), dict):
+            cfg["summary"].pop("timeout_seconds", None)
+            _cleanup_empty_mapping(cfg, "summary")
+    elif field == "remote.default":
+        if isinstance(cfg.get("remote"), dict):
+            cfg["remote"].pop("default", None)
+            _cleanup_empty_mapping(cfg, "remote")
+    save_project_config(cfg)
+
+
+def cmd_config(args):
+    """Show and mutate persisted configuration."""
+    action = getattr(args, "config_action", None)
+    if action == "show":
+        snapshot = _full_config_snapshot()
+        if getattr(args, "json", False):
+            print(json.dumps(snapshot, indent=2, sort_keys=True))
+        else:
+            _print_config_snapshot(snapshot)
+        return
+
+    if action == "set":
+        try:
+            _set_config_field(args.field, args.value)
+        except (ValueError, TypeError) as e:
+            print(f"agent-trace config set: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Config field '{args.field}' updated.")
+        return
+
+    if action == "reset":
+        try:
+            if getattr(args, "yes", False):
+                _reset_config_field(args.field)
+            else:
+                _interactive_reset_field(args.field)
+        except (ValueError, TypeError) as e:
+            print(f"agent-trace config reset: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Config field '{args.field}' reset.")
+        return
+
+    print("Usage: agent-trace config {show,set,reset}")
 
 
 # ===================================================================
@@ -1317,6 +1647,22 @@ def main():
     sub.add_parser("doctor", help="Check hooks, config, remotes, and optional tools")
     sub.add_parser("status", help="Show agent-trace status")
     sub.add_parser("reset", help="Reset agent-trace configuration")
+    sub_config = sub.add_parser("config", help="Show or update persisted configuration")
+    config_sub = sub_config.add_subparsers(dest="config_action", metavar="ACTION", required=True)
+    c_show = config_sub.add_parser("show", help="Show full persisted configuration")
+    c_show.add_argument("--json", action="store_true", default=False, help="Output as JSON")
+    c_set = config_sub.add_parser("set", help="Set one configuration field")
+    c_set.add_argument("field", choices=sorted(_CONFIG_FIELDS), help="Config field to update")
+    c_set.add_argument("value", help="New value")
+    c_reset = config_sub.add_parser("reset", help="Reset one configuration field or group")
+    c_reset.add_argument("field", choices=sorted(_CONFIG_RESET_TARGETS), help="Config field/group to reset")
+    c_reset.add_argument(
+        "--yes",
+        action="store_true",
+        default=False,
+        help="Reset directly without interactive prompt",
+    )
+
     # hooks {setup-global, remove-global, status}
     sub_hooks = sub.add_parser("hooks", help="Manage global hooks for coding tools (Cursor, Claude Code)")
     hooks_sub = sub_hooks.add_subparsers(dest="hooks_action", metavar="ACTION")
@@ -1557,6 +1903,7 @@ def main():
         "doctor": cmd_doctor,
         "status": cmd_status,
         "reset": cmd_reset,
+        "config": cmd_config,
         "hooks": cmd_hooks,
         "record": cmd_record,
         "commit-link": cmd_commit_link,

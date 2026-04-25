@@ -95,6 +95,21 @@ Show project id, data paths, counts, hook status, remote/sync-related status, an
 agent-trace status
 ```
 
+### `agent-trace config {show,set,reset}`
+
+Show the full persisted configuration, or update/reset a specific field without going through the full interactive reset flow. Token values are masked in `config show`.
+
+```bash
+agent-trace config show
+agent-trace config show --json
+agent-trace config set notes.include-summary false
+agent-trace config reset notes
+agent-trace config reset summary.command
+agent-trace config reset summary.command --yes
+```
+
+`config reset` is interactive by default for the selected field/group; pressing Enter accepts the reset default. Use `--yes` for non-interactive direct reset.
+
 ### `agent-trace doctor`
 
 Verify hooks, config, storage, remotes, and optional tools (e.g. summary command).
