@@ -32,6 +32,7 @@ from .storage import (
     get_traces_path,
     resolve_project_id,
 )
+from .summary_presets import augment_path_env
 
 
 def _log(msg: str) -> None:
@@ -71,15 +72,31 @@ def generate_summary_text(
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            env=augment_path_env(),
         )
     except subprocess.TimeoutExpired:
+        _log(
+            f"summary command timed out after {timeout_seconds}s "
+            "(try: agent-trace config set summary.timeout-seconds 120)",
+        )
         return None
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        _log(f"summary command failed to start: {e}")
         return None
     if r.returncode != 0:
+        err = (r.stderr or "").strip()
+        if err:
+            _log(f"summary command stderr (exit {r.returncode}): {err[:1200]}")
+        else:
+            _log(f"summary command exited with {r.returncode}")
         return None
     out = (r.stdout or "").strip()
-    return out or None
+    if not out:
+        err = (r.stderr or "").strip()
+        if err:
+            _log(f"summary command produced empty stdout; stderr: {err[:1200]}")
+        return None
+    return out
 
 
 def append_summary(
@@ -313,16 +330,17 @@ def _summarize_url(
 
 
 def run_session_summary_hook(data: dict[str, Any]) -> None:
-    """Called from ``record`` on session-end / stop hooks; never raises.
+    """Called from ``record`` on stop / agent-response / Cursor ``sessionEnd``; never raises.
 
-    Reads ``data["transcript_path"]`` from the hook payload, treats the
-    file at that path as the transcript, and pipes it to the configured
-    summary command. The result is stored keyed by ``file://<path>``.
+    Resolves the transcript path from the hook JSON (``transcript_path``) and/or
+    ``CURSOR_TRANSCRIPT_PATH`` (Cursor **sessionEnd** / **stop**), then pipes the
+    file to the configured summary command. The result is stored keyed by ``file://<path>``.
     """
     try:
         from .config import get_project_config
+        from .record import project_dir_from_hook, transcript_path_from_hook
 
-        cwd = data.get("cwd") or os.getcwd()
+        cwd = project_dir_from_hook(data)
         session_id = str(
             data.get("conversation_id") or data.get("session_id") or "",
         ).strip() or None
@@ -342,7 +360,7 @@ def run_session_summary_hook(data: dict[str, Any]) -> None:
         if not pid:
             return
 
-        transcript_path = data.get("transcript_path")
+        transcript_path = transcript_path_from_hook(data)
         if not transcript_path:
             return
         url = f"file://{transcript_path}"

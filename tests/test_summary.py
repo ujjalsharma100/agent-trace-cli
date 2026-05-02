@@ -242,6 +242,54 @@ class TestSummaryHookIntegration(unittest.TestCase):
         self.assertIn("hello", row["summary"])
         self.assertEqual(row["session_id"], "conv-99")
 
+    def test_session_end_hook_reads_transcript_and_writes_jsonl(self) -> None:
+        payload = json.dumps(
+            {
+                "hook_event_name": "sessionEnd",
+                "session_id": "conv-session-end",
+                "cwd": str(self.repo),
+                "transcript_path": str(self.transcript),
+            },
+        )
+        import io
+
+        with patch.object(sys, "stdin", io.StringIO(payload)):
+            record_from_stdin()
+        path = get_session_summaries_path(self.pid)
+        self.assertTrue(path.is_file())
+        line = path.read_text().strip()
+        row = json.loads(line)
+        self.assertEqual(row["conversation_url"], f"file://{self.transcript}")
+        self.assertIn("hello", row["summary"])
+        self.assertEqual(row["session_id"], "conv-session-end")
+
+    def test_session_end_uses_cursor_transcript_env(self) -> None:
+        """Cursor sessionEnd JSON has no transcript_path; use CURSOR_TRANSCRIPT_PATH."""
+        payload = json.dumps(
+            {
+                "hook_event_name": "sessionEnd",
+                "session_id": "conv-environ",
+                "reason": "completed",
+            },
+        )
+        import io
+
+        with patch.dict(
+            os.environ,
+            {
+                "CURSOR_TRANSCRIPT_PATH": str(self.transcript),
+                "CURSOR_PROJECT_DIR": str(self.repo),
+            },
+        ):
+            with patch.object(sys, "stdin", io.StringIO(payload)):
+                record_from_stdin()
+        path = get_session_summaries_path(self.pid)
+        self.assertTrue(path.is_file())
+        line = path.read_text().strip()
+        row = json.loads(line)
+        self.assertEqual(row["conversation_url"], f"file://{self.transcript}")
+        self.assertIn("hello", row["summary"])
+
 
 class TestSummaryCLI(unittest.TestCase):
     def setUp(self) -> None:

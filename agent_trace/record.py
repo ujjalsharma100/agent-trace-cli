@@ -34,6 +34,39 @@ from .trace import (
 _TRANSCRIPT_TAIL_BYTES = 512 * 1024
 
 
+def transcript_path_from_hook(data: dict) -> str | None:
+    """Path to the conversation JSONL: hook JSON, or ``CURSOR_TRANSCRIPT_PATH`` (sessionEnd/stop).
+
+    Cursor documents ``transcript_path`` on stdin for some hooks, but **sessionEnd** and
+    **stop** only list session metadata in the JSON; the transcript is in the environment.
+    See Cursor docs: ``CURSOR_TRANSCRIPT_PATH`` when transcripts are enabled.
+    """
+    tp = data.get("transcript_path")
+    if isinstance(tp, str) and tp.strip():
+        return tp.strip()
+    env_tp = os.environ.get("CURSOR_TRANSCRIPT_PATH")
+    if isinstance(env_tp, str) and env_tp.strip():
+        return env_tp.strip()
+    return None
+
+
+def project_dir_from_hook(data: dict) -> str:
+    """Repo/workspace directory for config resolution: ``cwd``, env, or ``workspace_roots``."""
+    cwd = data.get("cwd")
+    if isinstance(cwd, str) and cwd.strip():
+        return cwd.strip()
+    for key in ("CURSOR_PROJECT_DIR", "CLAUDE_PROJECT_DIR"):
+        v = os.environ.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    roots = data.get("workspace_roots")
+    if isinstance(roots, list) and roots:
+        r0 = roots[0]
+        if isinstance(r0, str) and r0.strip():
+            return r0.strip()
+    return os.getcwd()
+
+
 # -------------------------------------------------------------------
 # Session edit sequence tracking
 # -------------------------------------------------------------------
@@ -165,7 +198,7 @@ def _claude_model(d: dict, project_dir: str | None) -> str | None:
     if m:
         return str(m) if m else None
     sid = d.get("session_id") or ""
-    m = _model_from_claude_transcript_tail(d.get("transcript_path"))
+    m = _model_from_claude_transcript_tail(transcript_path_from_hook(d))
     if m:
         if sid and project_dir:
             prev = _session_model_from_state(sid, project_dir)
@@ -178,10 +211,10 @@ def _claude_model(d: dict, project_dir: str | None) -> str | None:
 def _sync_claude_session_model_from_transcript(data: dict) -> None:
     """Refresh SessionStart cache from transcript (e.g. after each Stop). No-op if unchanged."""
     sid = data.get("session_id")
-    tp = data.get("transcript_path")
+    tp = transcript_path_from_hook(data)
     if not sid or not tp:
         return
-    anchor = data.get("cwd") or os.getcwd()
+    anchor = project_dir_from_hook(data)
     res = resolve_file_project(".sessions", anchor_path=anchor)
     repo = res.repo_root if res else None
     if not repo:
@@ -346,7 +379,7 @@ def _cursor_afterFileEdit(d):
         model=d.get("model"),
         range_positions=compute_range_positions(edits, fc),
         range_contents=[e["new_string"] for e in edits if e.get("new_string")],
-        transcript=d.get("transcript_path"),
+        transcript=transcript_path_from_hook(d),
         metadata={"conversation_id": d.get("conversation_id"), "generation_id": d.get("generation_id")},
         edit_sequence=seq,
         resolution=res,
@@ -371,12 +404,12 @@ def _cursor_afterTabFileEdit(d):
 
 
 def _cursor_afterShellExecution(d):
-    anchor = d.get("cwd") or os.getcwd()
+    anchor = project_dir_from_hook(d)
     res = resolve_file_project(".shell-history", anchor_path=anchor)
     return create_trace(
         "ai", ".shell-history",
         model=d.get("model"),
-        transcript=d.get("transcript_path"),
+        transcript=transcript_path_from_hook(d),
         metadata={
             "conversation_id": d.get("conversation_id"),
             "generation_id": d.get("generation_id"),
@@ -389,7 +422,7 @@ def _cursor_afterShellExecution(d):
 
 
 def _cursor_sessionStart(d):
-    anchor = d.get("cwd") or os.getcwd()
+    anchor = project_dir_from_hook(d)
     res = resolve_file_project(".sessions", anchor_path=anchor)
     return create_trace(
         "ai", ".sessions",
@@ -407,11 +440,12 @@ def _cursor_sessionStart(d):
 
 
 def _cursor_sessionEnd(d):
-    anchor = d.get("cwd") or os.getcwd()
+    anchor = project_dir_from_hook(d)
     res = resolve_file_project(".sessions", anchor_path=anchor)
     return create_trace(
         "ai", ".sessions",
         model=d.get("model"),
+        transcript=transcript_path_from_hook(d),
         metadata={
             "event": "session_end",
             "session_id": d.get("session_id"),
@@ -448,7 +482,7 @@ def _claude_PostToolUse(d):
         return create_trace(
             "ai", ".shell-history",
             model=_claude_model(d, res.repo_root if res else None),
-            transcript=d.get("transcript_path"),
+            transcript=transcript_path_from_hook(d),
             metadata={
                 "session_id": d.get("session_id"),
                 "tool_name": tn,
@@ -504,7 +538,7 @@ def _claude_PostToolUse(d):
         model=_claude_model(d, res.repo_root if res else None),
         range_positions=rp,
         range_contents=rc,
-        transcript=d.get("transcript_path"),
+        transcript=transcript_path_from_hook(d),
         metadata=metadata,
         edit_sequence=seq,
         anchor_path=anchor,
@@ -611,6 +645,17 @@ def record_from_stdin():
             pass
         return
 
+    # Cursor's sessionEnd JSON does not include ``transcript_path``; the file is in
+    # ``CURSOR_TRANSCRIPT_PATH`` (see ``transcript_path_from_hook``). Run summary before
+    # the sessionEnd trace.
+    if event == "sessionEnd":
+        try:
+            from .summary import run_session_summary_hook
+
+            run_session_summary_hook(data)
+        except Exception:
+            pass
+
     handler = _CURSOR.get(event) or _CLAUDE.get(event)
     if handler is None:
         return
@@ -638,7 +683,7 @@ def record_from_stdin():
             str(sid),
             str(pid),
             tool_name=(tool or {}).get("name"),
-            transcript_path=data.get("transcript_path"),
+            transcript_path=transcript_path_from_hook(data),
         )
 
     _store_local(trace, project_dir=repo_root)
