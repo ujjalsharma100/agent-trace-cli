@@ -67,6 +67,31 @@ def project_dir_from_hook(data: dict) -> str:
     return os.getcwd()
 
 
+def project_dir_for_summary_hook(data: dict) -> str:
+    """Git root for summary config and storage: prefer session's primary touched repo.
+
+    File traces resolve the repo from edited paths (nested repos → inner root). Hooks
+    often pass only workspace ``cwd``, which may be a parent folder whose git root is
+    the outer monorepo — wrong ``project_id``. Session manifests record which
+    ``project_id`` actually received edits; match that when possible.
+    """
+    from .registry import get_project_record
+    from .session import primary_project_id_for_session
+
+    sid = str(
+        data.get("conversation_id") or data.get("session_id") or "",
+    ).strip()
+    if sid:
+        pid = primary_project_id_for_session(sid)
+        if pid and not pid.startswith("detached:"):
+            rec = get_project_record(pid)
+            if rec:
+                root = rec.get("canonical_root")
+                if isinstance(root, str) and root.strip() and os.path.isdir(root.strip()):
+                    return os.path.realpath(root.strip())
+    return project_dir_from_hook(data)
+
+
 # -------------------------------------------------------------------
 # Session edit sequence tracking
 # -------------------------------------------------------------------

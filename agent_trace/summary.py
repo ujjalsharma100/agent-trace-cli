@@ -338,9 +338,9 @@ def run_session_summary_hook(data: dict[str, Any]) -> None:
     """
     try:
         from .config import get_project_config
-        from .record import project_dir_from_hook, transcript_path_from_hook
+        from .record import project_dir_for_summary_hook, transcript_path_from_hook
 
-        cwd = project_dir_from_hook(data)
+        cwd = project_dir_for_summary_hook(data)
         session_id = str(
             data.get("conversation_id") or data.get("session_id") or "",
         ).strip() or None

@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from agent_trace.config import get_project_config, save_project_config
 from agent_trace.record import record_from_stdin
+from agent_trace.session import touch_session_project
 from agent_trace.storage import (
     ensure_project_dir,
     get_ledgers_path,
@@ -285,6 +286,95 @@ class TestSummaryHookIntegration(unittest.TestCase):
                 record_from_stdin()
         path = get_session_summaries_path(self.pid)
         self.assertTrue(path.is_file())
+        line = path.read_text().strip()
+        row = json.loads(line)
+        self.assertEqual(row["conversation_url"], f"file://{self.transcript}")
+        self.assertIn("hello", row["summary"])
+
+    def test_session_end_uses_session_manifest_when_cwd_is_parent_of_nested_repo(
+        self,
+    ) -> None:
+        """Summary attributes to the inner repo (where file traces and config live) when
+        ``cwd`` is the outer folder — same scenario as a multi-root / parent workspace.
+        """
+        outer = Path(self.tmp) / "outer"
+        inner = outer / "inner"
+        outer.mkdir(parents=True)
+        inner.mkdir()
+        subprocess.run(["git", "init"], cwd=str(outer), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(outer), "config", "user.email", "t@t"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(outer), "config", "user.name", "t"],
+            check=True,
+            capture_output=True,
+        )
+        (outer / "outer.txt").write_text("o\n")
+        subprocess.run(
+            ["git", "-C", str(outer), "add", "outer.txt"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(outer), "commit", "-m", "o"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(["git", "init"], cwd=str(inner), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(inner), "config", "user.email", "t@t"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(inner), "config", "user.name", "t"],
+            check=True,
+            capture_output=True,
+        )
+        (inner / "f.txt").write_text("i\n")
+        subprocess.run(
+            ["git", "-C", str(inner), "add", "f.txt"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(inner), "commit", "-m", "i"],
+            check=True,
+            capture_output=True,
+        )
+        from agent_trace.storage import path_to_project_id
+
+        inner_pid = path_to_project_id(str(inner))
+        ensure_project_dir(inner_pid)
+        save_project_config(
+            {
+                "summary": {
+                    "enabled": True,
+                    "command": "cat",
+                    "timeout_seconds": 30,
+                },
+            },
+            str(inner),
+        )
+        touch_session_project("conv-nested", inner_pid, transcript_path=str(self.transcript))
+
+        payload = json.dumps(
+            {
+                "hook_event_name": "sessionEnd",
+                "session_id": "conv-nested",
+                "cwd": str(outer),
+                "transcript_path": str(self.transcript),
+            },
+        )
+        import io
+
+        with patch.object(sys, "stdin", io.StringIO(payload)):
+            record_from_stdin()
+        path = get_session_summaries_path(inner_pid)
+        self.assertTrue(path.is_file(), msg="summary should land in inner repo project")
         line = path.read_text().strip()
         row = json.loads(line)
         self.assertEqual(row["conversation_url"], f"file://{self.transcript}")

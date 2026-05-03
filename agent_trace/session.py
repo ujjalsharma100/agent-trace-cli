@@ -61,6 +61,43 @@ def _atomic_write(path: os.PathLike[str], text: str) -> None:
         raise
 
 
+def primary_project_id_for_session(session_id: str) -> str | None:
+    """Project id that received the most trace touches this session (nested-repo safe).
+
+    Used so summary hooks attribute to the same project as file-based traces when
+    the IDE workspace cwd is a parent folder but edits targeted an inner git repo.
+    """
+    if not session_id:
+        return None
+    path = _sessions_dir() / f"{session_id}.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    counts = data.get("edit_counts") if isinstance(data.get("edit_counts"), dict) else {}
+    if counts:
+        best: str | None = None
+        best_n = -1
+        for pid, n in counts.items():
+            if not isinstance(pid, str) or not pid:
+                continue
+            try:
+                v = int(n)
+            except (TypeError, ValueError):
+                continue
+            if v > best_n:
+                best_n = v
+                best = pid
+        if best is not None:
+            return best
+    projects = data.get("projects") if isinstance(data.get("projects"), list) else []
+    if len(projects) == 1 and isinstance(projects[0], str) and projects[0]:
+        return projects[0]
+    return None
+
+
 def touch_session_project(
     session_id: str,
     project_id: str,
