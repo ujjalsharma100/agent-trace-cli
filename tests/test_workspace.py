@@ -90,23 +90,30 @@ class TestResolveFileProject(unittest.TestCase):
 
 
 class TestRegistry(unittest.TestCase):
-    def test_id_is_path_derived(self) -> None:
+    def test_id_is_anchored_to_git_dir(self) -> None:
+        """Per §5.8: project_id is anchored to ``.git/agent-trace-id``, so a
+        repo rename preserves the id (and therefore the project's data
+        directory under ``AGENT_TRACE_HOME``)."""
         with tempfile.TemporaryDirectory() as tmp:
-            r1 = Path(tmp) / "r1"
-            r1.mkdir()
-            _git_init_with_commit(str(r1))
-            reg = Path(tmp) / "registry.json"
-            with patch.object(registry_mod, "PROJECTS_FILE", reg):
-                a = lookup_or_create_project_id(str(r1))
-            # project_id = sanitized absolute path (Claude-Code convention)
-            self.assertEqual(a, os.path.realpath(str(r1)).replace(os.sep, "-"))
-            # Moving the repo changes the path, hence the id — just like ``git init``.
-            r2 = Path(tmp) / "r2"
-            os.rename(r1, r2)
-            with patch.object(registry_mod, "PROJECTS_FILE", reg):
-                b = lookup_or_create_project_id(str(r2))
-            self.assertEqual(b, os.path.realpath(str(r2)).replace(os.sep, "-"))
-            self.assertNotEqual(a, b)
+            home = Path(tmp) / "home"
+            home.mkdir()
+            with patch.dict(os.environ, {"AGENT_TRACE_HOME": str(home)}):
+                r1 = Path(tmp) / "r1"
+                r1.mkdir()
+                _git_init_with_commit(str(r1))
+                reg = home / "projects.json"
+                with patch.object(registry_mod, "PROJECTS_FILE", reg):
+                    a = lookup_or_create_project_id(str(r1))
+                # New shape: opaque ``at-<32 hex>``.
+                self.assertTrue(a.startswith("at-"), f"unexpected id: {a}")
+                self.assertEqual(len(a), 3 + 32)
+
+                # Rename the repo on disk — id is unchanged.
+                r2 = Path(tmp) / "r2"
+                os.rename(r1, r2)
+                with patch.object(registry_mod, "PROJECTS_FILE", reg):
+                    b = lookup_or_create_project_id(str(r2))
+                self.assertEqual(a, b)
 
 
 class TestGitRepoRootForPath(unittest.TestCase):

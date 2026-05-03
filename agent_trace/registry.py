@@ -141,9 +141,24 @@ class _RegistryLock:
 
 
 def register_project_metadata(repo_root: str, project_id: str | None = None) -> str:
-    """Upsert metadata for a repo.  Returns the (path-derived) project_id."""
+    """Upsert metadata for a repo. Returns the anchor-aware project_id.
+
+    When ``project_id`` is not supplied, resolves it via the same
+    anchor-aware path used everywhere else (``storage.resolve_project_id``)
+    so the recorder, ``init``, ``blame``, and the registry all agree on
+    the same id. Without this, a fresh ``.git/agent-trace-id`` anchor
+    would be ignored and the registry would fall back to the path-derived
+    id, leaving the recorder writing under one id while ``init`` wrote
+    config under another.
+    """
     canon = os.path.realpath(repo_root)
-    pid = project_id or path_to_project_id(canon)
+    if project_id is None:
+        from .storage import resolve_project_id
+
+        resolved = resolve_project_id(canon, create=True)
+        pid = resolved or path_to_project_id(canon)
+    else:
+        pid = project_id
     fc = _first_commit_sha(canon)
     origin = _origin_url(canon)
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
