@@ -9,3 +9,6 @@ build/
 node_modules/
 viewer/frontend/node_modules/
 .pytest_agent_trace_tmp/
+site/
+.venv-docs/
+.DS_Store

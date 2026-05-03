@@ -1,0 +1,95 @@
+# agent-trace documentation site
+# Build: pip install -r docs/requirements-docs.txt && mkdocs build
+# Serve locally: mkdocs serve
+
+site_name: agent-trace
+site_description: >-
+  Command-line documentation for agent-trace — local-first AI code tracing,
+  deterministic attribution, git notes, and optional HTTP remotes.
+site_author: agent-trace contributors
+
+# Update when you pick a hosting URL (GitHub Pages, Read the Docs, etc.)
+# site_url: https://example.org/agent-trace/
+
+repo_url: https://github.com/ujjalsharma100/agent-trace-cli
+repo_name: agent-trace-cli
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  language: en
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.expand
+    - navigation.sections
+    - navigation.indexes
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Installation: installation.md
+  - Concepts:
+      - Overview: concepts/overview.md
+      - Project identity & storage: concepts/project-identity.md
+      - Hooks & recording: concepts/hooks-and-recording.md
+      - Attribution ledger: concepts/attribution-ledger.md
+      - Remotes & sync: concepts/remotes-and-sync.md
+      - Git notes: concepts/git-notes.md
+      - Session summaries: concepts/session-summaries.md
+  - Configuration: configuration.md
+  - Environment variables: environment-variables.md
+  - Data on disk: data-on-disk.md
+  - Troubleshooting: troubleshooting.md
+  - Command reference:
+      - reference/index.md
+      - Global flags: reference/global-flags.md
+      - init, status, reset, doctor: reference/init-status-reset-doctor.md
+      - config: reference/config.md
+      - hooks: reference/hooks.md
+      - record, commit-link, rewrite-ledger: reference/record-commit-link-rewrite.md
+      - blame: reference/blame.md
+      - context: reference/context.md
+      - viewer: reference/viewer.md
+      - rule: reference/rule.md
+      - set & remove globaluser: reference/set-remove-globaluser.md
+      - remote: reference/remote.md
+      - push, pull, sync: reference/push-pull-sync.md
+      - projects & adopt: reference/projects-adopt.md
+      - notes: reference/notes.md
+      - summary: reference/summary.md
+
+extra:
+  generator: false
