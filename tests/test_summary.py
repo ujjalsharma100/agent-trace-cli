@@ -39,8 +39,8 @@ def _tmp_dir() -> str:
 
 
 def _fake_repo_with_project(parent: Path) -> tuple[Path, str]:
-    """A git-initialized directory whose project_id is derived from its path."""
-    from agent_trace.storage import path_to_project_id
+    """A git-initialized directory + its anchor-derived project_id."""
+    from agent_trace.storage import resolve_project_id
 
     base = parent / "repo"
     base.mkdir(parents=True)
@@ -66,7 +66,8 @@ def _fake_repo_with_project(parent: Path) -> tuple[Path, str]:
         check=True,
         capture_output=True,
     )
-    pid = path_to_project_id(str(base))
+    pid = resolve_project_id(str(base), create=True)
+    assert pid is not None
     return base, pid
 
 
@@ -345,9 +346,10 @@ class TestSummaryHookIntegration(unittest.TestCase):
             check=True,
             capture_output=True,
         )
-        from agent_trace.storage import path_to_project_id
+        from agent_trace.storage import resolve_project_id
 
-        inner_pid = path_to_project_id(str(inner))
+        inner_pid = resolve_project_id(str(inner), create=True)
+        assert inner_pid is not None
         ensure_project_dir(inner_pid)
         save_project_config(
             {

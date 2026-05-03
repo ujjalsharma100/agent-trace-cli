@@ -187,20 +187,23 @@ def _parse_iso(s: str | None) -> datetime | None:
 
 def _find_candidate_traces(
     project_dir: str,
-    parent_sha: str | None,
-    parent_committed_at: str | None,
+    parents: list[tuple[str, str | None]],
     committed_at: str | None,
 ) -> list[dict[str, Any]]:
     """Return traces eligible to attribute the current commit.
 
+    ``parents`` is a list of ``(parent_sha, parent_committed_at)`` tuples.
+    Empty list means first commit. Multi-element list means merge commit.
+
     Eligibility (must satisfy all):
-      * Trace's ``vcs.revision`` equals ``parent_sha`` (or no parent — first
-        commit), or trace has no vcs at all (recorded outside a git context).
-      * Trace's ``timestamp`` is strictly after ``parent_committed_at`` (the
-        previous commit's author time). This is the staging window — older
-        traces never participate even if their hashes happen to collide.
-      * Trace's ``timestamp`` is no later than ``committed_at`` plus a small
-        buffer (covers commits made seconds after the trace was recorded).
+      * Trace's ``vcs.revision`` equals **some** parent SHA, or trace has
+        no vcs at all (which counts only on a first commit).
+      * Trace's ``timestamp`` is strictly after **that specific parent's**
+        ``committed_at``. Each parent has its own staging-window lower
+        bound — a trace from main's history shouldn't be admitted because
+        of feature's later commit time, and vice versa.
+      * Trace's ``timestamp`` is no later than ``committed_at`` plus a
+        small buffer.
     """
     from .storage import get_traces_path, resolve_project_id
 
@@ -224,25 +227,32 @@ def _find_candidate_traces(
     except OSError:
         return []
 
-    lower = _parse_iso(parent_committed_at)
+    parent_lowers: dict[str, datetime | None] = {
+        sha: _parse_iso(ct) for sha, ct in parents
+    }
     upper_base = _parse_iso(committed_at)
     upper = (upper_base + timedelta(minutes=10)) if upper_base else None
 
     candidates: list[dict[str, Any]] = []
     for t in all_traces:
-        # Revision check
-        if parent_sha:
-            vcs = t.get("vcs") or {}
-            rev = vcs.get("revision")
-            if rev and rev != parent_sha:
-                continue
-        # else first commit — accept any vcs
-
-        # Time window check
         ts = _parse_iso(t.get("timestamp"))
         if ts is None:
-            # Reject undated traces — non-determinism risk
             continue
+
+        vcs = t.get("vcs") or {}
+        rev = vcs.get("revision")
+
+        if not parents:
+            # First commit — accept traces with no vcs and undefined parent
+            # context. (Pre-init traces in a fresh repo.)
+            if rev:
+                continue
+            lower = None
+        else:
+            if not rev or rev not in parent_lowers:
+                continue
+            lower = parent_lowers[rev]
+
         if lower is not None and ts <= lower:
             continue
         if upper is not None and ts > upper:
@@ -255,20 +265,17 @@ def _find_candidate_traces(
 
 def list_traces_in_staging_window(
     project_dir: str,
-    parent_sha: str | None,
-    parent_committed_at: str | None,
+    parents: list[tuple[str, str | None]],
     committed_at: str | None,
 ) -> list[dict[str, Any]]:
     """Return all local trace records in the same eligibility window as
-    :func:`build_attribution_ledger` (VCS revision + time bounds).
+    :func:`build_attribution_ledger`.
 
-    Used for git notes ``all_session_conversations``: every conversation URL
-    from traces in the staging window, not only lines that ended up in the
-    commit.
+    Used for git notes ``all_session_conversations``: every conversation
+    URL from traces eligible for this commit, not only lines that ended
+    up in the ledger.
     """
-    return _find_candidate_traces(
-        project_dir, parent_sha, parent_committed_at, committed_at,
-    )
+    return _find_candidate_traces(project_dir, parents, committed_at)
 
 
 def _load_all_traces(project_dir: str) -> list[dict[str, Any]]:
@@ -392,6 +399,31 @@ def _ledger_evidence_to_index_entries(
                 if h not in out:
                     out[h] = entry
     return out
+
+
+def diff_signature(commit_sha: str, project_dir: str) -> str | None:
+    """Return a SHA-256 over the unified diff ``parent..commit_sha`` (across
+    every changed file's diff for merge commits, against parent #1 — same
+    surface :func:`build_attribution_ledger` consumes).
+
+    Used by post-rewrite to detect whether an amend / rebase changed the
+    tree. If the signature differs between old and new SHAs, the existing
+    ledger row is stale and must be rebuilt from the new commit.
+
+    Returns ``None`` if the commit is not reachable or the diff cannot be
+    computed (e.g. the old SHA was already pruned).
+    """
+    if not commit_sha:
+        return None
+    parent = _git("rev-parse", "--verify", f"{commit_sha}^", cwd=project_dir)
+    if parent:
+        diff = _git_raw("diff", parent, commit_sha, cwd=project_dir)
+    else:
+        empty_tree = "4b825dc642cb6eb9a060e54bf899d15f3f4b7b18"
+        diff = _git_raw("diff", empty_tree, commit_sha, cwd=project_dir)
+    if diff is None:
+        return None
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest()
 
 
 def _build_global_hash_index(
@@ -541,7 +573,61 @@ def _build_trace_hash_index(
 # Ledger construction
 # -------------------------------------------------------------------
 
-def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] | None:
+def _merge_resolution_lines_per_file(
+    parents: list[tuple[str, str | None]],
+    commit_sha: str,
+    project_dir: str,
+) -> dict[str, set[int]]:
+    """For a merge commit, return the set of commit-side line numbers in each
+    file that are present in ``commit_sha`` but not in **any** parent.
+
+    Algorithm: ``git diff parent_i commit_sha`` per parent gives the set of
+    commit-side line numbers added relative to that parent. A line is
+    "introduced by the merge resolution" iff it's added relative to **every**
+    parent. So we intersect the per-parent line sets per file.
+
+    Files that don't appear in every parent's diff drop out of the result —
+    if a file is identical to even one parent, all of its content is
+    attributed in that parent's history, not by the merge commit.
+    """
+    if not parents:
+        return {}
+
+    per_parent: list[dict[str, set[int]]] = []
+    for sha, _ in parents:
+        files_out = _git("diff", "--name-only", sha, commit_sha, cwd=project_dir) or ""
+        per_file: dict[str, set[int]] = {}
+        for fp in files_out.splitlines():
+            fp = fp.strip()
+            if not fp:
+                continue
+            diff = _git_raw("diff", sha, commit_sha, "--", fp, cwd=project_dir)
+            lines: set[int] = set()
+            if diff:
+                for s, e in _parse_diff_ranges(diff):
+                    for ln in range(s, e + 1):
+                        lines.add(ln)
+            per_file[fp] = lines
+        per_parent.append(per_file)
+
+    common_files = set(per_parent[0].keys())
+    for d in per_parent[1:]:
+        common_files &= set(d.keys())
+
+    result: dict[str, set[int]] = {}
+    for fp in common_files:
+        common_lines = per_parent[0][fp].copy()
+        for d in per_parent[1:]:
+            common_lines &= d[fp]
+        if common_lines:
+            result[fp] = common_lines
+    return result
+
+
+def build_attribution_ledger(
+    project_dir: str | None = None,
+    commit_ref: str = "HEAD",
+) -> dict[str, Any] | None:
     """Build a per-line AI-attribution ledger for the current HEAD commit.
 
     Returns the ledger dict, or None if there is nothing changed.
@@ -575,78 +661,99 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
         import os
         project_dir = os.getcwd()
 
-    commit_sha = _git("rev-parse", "HEAD", cwd=project_dir)
+    commit_sha = _git("rev-parse", commit_ref, cwd=project_dir)
     if not commit_sha:
         return None
 
-    parent_sha = _git("rev-parse", "HEAD^", cwd=project_dir)
-    committed_at = _git("log", "-1", "--format=%aI", "HEAD", cwd=project_dir)
-    parent_committed_at = (
-        _git("log", "-1", "--format=%aI", parent_sha, cwd=project_dir)
-        if parent_sha else None
-    )
+    committed_at = _git("log", "-1", "--format=%aI", commit_sha, cwd=project_dir)
 
-    parents_out = _git("rev-list", "--parents", "-n", "1", "HEAD", cwd=project_dir) or ""
-    parent_list = parents_out.split()[1:] if parents_out else []
+    parents_out = _git(
+        "rev-list", "--parents", "-n", "1", commit_sha, cwd=project_dir,
+    ) or ""
+    parent_shas: list[str] = parents_out.split()[1:] if parents_out else []
+    parents: list[tuple[str, str | None]] = []
+    for psha in parent_shas:
+        pct = _git("log", "-1", "--format=%aI", psha, cwd=project_dir)
+        parents.append((psha, pct))
 
-    derived_from = _detect_derived_from(commit_sha, parent_list, project_dir)
+    is_merge = len(parents) > 1
+    first_parent_sha = parents[0][0] if parents else None
+    first_parent_at = parents[0][1] if parents else None
 
-    if parent_sha:
-        changed_out = _git("diff", "--name-only", "HEAD^", "HEAD", cwd=project_dir)
-    else:
-        changed_out = _git(
-            "diff", "--name-only", "--diff-filter=ACMR",
-            "4b825dc642cb6eb9a060e54bf899d15f3f4b7b18", "HEAD",
-            cwd=project_dir,
+    derived_from = _detect_derived_from(commit_sha, parent_shas, project_dir)
+
+    # Per-file changed line sets.
+    changed_lines_per_file: dict[str, set[int]] = {}
+    if is_merge:
+        # Only merge-resolution-introduced lines (added vs every parent).
+        changed_lines_per_file = _merge_resolution_lines_per_file(
+            parents, commit_sha, project_dir,
         )
-    if not changed_out:
-        return None
-    changed_files = [f for f in changed_out.splitlines() if f.strip()]
-    if not changed_files:
+    elif first_parent_sha:
+        files_out = _git(
+            "diff", "--name-only", first_parent_sha, commit_sha, cwd=project_dir,
+        ) or ""
+        for fp in files_out.splitlines():
+            fp = fp.strip()
+            if not fp:
+                continue
+            diff = _git_raw(
+                "diff", first_parent_sha, commit_sha, "--", fp, cwd=project_dir,
+            )
+            lines: set[int] = set()
+            if diff:
+                for s, e in _parse_diff_ranges(diff):
+                    for ln in range(s, e + 1):
+                        lines.add(ln)
+            if lines:
+                changed_lines_per_file[fp] = lines
+    else:
+        # First commit — diff against the empty tree.
+        empty_tree = "4b825dc642cb6eb9a060e54bf899d15f3f4b7b18"
+        files_out = _git(
+            "diff", "--name-only", "--diff-filter=ACMR",
+            empty_tree, commit_sha, cwd=project_dir,
+        ) or ""
+        for fp in files_out.splitlines():
+            fp = fp.strip()
+            if not fp:
+                continue
+            diff = _git_raw(
+                "diff", empty_tree, commit_sha, "--", fp, cwd=project_dir,
+            )
+            lines = set()
+            if diff:
+                for s, e in _parse_diff_ranges(diff):
+                    for ln in range(s, e + 1):
+                        lines.add(ln)
+            if lines:
+                changed_lines_per_file[fp] = lines
+
+    if not changed_lines_per_file:
         return None
 
     rename_map: dict[str, str] = (
-        _get_rename_map(parent_sha, commit_sha, project_dir) if parent_sha else {}
+        _get_rename_map(first_parent_sha, commit_sha, project_dir)
+        if first_parent_sha and not is_merge else {}
     )
 
-    candidates = _find_candidate_traces(
-        project_dir, parent_sha, parent_committed_at, committed_at,
-    )
+    candidates = _find_candidate_traces(project_dir, parents, committed_at)
 
     used_trace_ids: set[str] = set()
     files_attributions: dict[str, dict[str, Any]] = {}
     used_fallback = False
 
-    for file_path in changed_files:
+    for file_path, changed_lines in changed_lines_per_file.items():
         alt_paths: list[str] | None = None
         old_p = rename_map.get(file_path)
         if old_p:
             alt_paths = [old_p]
 
-        file_content = _git_raw("show", f"HEAD:{file_path}", cwd=project_dir)
+        file_content = _git_raw(
+            "show", f"{commit_sha}:{file_path}", cwd=project_dir,
+        )
         if file_content is None:
             continue
-
-        if parent_sha:
-            diff_output = _git_raw(
-                "diff", "HEAD^", "HEAD", "--", file_path, cwd=project_dir,
-            )
-        else:
-            diff_output = _git_raw(
-                "diff", "4b825dc642cb6eb9a060e54bf899d15f3f4b7b18",
-                "HEAD", "--", file_path, cwd=project_dir,
-            )
-
-        diff_ranges: list[tuple[int, int]] = (
-            _parse_diff_ranges(diff_output) if diff_output else []
-        )
-        if not diff_ranges:
-            continue
-
-        changed_lines: set[int] = set()
-        for start, end in diff_ranges:
-            for ln in range(start, end + 1):
-                changed_lines.add(ln)
 
         file_lines = _compute_file_lines(file_content)
 
@@ -747,8 +854,8 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
     ledger: dict[str, Any] = {
         "version": "2.0",
         "commit_sha": commit_sha,
-        "parent_sha": parent_sha,
-        "parent_committed_at": parent_committed_at,
+        "parent_sha": first_parent_sha,
+        "parent_committed_at": first_parent_at,
         "committed_at": committed_at,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "trace_ids": sorted(used_trace_ids),

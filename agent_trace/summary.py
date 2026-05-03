@@ -241,10 +241,17 @@ def all_session_conversations_for_ledger(
     parent_sha = ledger.get("parent_sha")
     parent_at = ledger.get("parent_committed_at")
     committed_at = ledger.get("committed_at")
+
+    # Single-parent shape (the common case). Merge commits also call here,
+    # but their staging-window scoping is best handled at ledger build time;
+    # this caller only needs the conversation URLs that belonged to the
+    # primary-parent staging window for the note's audit list.
+    parents: list[tuple[str, str | None]] = []
+    if parent_sha:
+        parents.append((str(parent_sha), str(parent_at) if parent_at else None))
     raw = list_traces_in_staging_window(
         project_dir,
-        str(parent_sha) if parent_sha else None,
-        str(parent_at) if parent_at else None,
+        parents,
         str(committed_at) if committed_at else None,
     )
     urls: list[str] = []

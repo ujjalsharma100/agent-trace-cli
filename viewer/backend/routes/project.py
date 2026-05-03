@@ -47,8 +47,44 @@ def _git_note_for_head(project_root: str) -> dict[str, Any] | None:
 
 
 def _path_to_project_id(repo_root: str) -> str:
-    """Mirror of ``agent_trace.storage.path_to_project_id`` (keeps viewer standalone)."""
+    """Path-derived project_id (legacy fallback when no anchor exists)."""
     return os.path.realpath(repo_root).replace(os.sep, "-")
+
+
+def _read_anchor_id(repo_root: str) -> str | None:
+    """Resolve the ``.git/agent-trace-id`` anchor for ``repo_root``.
+
+    Mirrors ``agent_trace.storage._read_anchor`` so the viewer stays
+    self-contained (no import of the CLI package).
+    """
+    try:
+        r = subprocess.run(
+            ["git", "-C", repo_root, "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return None
+        gd = r.stdout.strip()
+        if not gd:
+            return None
+        if not os.path.isabs(gd):
+            gd = os.path.join(os.path.realpath(repo_root), gd)
+        anchor = os.path.join(gd, "agent-trace-id")
+        if not os.path.isfile(anchor):
+            return None
+        with open(anchor, encoding="utf-8") as f:
+            s = f.read().strip()
+        return s or None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _resolve_project_id(repo_root: str) -> str:
+    """Anchor-first id resolution; path-derived fallback."""
+    anchored = _read_anchor_id(repo_root)
+    if anchored:
+        return anchored
+    return _path_to_project_id(repo_root)
 
 
 def get_project_info(project_root: str) -> dict[str, Any]:
@@ -57,7 +93,7 @@ def get_project_info(project_root: str) -> dict[str, Any]:
     home = os.environ.get("AGENT_TRACE_HOME") or os.path.expanduser("~/.agent-trace")
     home = os.path.abspath(os.path.expanduser(home))
 
-    project_id = _path_to_project_id(root)
+    project_id = _resolve_project_id(root)
     project_data_dir = os.path.join(home, "projects", project_id)
     cfg_path = os.path.join(project_data_dir, "project-config.json")
     cfg = _read_json(cfg_path)

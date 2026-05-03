@@ -1,12 +1,20 @@
 """Edge-case tests for attribution under non-linear git workflows.
 
-Covers the P0 fixes from ATTRIBUTION_EDGE_CASES.md:
+Covers the P0 + P1 fixes from ATTRIBUTION_EDGE_CASES.md:
+  P0:
   * Cherry-pick onto a different parent (T3) — global hash-index fallback
     recovers attribution from the source commit's ledger.
   * Revert (T12) — re-added lines attribute back to the original AI trace.
   * Stash-style different-parent edits (T17) — global trace pool covers it.
   * Post-rewrite re-attaches git notes onto the new SHA (T5 / T16).
   * Empty ledger no longer produces a stub note (T23).
+  P1:
+  * Merge with conflict-resolution AI line (T8) — merge-resolution lines
+    attribute to traces from any parent.
+  * Octopus merge (T9) — third-parent traces are accepted.
+  * Clean merge (T7 regression) — empty merge ledger, no false positives.
+  * Repo move preserves attribution via the .git anchor (T14).
+  * Worktree shares project_id with main repo (T15).
 """
 
 from __future__ import annotations
@@ -418,6 +426,382 @@ class TestEmptyLedgerSkipsNote(unittest.TestCase):
                     git_notes.attach_note_after_ledger(str(repo), empty_ledger),
                 )
                 self.assertIsNone(git_notes.read_note(sha, str(repo)))
+            finally:
+                os.environ.pop("AGENT_TRACE_HOME", None)
+
+
+class TestMergeResolutionAttribution(unittest.TestCase):
+    """T8: a line introduced during merge conflict resolution should attribute
+    to the AI trace active at that moment. T7: a clean merge introduces no
+    new content, so the merge commit gets no ledger (no false positives)."""
+
+    def test_clean_merge_produces_no_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as repo_dir:
+            os.environ["AGENT_TRACE_HOME"] = home
+            try:
+                repo = Path(repo_dir)
+                _init_repo(repo)
+                (repo / "a.txt").write_text("alpha\n")
+                _commit_all(repo, "alpha")
+
+                _run("git", "checkout", "-b", "feat", cwd=repo)
+                (repo / "b.txt").write_text("beta\n")
+                _commit_all(repo, "beta on feat")
+
+                _run("git", "checkout", "main", cwd=repo)
+                (repo / "c.txt").write_text("gamma\n")
+                _commit_all(repo, "gamma on main")
+
+                _run("git", "merge", "--no-ff", "-m", "merge feat", "feat", cwd=repo)
+
+                # Merge introduces no new content — only files from each
+                # parent. The merge commit's ledger should be empty (None).
+                ledger = build_attribution_ledger(str(repo))
+                self.assertIsNone(ledger)
+            finally:
+                os.environ.pop("AGENT_TRACE_HOME", None)
+
+    def test_merge_resolution_line_attributes_to_resolution_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as repo_dir:
+            os.environ["AGENT_TRACE_HOME"] = home
+            try:
+                repo = Path(repo_dir)
+                _init_repo(repo)
+
+                # Common ancestor with conflict.py.
+                (repo / "conflict.py").write_text("base\n")
+                _commit_all(repo, "base")
+
+                # main edits conflict.py.
+                _run("git", "checkout", "-b", "feat", cwd=repo)
+                (repo / "conflict.py").write_text("feat-version\n")
+                _commit_all(repo, "feat edit")
+
+                _run("git", "checkout", "main", cwd=repo)
+                (repo / "conflict.py").write_text("main-version\n")
+                _commit_all(repo, "main edit")
+
+                # Trigger a conflict.
+                r = subprocess.run(
+                    ["git", "merge", "--no-commit", "--no-ff", "feat"],
+                    cwd=repo, capture_output=True, text=True,
+                )
+                self.assertNotEqual(r.returncode, 0, "expected conflict")
+
+                # Record an AI trace for the resolution line. Its
+                # vcs.revision is HEAD of main at merge start (= the first
+                # parent of the eventual merge commit).
+                first_parent = _run(
+                    "git", "rev-parse", "HEAD", cwd=repo,
+                ).stdout.strip()
+                resolution_lines = ["RESOLVED_BY_AI", "second_resolution_line"]
+                _write_trace(
+                    repo,
+                    trace_id="trace-merge-fix",
+                    parent_sha=first_parent,
+                    file_path="conflict.py",
+                    lines=resolution_lines,
+                )
+
+                (repo / "conflict.py").write_text(
+                    "\n".join(resolution_lines) + "\n",
+                )
+                _run("git", "add", "conflict.py", cwd=repo)
+                _run("git", "commit", "-m", "merge: resolve via AI", cwd=repo)
+
+                ledger = build_attribution_ledger(str(repo))
+                self.assertIsNotNone(ledger)
+                self.assertIn("conflict.py", ledger["files"])
+                segs = ledger["files"]["conflict.py"]["line_attributions"]
+                trace_ids = {s["trace_id"] for s in segs}
+                self.assertIn("trace-merge-fix", trace_ids)
+                self.assertEqual(
+                    ledger.get("derived_from", {}).get("kind"), "merge",
+                )
+                self.assertEqual(
+                    len(ledger["derived_from"]["parents"]), 2,
+                )
+            finally:
+                os.environ.pop("AGENT_TRACE_HOME", None)
+
+    def test_octopus_merge_third_parent_trace_is_eligible(self) -> None:
+        """T9: in an octopus merge, traces from parent #3 are accepted by
+        the multi-parent staging-window filter."""
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as repo_dir:
+            os.environ["AGENT_TRACE_HOME"] = home
+            try:
+                repo = Path(repo_dir)
+                _init_repo(repo)
+                (repo / "seed.txt").write_text("seed\n")
+                base = _commit_all(repo, "seed")
+
+                # Three parallel branches, each adding a distinct file.
+                # All branch off `base` and don't conflict.
+                _run("git", "checkout", "-b", "f1", cwd=repo)
+                (repo / "f1.txt").write_text("one\n")
+                _commit_all(repo, "f1")
+                p1 = _run("git", "rev-parse", "HEAD", cwd=repo).stdout.strip()
+
+                _run("git", "checkout", base, "-b", "f2", cwd=repo)
+                (repo / "f2.txt").write_text("two\n")
+                _commit_all(repo, "f2")
+
+                _run("git", "checkout", base, "-b", "f3", cwd=repo)
+                (repo / "f3.txt").write_text("three\n")
+                _commit_all(repo, "f3")
+                p3 = _run("git", "rev-parse", "HEAD", cwd=repo).stdout.strip()
+
+                # Octopus merge from f1's perspective.
+                _run("git", "checkout", "f1", cwd=repo)
+                _run(
+                    "git", "merge", "--no-ff", "-m", "octopus", "f2", "f3",
+                    cwd=repo,
+                )
+
+                # Merge commits in this layout introduce nothing new (each
+                # parent contributed disjoint files), so the ledger is None.
+                # We still verify the candidate-trace filter accepts a trace
+                # claiming p3 — that's the multi-parent eligibility we care
+                # about. Use the lower-level filter directly.
+                from agent_trace.ledger import _find_candidate_traces
+
+                _write_trace(
+                    repo,
+                    trace_id="trace-third-parent",
+                    parent_sha=p3,
+                    file_path="x.py",
+                    lines=["x"],
+                )
+
+                head = _run(
+                    "git", "rev-parse", "HEAD", cwd=repo,
+                ).stdout.strip()
+                committed_at = _run(
+                    "git", "log", "-1", "--format=%aI", cwd=repo,
+                ).stdout.strip()
+                parents_out = _run(
+                    "git", "rev-list", "--parents", "-n", "1", "HEAD",
+                    cwd=repo,
+                ).stdout.strip()
+                parent_shas = parents_out.split()[1:]
+                self.assertEqual(len(parent_shas), 3)
+                parent_tuples: list[tuple[str, str | None]] = []
+                for psha in parent_shas:
+                    pct = _run(
+                        "git", "log", "-1", "--format=%aI", psha, cwd=repo,
+                    ).stdout.strip()
+                    parent_tuples.append((psha, pct))
+
+                cands = _find_candidate_traces(
+                    str(repo), parent_tuples, committed_at,
+                )
+                ids = {t["id"] for t in cands}
+                self.assertIn("trace-third-parent", ids)
+            finally:
+                os.environ.pop("AGENT_TRACE_HOME", None)
+
+
+class TestAmendWithTreeChangeRebuild(unittest.TestCase):
+    """T6: ``git commit --amend`` that changes the tree (adds, removes, or
+    modifies lines) must rebuild the ledger from the new commit's diff.
+    Without §5.3, post-rewrite would just remap the SHA and the ledger's
+    line numbers / hashes would be stale wrt the amended tree."""
+
+    def test_amend_with_added_line_rebuilds_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as repo_dir:
+            os.environ["AGENT_TRACE_HOME"] = home
+            try:
+                repo = Path(repo_dir)
+                _init_repo(repo)
+                (repo / "seed.txt").write_text("seed\n")
+                p0 = _commit_all(repo, "seed")
+
+                # Original commit: AI authored two lines.
+                first_lines = ["AI_FIRST", "AI_SECOND"]
+                _write_trace(
+                    repo,
+                    trace_id="trace-orig",
+                    parent_sha=p0,
+                    file_path="x.py",
+                    lines=first_lines,
+                )
+                (repo / "x.py").write_text("\n".join(first_lines) + "\n")
+                old_sha = _commit_all(repo, "ai code")
+
+                ledger = build_attribution_ledger(str(repo))
+                self.assertIsNotNone(ledger)
+                from agent_trace.ledger import store_ledger_local
+
+                store_ledger_local(ledger, str(repo))
+
+                # Amend: append a third AI line. Trace it under the same
+                # parent (post-amend HEAD's parent is still p0).
+                amended_lines = first_lines + ["AI_THIRD"]
+                _write_trace(
+                    repo,
+                    trace_id="trace-amended",
+                    parent_sha=p0,
+                    file_path="x.py",
+                    lines=["AI_THIRD"],
+                    edit_sequence=2,
+                )
+                (repo / "x.py").write_text("\n".join(amended_lines) + "\n")
+                _run("git", "add", "x.py", cwd=repo)
+                _run("git", "commit", "--amend", "--no-edit", cwd=repo)
+                new_sha = _run(
+                    "git", "rev-parse", "HEAD", cwd=repo,
+                ).stdout.strip()
+                self.assertNotEqual(old_sha, new_sha)
+
+                # Drive post-rewrite as git would.
+                from io import StringIO
+
+                with mock.patch("sys.stdin", StringIO(f"{old_sha} {new_sha}\n")):
+                    n = rewrite_ledgers(str(repo))
+                self.assertGreaterEqual(n, 1)
+
+                # Ledger now points at new_sha and includes line 3 (the
+                # appended AI line) attributed to trace-amended.
+                ledgers = load_local_ledgers(str(repo))
+                self.assertIn(new_sha, ledgers)
+                self.assertNotIn(old_sha, ledgers)
+                segs = ledgers[new_sha]["files"]["x.py"]["line_attributions"]
+                # Flatten attributed line numbers across all segments.
+                attributed_lines: set[int] = set()
+                seg_trace_ids: set[str] = set()
+                for s in segs:
+                    seg_trace_ids.add(s["trace_id"])
+                    for ev in s.get("evidence", []):
+                        attributed_lines.add(ev["line"])
+                self.assertEqual(attributed_lines, {1, 2, 3})
+                self.assertIn("trace-orig", seg_trace_ids)
+                self.assertIn("trace-amended", seg_trace_ids)
+            finally:
+                os.environ.pop("AGENT_TRACE_HOME", None)
+
+    def test_amend_without_tree_change_keeps_ledger_intact(self) -> None:
+        """Reword-only amend (no tree change) just remaps the SHA — no
+        rebuild needed. Used as a regression check that the new code
+        doesn't unnecessarily rebuild on every amend."""
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as repo_dir:
+            os.environ["AGENT_TRACE_HOME"] = home
+            try:
+                repo = Path(repo_dir)
+                _init_repo(repo)
+                (repo / "seed.txt").write_text("seed\n")
+                p0 = _commit_all(repo, "seed")
+
+                ai_lines = ["AI_LINE_X", "AI_LINE_Y"]
+                _write_trace(
+                    repo,
+                    trace_id="trace-rw",
+                    parent_sha=p0,
+                    file_path="x.py",
+                    lines=ai_lines,
+                )
+                (repo / "x.py").write_text("\n".join(ai_lines) + "\n")
+                old_sha = _commit_all(repo, "original message")
+                ledger = build_attribution_ledger(str(repo))
+                from agent_trace.ledger import store_ledger_local
+
+                store_ledger_local(ledger, str(repo))
+
+                # Reword-only amend (no tree change).
+                _run(
+                    "git", "commit", "--amend", "-m", "reworded message", cwd=repo,
+                )
+                new_sha = _run(
+                    "git", "rev-parse", "HEAD", cwd=repo,
+                ).stdout.strip()
+
+                from io import StringIO
+
+                with mock.patch("sys.stdin", StringIO(f"{old_sha} {new_sha}\n")):
+                    rewrite_ledgers(str(repo))
+
+                ledgers = load_local_ledgers(str(repo))
+                self.assertIn(new_sha, ledgers)
+                # The original trace_id is preserved (no rebuild happened).
+                tids = set(ledgers[new_sha]["trace_ids"])
+                self.assertIn("trace-rw", tids)
+            finally:
+                os.environ.pop("AGENT_TRACE_HOME", None)
+
+
+class TestStableProjectIdAnchor(unittest.TestCase):
+    """T14 / T15: project_id is anchored to .git/agent-trace-id, so a repo
+    rename and a worktree both resolve to the same id (and therefore the
+    same data directory)."""
+
+    def test_repo_rename_preserves_project_id(self) -> None:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as parent:
+            os.environ["AGENT_TRACE_HOME"] = home
+            try:
+                from agent_trace.storage import resolve_project_id
+
+                a = Path(parent) / "before"
+                a.mkdir()
+                _init_repo(a)
+                (a / "f.txt").write_text("x\n")
+                _commit_all(a, "init")
+
+                pid_a = resolve_project_id(str(a), create=True)
+                self.assertIsNotNone(pid_a)
+                self.assertTrue(pid_a.startswith("at-"))
+
+                # Move (rename) the repo.
+                b = Path(parent) / "after"
+                a.rename(b)
+
+                pid_b = resolve_project_id(str(b), create=False)
+                self.assertEqual(pid_a, pid_b)
+            finally:
+                os.environ.pop("AGENT_TRACE_HOME", None)
+
+    def test_worktree_shares_project_id(self) -> None:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as parent:
+            os.environ["AGENT_TRACE_HOME"] = home
+            try:
+                from agent_trace.storage import resolve_project_id
+
+                main = Path(parent) / "main"
+                main.mkdir()
+                _init_repo(main)
+                (main / "f.txt").write_text("x\n")
+                _commit_all(main, "init")
+                pid_main = resolve_project_id(str(main), create=True)
+
+                _run("git", "checkout", "-b", "feature", cwd=main)
+                _run("git", "checkout", "main", cwd=main)
+                wt = Path(parent) / "wt"
+                _run(
+                    "git", "worktree", "add", str(wt), "feature", cwd=main,
+                )
+
+                pid_wt = resolve_project_id(str(wt), create=False)
+                self.assertEqual(pid_main, pid_wt)
+            finally:
+                os.environ.pop("AGENT_TRACE_HOME", None)
+
+    def test_anchor_id_format(self) -> None:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as repo_dir:
+            os.environ["AGENT_TRACE_HOME"] = home
+            try:
+                from agent_trace.storage import resolve_project_id
+
+                repo = Path(repo_dir)
+                _init_repo(repo)
+                (repo / "f.txt").write_text("x\n")
+                _commit_all(repo, "init")
+                pid = resolve_project_id(str(repo), create=True)
+                self.assertIsNotNone(pid)
+                # at- + 32 hex chars
+                self.assertEqual(len(pid), 3 + 32)
+                int(pid[3:], 16)  # raises if not hex
+                # Anchor written to .git/agent-trace-id.
+                anchor = repo / ".git" / "agent-trace-id"
+                self.assertTrue(anchor.is_file())
+                self.assertEqual(anchor.read_text().strip(), pid)
             finally:
                 os.environ.pop("AGENT_TRACE_HOME", None)
 

@@ -2,11 +2,20 @@
 Post-rewrite ledger remapping — updates ledger commit SHAs after rebase/amend.
 
 Git's ``post-rewrite`` hook provides ``old_sha new_sha`` lines on stdin.
-This module reads those mappings, updates ``ledgers.jsonl`` entries, and
-re-attaches the corresponding ``refs/notes/agent-trace`` notes onto the new
-commit SHAs (removing the orphaned old ones). Without the note step the
-notes ref still points at unreachable commits after rebase / amend, so
-attribution doesn't travel with ``git push`` for rewritten commits.
+For each pair we:
+
+  1. Remap the ledger row's ``commit_sha`` (and ``parent_sha`` if it was
+     itself rewritten).
+  2. Compare ``diff_signature(old)`` against ``diff_signature(new)``. If
+     they differ — i.e., the rewrite changed the tree (amend with edits,
+     rebase with conflict resolution, ``rebase --exec`` that mutates
+     content) — drop the remapped row and rebuild the ledger from the new
+     commit. The line numbers and hashes in the old ledger are stale; the
+     deterministic answer for the new commit comes from re-running the
+     builder against its actual diff.
+  3. Move the corresponding ``refs/notes/agent-trace`` note onto the new
+     SHA (removing the orphaned old one). Without this step notes silently
+     orphan on unreachable commits after rebase / amend.
 
 No external dependencies — stdlib only.
 """
@@ -43,12 +52,10 @@ def _remove_note(commit_sha: str, repo_dir: str) -> None:
 
 
 def rewrite_ledgers(project_dir: str | None = None) -> int:
-    """After rebase/amend, remap old commit SHAs to new ones in ledgers and
-    move the corresponding git notes to the new SHAs.
+    """After rebase/amend, remap (or rebuild) ledgers and move notes.
 
     Reads old→new SHA mapping from stdin (git provides this in post-rewrite).
-    Updates ``ledgers.jsonl`` entries and re-attaches notes. Returns count
-    of remapped ledgers.
+    Returns count of ledger rows touched (remapped + rebuilt + dropped).
     """
     if project_dir is None:
         import os
@@ -66,6 +73,7 @@ def rewrite_ledgers(project_dir: str | None = None) -> int:
     if not sha_map:
         return 0
 
+    from .ledger import build_attribution_ledger, diff_signature
     from .storage import get_ledgers_path, resolve_project_id
 
     pid = resolve_project_id(project_dir, create=False)
@@ -87,23 +95,58 @@ def rewrite_ledgers(project_dir: str | None = None) -> int:
     except OSError:
         return 0
 
-    remapped = 0
-    moved_ledgers: list[dict] = []
-    old_shas_to_clear: list[str] = []
+    # First pass: SHA remap (commit_sha + parent_sha) and bookkeep which
+    # rows moved so we can later decide rebuild-vs-keep.
+    touched = 0
+    moved: list[tuple[str, str, dict]] = []  # (old_sha, new_sha, ledger)
     for ledger in ledgers:
         old_sha = ledger.get("commit_sha", "")
         if old_sha in sha_map:
             new_sha = sha_map[old_sha]
             ledger["commit_sha"] = new_sha
-            remapped += 1
-            moved_ledgers.append(ledger)
-            old_shas_to_clear.append(old_sha)
+            touched += 1
+            moved.append((old_sha, new_sha, ledger))
         old_parent = ledger.get("parent_sha", "")
         if old_parent and old_parent in sha_map:
             ledger["parent_sha"] = sha_map[old_parent]
 
-    if remapped == 0:
+    if touched == 0:
         return 0
+
+    # Second pass: rebuild rows whose tree-diff changed.
+    # `ledgers` may be mutated in-place (rebuild) or have entries removed
+    # (rebuild returned None — the rewrite removed all AI lines).
+    rebuilt_old_shas: set[str] = set()
+    rebuild_failures: set[str] = set()
+    rebuilt_replacements: dict[str, dict | None] = {}  # new_sha -> rebuilt ledger or None
+    for old_sha, new_sha, _ in moved:
+        old_sig = diff_signature(old_sha, project_dir)
+        new_sig = diff_signature(new_sha, project_dir)
+        if old_sig is None or new_sig is None or old_sig == new_sig:
+            continue
+        # Tree changed — rebuild deterministically against the new commit.
+        try:
+            new_ledger = build_attribution_ledger(project_dir, commit_ref=new_sha)
+        except Exception:
+            rebuild_failures.add(old_sha)
+            continue
+        rebuilt_old_shas.add(old_sha)
+        rebuilt_replacements[new_sha] = new_ledger
+
+    # Rewrite the in-memory list with rebuilt entries swapped in (or dropped
+    # when the rebuild produced None).
+    if rebuilt_replacements:
+        new_list: list[dict] = []
+        for ledger in ledgers:
+            sha = ledger.get("commit_sha", "")
+            if sha in rebuilt_replacements:
+                rep = rebuilt_replacements.pop(sha)
+                if rep is not None:
+                    new_list.append(rep)
+                # If rep is None, the rewrite removed all AI lines; drop the row.
+            else:
+                new_list.append(ledger)
+        ledgers = new_list
 
     try:
         with open(ledgers_path, "w") as f:
@@ -112,16 +155,22 @@ def rewrite_ledgers(project_dir: str | None = None) -> int:
     except OSError:
         return 0
 
-    # Re-attach notes onto new SHAs and remove the orphaned old ones.
+    # Third pass: notes. Always drop the old note. Attach a fresh note for
+    # rebuilt ledgers; for purely-remapped ones, attach using the (already
+    # remapped) ledger. If the rebuild dropped the row, no note is attached.
     try:
         from .git_notes import attach_note_after_ledger
 
-        for old_sha in old_shas_to_clear:
+        # Build a quick lookup of current rows by commit_sha (post-rebuild).
+        by_sha = {l.get("commit_sha", ""): l for l in ledgers}
+
+        for old_sha, new_sha, _ in moved:
             _remove_note(old_sha, project_dir)
-        for ledger in moved_ledgers:
-            attach_note_after_ledger(project_dir, ledger)
+            ledger = by_sha.get(new_sha)
+            if ledger is not None:
+                attach_note_after_ledger(project_dir, ledger)
     except Exception:
         # Don't let note bookkeeping fail the post-rewrite hook.
         pass
 
-    return remapped
+    return touched
