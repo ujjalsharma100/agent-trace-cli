@@ -31,6 +31,21 @@
     "files": {
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/fileAttribution" }
+    },
+    "derived_from": {
+      "description": "Set when the commit was produced by cherry-pick / revert / merge — used to explain why fallback attribution kicked in.",
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "enum": ["cherry-pick", "revert", "merge"] },
+        "source_sha": { "type": "string" },
+        "parents": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "used_fallback": {
+      "description": "True when one or more lines were attributed via the global hash-index fallback rather than the staging-window pool.",
+      "type": "boolean"
     }
   },
   "$defs": {

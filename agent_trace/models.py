@@ -273,6 +273,8 @@ class Ledger:
     trace_ids: list[str]
     files: dict[str, FileLedger]
     parent_committed_at: str | None = None
+    derived_from: dict[str, Any] | None = None
+    used_fallback: bool = False
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Ledger:
@@ -282,6 +284,7 @@ class Ledger:
             for path, fv in raw_files.items():
                 if isinstance(fv, dict):
                     files[str(path)] = FileLedger.from_dict(fv)
+        df = d.get("derived_from")
         return cls(
             version=str(d["version"]),
             commit_sha=str(d["commit_sha"]),
@@ -291,6 +294,8 @@ class Ledger:
             created_at=str(d["created_at"]),
             trace_ids=[str(x) for x in d.get("trace_ids", [])],
             files=files,
+            derived_from=df if isinstance(df, dict) else None,
+            used_fallback=bool(d.get("used_fallback", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -305,6 +310,10 @@ class Ledger:
         }
         if self.parent_committed_at is not None:
             out["parent_committed_at"] = self.parent_committed_at
+        if self.derived_from is not None:
+            out["derived_from"] = dict(self.derived_from)
+        if self.used_fallback:
+            out["used_fallback"] = True
         return out
 
 

@@ -280,8 +280,15 @@ def load_traces_for_ids(project_dir: str, trace_ids: list[str]) -> list[Trace]:
 
 
 def attach_note_after_ledger(project_dir: str, ledger: dict[str, Any]) -> bool:
-    """After a ledger is stored: build and attach a git note per project ``notes.*`` config."""
+    """After a ledger is stored: build and attach a git note per project ``notes.*`` config.
+
+    Skips attachment when the ledger has zero AI lines — there's nothing
+    worth carrying on the commit, and an empty note just pollutes
+    ``git log --show-notes``.
+    """
     try:
+        if _stats_from_ledger(_ledger_to_dict(ledger)).get("ai_lines", 0) <= 0:
+            return False
         nc = _notes_config(project_dir)
         if nc.get("enabled") is False:
             return False

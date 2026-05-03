@@ -8,15 +8,25 @@ Design:
     NO_ATTRIBUTION (we never claim "this was a human" — we only ever assert
     "this matches an AI trace").
   * Attribution is content-driven only: a line is AI if its SHA-256 line
-    hash matches a hash in a candidate trace AND the verbatim content also
-    matches (defence against trivial collisions).
-  * Range-claim heuristics are gone. Position-based "MIXED" inference was a
-    source of false positives (a user-inserted line falling inside the AI's
-    original range got marked MIXED with the AI's conversation).
-  * Staging window scoping: candidate traces are restricted to those
-    recorded *after the parent commit's author time*. Older traces never
-    participate, even if their content hashes happen to collide.
-  * Each AI segment carries `evidence` — the matched per-line hash + the
+    hash matches a hash in a candidate trace.
+  * Two-pass matching:
+      1. Primary pass — staging-window-scoped candidates. A trace must have
+         ``vcs.revision == parent_sha`` and ``timestamp`` inside the staging
+         window. This is the strict, original path; cheap and unambiguous.
+      2. Global fallback — for lines still unmatched after the primary pass,
+         match against the union of all local traces and all local ledger
+         evidence (per-line hashes from previously-built ledgers). This
+         recovers attribution under cherry-pick, revert, squash-merge, stash
+         pop, and other operations where ``parent_sha`` does not match the
+         ``vcs.revision`` recorded in the original trace. Hash equality
+         (SHA-256) is the sole criterion — still deterministic.
+  * Operation detection: at commit time we look at the commit message for
+    cherry-pick (``-x`` trailer) and revert (default message body) signals,
+    and at parent count for merges. When detected, the source commit's
+    ledger (if reachable locally) is folded into the global pool so its
+    hashes are first-class candidates. Recorded as ``derived_from`` on the
+    ledger for explainability.
+  * Each AI segment carries ``evidence`` — the matched per-line hash + the
     verbatim line content — so attribution can be audited manually.
 
 No external dependencies — stdlib only.
@@ -261,6 +271,182 @@ def list_traces_in_staging_window(
     )
 
 
+def _load_all_traces(project_dir: str) -> list[dict[str, Any]]:
+    """Load every local trace, with no parent / time filtering.
+
+    Used to seed the global fallback hash index. The primary
+    parent-filtered pass runs first; only lines it didn't match are
+    rechecked against this pool, so the wider scope cannot override
+    correct attributions — it can only fill gaps.
+    """
+    from .storage import get_traces_path, resolve_project_id
+
+    pid = resolve_project_id(project_dir, create=False)
+    if not pid:
+        return []
+    traces_path = get_traces_path(pid)
+    if not traces_path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        for raw in traces_path.read_text().splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                out.append(json.loads(raw))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        pass
+    return out
+
+
+# -------------------------------------------------------------------
+# Derived-commit detection (cherry-pick, revert, merge)
+# -------------------------------------------------------------------
+
+_CHERRY_PICK_TRAILER_RE = re.compile(
+    r"\(cherry picked from commit ([0-9a-f]{7,40})\)", re.IGNORECASE
+)
+_REVERT_BODY_RE = re.compile(
+    r"^This reverts commit ([0-9a-f]{7,40})\.", re.MULTILINE
+)
+
+
+def _detect_derived_from(
+    commit_sha: str, parents: list[str], project_dir: str,
+) -> dict[str, Any] | None:
+    """Inspect HEAD's commit message and parent count to determine whether
+    this commit was produced by cherry-pick (``-x``), revert, or merge.
+
+    Returns a dict like ``{"kind": "cherry-pick", "source_sha": "abcd..."}``
+    or ``None`` if the commit looks ordinary. ``source_sha`` is resolved to
+    a full SHA when possible.
+    """
+    if len(parents) > 1:
+        return {"kind": "merge", "parents": parents}
+
+    msg = _git_raw("log", "-1", "--format=%B", commit_sha, cwd=project_dir) or ""
+
+    m = _CHERRY_PICK_TRAILER_RE.search(msg)
+    if m:
+        src = m.group(1)
+        full = _git("rev-parse", "--verify", src, cwd=project_dir) or src
+        return {"kind": "cherry-pick", "source_sha": full}
+
+    m = _REVERT_BODY_RE.search(msg)
+    if m:
+        src = m.group(1)
+        full = _git("rev-parse", "--verify", src, cwd=project_dir) or src
+        return {"kind": "revert", "source_sha": full}
+
+    return None
+
+
+def _ledger_evidence_to_index_entries(
+    ledger: dict[str, Any],
+    file_path: str,
+    alternate_paths: list[str] | None,
+    cross_file: bool,
+) -> dict[str, dict[str, Any]]:
+    """Turn a previously-built ledger's per-line evidence into a hash index
+    entry shape (the same shape :func:`_build_trace_hash_index` produces).
+
+    The ledger's segments already carry ``trace_id``, ``model_id``, and
+    ``conversation_url``; ``evidence`` carries the per-line hashes. There
+    is no ``edit_sequence`` on the ledger side — entries built from ledger
+    evidence are tagged with ``edit_sequence=None`` so trace-derived
+    entries (which do carry edit sequence) win on tie-break.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    files = ledger.get("files") or {}
+    if not isinstance(files, dict):
+        return out
+    for fp, fl in files.items():
+        if not isinstance(fl, dict):
+            continue
+        if not cross_file and not _trace_file_matches(fp, file_path, alternate_paths):
+            continue
+        for seg in fl.get("line_attributions", []) or []:
+            if not isinstance(seg, dict):
+                continue
+            if str(seg.get("type", "")).lower() != "ai":
+                continue
+            tid = seg.get("trace_id") or ""
+            entry = {
+                "trace_id": tid,
+                "model_id": seg.get("model_id"),
+                "tool": None,
+                "conversation_url": seg.get("conversation_url"),
+                "edit_sequence": None,
+            }
+            for ev in seg.get("evidence", []) or []:
+                if not isinstance(ev, dict):
+                    continue
+                h = ev.get("hash") or ""
+                if not h:
+                    continue
+                # First seen wins; primary trace pool is merged on top later
+                # so trace edit_sequence still beats ledger evidence.
+                if h not in out:
+                    out[h] = entry
+    return out
+
+
+def _build_global_hash_index(
+    project_dir: str,
+    file_path: str,
+    alternate_paths: list[str] | None,
+    *,
+    derived_from: dict[str, Any] | None,
+    cross_file: bool,
+) -> dict[str, dict[str, Any]]:
+    """Build the global fallback hash index.
+
+    Sources, in priority order (later sources fill gaps left by earlier ones):
+      1. All local traces (file-scoped or cross-file per ``cross_file`` flag).
+      2. All local ledger evidence (every previously-built ledger's per-line
+         hashes), so cherry-picks / reverts / squashes find attribution
+         even when the original traces were pruned.
+      3. If a derived commit was detected, the source commit's ledger is
+         loaded explicitly — redundant when (2) already includes it, but
+         cheap and ensures the source is in scope when ledger evidence is
+         skipped (e.g. fresh clone with notes only).
+
+    Trace-derived entries beat ledger-derived entries on hash collision
+    because they carry ``edit_sequence`` (latest edit wins).
+    """
+    all_traces = _load_all_traces(project_dir)
+    index = _build_trace_hash_index(
+        all_traces, file_path, alternate_paths=alternate_paths, cross_file=cross_file,
+    )
+
+    # Add ledger-evidence entries (don't overwrite trace entries).
+    ledgers = load_local_ledgers(project_dir)
+    for sha, ledger in ledgers.items():
+        ev_index = _ledger_evidence_to_index_entries(
+            ledger, file_path, alternate_paths, cross_file,
+        )
+        for h, entry in ev_index.items():
+            if h not in index:
+                index[h] = entry
+
+    # Explicitly include the source commit of a cherry-pick / revert.
+    if derived_from and derived_from.get("kind") in ("cherry-pick", "revert"):
+        src_sha = str(derived_from.get("source_sha") or "")
+        src_ledger = ledgers.get(src_sha)
+        if src_ledger:
+            ev_index = _ledger_evidence_to_index_entries(
+                src_ledger, file_path, alternate_paths, cross_file,
+            )
+            for h, entry in ev_index.items():
+                if h not in index:
+                    index[h] = entry
+
+    return index
+
+
 # -------------------------------------------------------------------
 # Trace hash index (with content)
 # -------------------------------------------------------------------
@@ -358,27 +544,32 @@ def _build_trace_hash_index(
 def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] | None:
     """Build a per-line AI-attribution ledger for the current HEAD commit.
 
-    Returns the ledger dict, or None if there is nothing changed or no
-    attributable lines.
+    Returns the ledger dict, or None if there is nothing changed.
 
     Algorithm:
       1. Resolve commit + parent SHAs and their author times.
-      2. Find candidate traces in the staging window
+      2. Detect derived-commit kind (cherry-pick / revert / merge) from
+         commit message + parent count.
+      3. Find primary candidate traces in the staging window
          (``parent_committed_at`` < trace.timestamp ≤ committed_at + 10min,
          and ``vcs.revision`` matches parent if present).
-      3. For each changed file:
+      4. For each changed file:
          a. Read committed content; compute per-line hash + content.
-         b. Build a hash index over candidate traces (file-scoped first;
-            cross-file fallback only if file-scoped is empty).
-         c. For each line in the diff's added range:
-              * Skip trivial lines (empty/whitespace) — they're handled in
-                a fill pass after.
-              * If the line's full SHA-256 hash matches an index entry →
-                AI of that trace.
-              * Otherwise: do not record (implicit NO_ATTRIBUTION).
-         d. Fill pass: a trivial line attributed to AI iff both immediate
+         b. Build a primary hash index over candidate traces (file-scoped
+            first; cross-file fallback only if file-scoped is empty).
+         c. PRIMARY pass — for each non-trivial added line, record AI iff
+            its line hash matches the primary index. Trivial lines are
+            deferred to the fill pass.
+         d. FALLBACK pass — for non-trivial lines still unmatched after
+            (c), build a global hash index from all local traces and all
+            local ledger evidence (file-scoped first; cross-file fallback
+            if empty), and try again. Recovers cherry-pick / revert /
+            squash / stash-pop attribution. Hash equality only — still
+            deterministic.
+         e. Fill pass: a trivial line attributed to AI iff both immediate
             non-trivial neighbours are AI of the same trace.
-         e. Merge contiguous same-trace lines into segments with evidence.
+         f. Merge contiguous same-trace lines into segments with evidence.
+      5. If anything was attributed, store a ledger; otherwise no ledger.
     """
     if project_dir is None:
         import os
@@ -394,6 +585,11 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
         _git("log", "-1", "--format=%aI", parent_sha, cwd=project_dir)
         if parent_sha else None
     )
+
+    parents_out = _git("rev-list", "--parents", "-n", "1", "HEAD", cwd=project_dir) or ""
+    parent_list = parents_out.split()[1:] if parents_out else []
+
+    derived_from = _detect_derived_from(commit_sha, parent_list, project_dir)
 
     if parent_sha:
         changed_out = _git("diff", "--name-only", "HEAD^", "HEAD", cwd=project_dir)
@@ -419,6 +615,7 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
 
     used_trace_ids: set[str] = set()
     files_attributions: dict[str, dict[str, Any]] = {}
+    used_fallback = False
 
     for file_path in changed_files:
         alt_paths: list[str] | None = None
@@ -453,22 +650,20 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
 
         file_lines = _compute_file_lines(file_content)
 
-        # File-scoped index first
-        hash_index = _build_trace_hash_index(
+        # Primary index from staging-window candidates.
+        primary_index = _build_trace_hash_index(
             candidates, file_path, alternate_paths=alt_paths,
         )
-        # Cross-file fallback (still inside staging window)
-        if not hash_index:
-            hash_index = _build_trace_hash_index(
+        if not primary_index:
+            primary_index = _build_trace_hash_index(
                 candidates, file_path, alternate_paths=alt_paths, cross_file=True,
             )
 
-        # Per-line attribution
-        # line_attr[ln] = {"trace_id", "model_id", "conversation_url", "hash", "content"}  (only AI lines)
-        # trivial[ln] = True for empty/whitespace lines (handled in fill pass)
         line_attr: dict[int, dict[str, Any]] = {}
         trivial: set[int] = set()
+        unmatched: list[int] = []
 
+        # PRIMARY pass.
         for ln in sorted(changed_lines):
             if ln < 1 or ln > len(file_lines):
                 continue
@@ -477,11 +672,13 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
                 trivial.add(ln)
                 continue
             h = _line_hash(content)
-            entry = hash_index.get(h)
+            entry = primary_index.get(h)
             if entry is None:
+                unmatched.append(ln)
                 continue
             tid = entry.get("trace_id")
             if not tid:
+                unmatched.append(ln)
                 continue
             line_attr[ln] = {
                 "trace_id": tid,
@@ -492,7 +689,37 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
             }
             used_trace_ids.add(tid)
 
-        # Fill pass: trivial line is AI iff both neighbours are AI of same trace
+        # FALLBACK pass — only built if there are unmatched non-trivial lines.
+        if unmatched:
+            global_index = _build_global_hash_index(
+                project_dir, file_path, alt_paths,
+                derived_from=derived_from, cross_file=False,
+            )
+            if not global_index:
+                global_index = _build_global_hash_index(
+                    project_dir, file_path, alt_paths,
+                    derived_from=derived_from, cross_file=True,
+                )
+            for ln in unmatched:
+                content = file_lines[ln - 1]
+                h = _line_hash(content)
+                entry = global_index.get(h)
+                if entry is None:
+                    continue
+                tid = entry.get("trace_id")
+                if not tid:
+                    continue
+                line_attr[ln] = {
+                    "trace_id": tid,
+                    "model_id": entry.get("model_id"),
+                    "conversation_url": entry.get("conversation_url"),
+                    "hash": h,
+                    "content": content,
+                }
+                used_trace_ids.add(tid)
+                used_fallback = True
+
+        # Fill pass: trivial line is AI iff both neighbours are AI of same trace.
         for ln in sorted(trivial):
             prev = line_attr.get(ln - 1)
             nxt = line_attr.get(ln + 1)
@@ -513,12 +740,9 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
             files_attributions[file_path] = {"line_attributions": segments}
 
     if not files_attributions:
-        # Still produce a ledger record with empty files so the commit is
-        # known (no AI lines found). Useful for audit ("we ran, found nothing").
-        # But to keep storage tight, only emit when there's at least one trace
-        # in the staging window OR something attributable was attempted.
-        if not candidates:
-            return None
+        # Nothing attributable. Skip the empty-shell ledger entirely — a
+        # non-attributing commit doesn't need a row.
+        return None
 
     ledger: dict[str, Any] = {
         "version": "2.0",
@@ -530,6 +754,10 @@ def build_attribution_ledger(project_dir: str | None = None) -> dict[str, Any] |
         "trace_ids": sorted(used_trace_ids),
         "files": files_attributions,
     }
+    if derived_from:
+        ledger["derived_from"] = derived_from
+    if used_fallback:
+        ledger["used_fallback"] = True
 
     return ledger
 
