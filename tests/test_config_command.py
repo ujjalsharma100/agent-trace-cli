@@ -90,7 +90,7 @@ class TestConfigCommand(unittest.TestCase):
             cfg["notes"],
             {
                 "enabled": True,
-                "include_ledger": True,
+                "include_ledger": False,
                 "include_summary": True,
                 "include_prompts": True,
                 "all_session_conversations": False,

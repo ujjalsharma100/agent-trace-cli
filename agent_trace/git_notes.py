@@ -226,7 +226,7 @@ def project_notes_flags(project_dir: str) -> tuple[bool, bool, bool]:
     """Default ``(include_ledger, include_summary, include_prompts)`` from project config."""
     nc = _notes_config(project_dir)
     return (
-        bool(nc.get("include_ledger", True)),
+        bool(nc.get("include_ledger", False)),
         bool(nc.get("include_summary", False)),
         bool(nc.get("include_prompts", False)),
     )
@@ -285,7 +285,7 @@ def attach_note_after_ledger(project_dir: str, ledger: dict[str, Any]) -> bool:
         nc = _notes_config(project_dir)
         if nc.get("enabled") is False:
             return False
-        include_ledger = bool(nc.get("include_ledger", True))
+        include_ledger = bool(nc.get("include_ledger", False))
         include_summary = bool(nc.get("include_summary", False))
         include_prompts = bool(nc.get("include_prompts", False))
         include_asc = bool(nc.get("all_session_conversations", False))
@@ -328,7 +328,7 @@ def rebuild_notes_for_range(
     from .ledger import load_local_ledgers
 
     nc = _notes_config(project_dir)
-    il = include_ledger if include_ledger is not None else bool(nc.get("include_ledger", True))
+    il = include_ledger if include_ledger is not None else bool(nc.get("include_ledger", False))
     isum = include_summary if include_summary is not None else bool(nc.get("include_summary", False))
     ipr = include_prompts if include_prompts is not None else bool(nc.get("include_prompts", False))
     iasc = (
@@ -394,7 +394,7 @@ def backfill_notes(
     from .ledger import load_local_ledgers
 
     nc = _notes_config(project_dir)
-    il = include_ledger if include_ledger is not None else bool(nc.get("include_ledger", True))
+    il = include_ledger if include_ledger is not None else bool(nc.get("include_ledger", False))
     isum = include_summary if include_summary is not None else bool(nc.get("include_summary", False))
     ipr = include_prompts if include_prompts is not None else bool(nc.get("include_prompts", False))
     iasc = (

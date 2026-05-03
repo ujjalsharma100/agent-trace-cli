@@ -178,7 +178,7 @@ def cmd_init(_args):
     project_config: dict = {
         "notes": {
             "enabled": True,
-            "include_ledger": True,
+            "include_ledger": False,
             "include_summary": True,
             "include_prompts": True,
             "all_session_conversations": False,
@@ -194,8 +194,8 @@ def cmd_init(_args):
     print(f"  Project id:   {pid}")
     print(f"  Data dir:     {get_project_config_path(pid).parent if pid else '?'}")
 
-    # Git notes — defaults on, include all sections
-    print("  Git notes:    enabled (ledger + summary + prompts)")
+    # Git notes — defaults on; per-line ledger off unless configured
+    print("  Git notes:    enabled (summary + prompts; per-line ledger off by default)")
 
     notes_remote = "origin"
     notes_refspec_ok = False
@@ -533,7 +533,7 @@ def cmd_reset(_args):
     if notes_enabled:
         new_notes["include_ledger"] = _confirm(
             "Include per-line ledger in notes?",
-            default=bool(notes_cfg.get("include_ledger", True)),
+            default=bool(notes_cfg.get("include_ledger", False)),
         )
         new_notes["include_summary"] = _confirm(
             "Include summaries in notes?",
@@ -579,7 +579,7 @@ def cmd_reset(_args):
 
 _DEFAULT_NOTES_CONFIG = {
     "enabled": True,
-    "include_ledger": True,
+    "include_ledger": False,
     "include_summary": True,
     "include_prompts": True,
     "all_session_conversations": False,
@@ -747,7 +747,7 @@ def _interactive_reset_field(field: str) -> None:
     """Interactive reset flow: Enter accepts reset defaults."""
     bool_defaults = {
         "notes.enabled": True,
-        "notes.include-ledger": True,
+        "notes.include-ledger": False,
         "notes.include-summary": True,
         "notes.include-prompts": True,
         "notes.all-session-conversations": False,
@@ -766,7 +766,7 @@ def _interactive_reset_field(field: str) -> None:
         _pid, cfg = _project_config_or_exit()
         cfg["notes"] = {
             "enabled": _prompt_reset_bool("notes.enabled", True),
-            "include_ledger": _prompt_reset_bool("notes.include-ledger", True),
+            "include_ledger": _prompt_reset_bool("notes.include-ledger", False),
             "include_summary": _prompt_reset_bool("notes.include-summary", True),
             "include_prompts": _prompt_reset_bool("notes.include-prompts", True),
             "all_session_conversations": _prompt_reset_bool("notes.all-session-conversations", False),
