@@ -363,17 +363,6 @@
   
 </li>
       
-        <li class="md-nav__item">
-  <a href="#building-this-documentation-locally" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Building this documentation locally
-      
-    </span>
-  </a>
-  
-</li>
-      
     </ul>
   
 </nav>
@@ -1413,17 +1402,6 @@
   
 </li>
       
-        <li class="md-nav__item">
-  <a href="#building-this-documentation-locally" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Building this documentation locally
-      
-    </span>
-  </a>
-  
-</li>
-      
     </ul>
   
 </nav>
@@ -1514,17 +1492,6 @@
 <hr />
 <h2 id="specification-source">Specification &amp; source<a class="headerlink" href="#specification-source" title="Permanent link">&para;</a></h2>
 <p>The tool aligns with the public <strong><a href="https://agent-trace.dev/">Agent Trace</a></strong> specification. Source code lives in the <strong><a href="https://github.com/ujjalsharma100/agent-trace-cli">agent-trace-cli</a></strong> repository on GitHub.</p>
-<hr />
-<h2 id="building-this-documentation-locally">Building this documentation locally<a class="headerlink" href="#building-this-documentation-locally" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>agent-trace-cli
-python3<span class="w"> </span>-m<span class="w"> </span>venv<span class="w"> </span>.venv-docs<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">source</span><span class="w"> </span>.venv-docs/bin/activate
-pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>docs/requirements-docs.txt
-mkdocs<span class="w"> </span>serve
-</code></pre></div>
-<p>Open the URL printed in the terminal (usually <code>http://127.0.0.1:8000</code>). To emit static HTML for publishing:</p>
-<div class="highlight"><pre><span></span><code>mkdocs<span class="w"> </span>build
-</code></pre></div>
-<p>The output directory is <code>site/</code> by default.</p>
 
 
 
