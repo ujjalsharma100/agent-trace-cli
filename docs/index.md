@@ -44,21 +44,3 @@ This site is the **published user manual**: every command, flag, and configurati
 
 The tool aligns with the public **[Agent Trace](https://agent-trace.dev/)** specification. Source code lives in the **[agent-trace-cli](https://github.com/ujjalsharma100/agent-trace-cli)** repository on GitHub.
 
----
-
-## Building this documentation locally
-
-```bash
-cd agent-trace-cli
-python3 -m venv .venv-docs && source .venv-docs/bin/activate
-pip install -r docs/requirements-docs.txt
-mkdocs serve
-```
-
-Open the URL printed in the terminal (usually `http://127.0.0.1:8000`). To emit static HTML for publishing:
-
-```bash
-mkdocs build
-```
-
-The output directory is `site/` by default.
