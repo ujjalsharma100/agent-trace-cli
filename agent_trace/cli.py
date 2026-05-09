@@ -38,10 +38,13 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
+from pathlib import Path
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import urllib.error
@@ -72,7 +75,11 @@ from .hooks import (
     remove_global_hooks,
     setup_global_hooks,
 )
-from .hooks.git import configure_git_hooks, configure_git_notes_refspecs
+from .hooks.git import (
+    configure_git_hooks,
+    configure_git_notes_refspecs,
+    configure_git_post_rewrite_hook,
+)
 from .rules import add_rule, remove_rule, show_rules, list_available_rules, TOOL_CHOICES
 from .record import record_from_stdin
 from .rewrite import rewrite_ledgers
@@ -260,18 +267,44 @@ def _probe_remote_health(base_url: str) -> tuple[bool, str]:
     return False, last_err
 
 
-def cmd_doctor(_args):
-    """Report hook installation, config validity, remotes, and optional tools."""
+@dataclasses.dataclass
+class DoctorFixHints:
+    """Auto-fix opportunities detected during doctor (never includes unreachable remotes)."""
+
+    chmod_home: bool = False
+    chmod_global_config: Path | None = None
+    init_needed: bool = False
+    global_hooks_needed: bool = False
+    git_hooks_needed: bool = False
+    git_rewrite_only: bool = False
+    notes_refspec_needed: bool = False
+
+
+def _doctor_git_has_origin(cwd: str) -> bool:
+    try:
+        r = subprocess.run(
+            ["git", "-C", cwd, "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _doctor_diagnose(cwd: str) -> tuple[list[str], list[str], list[str], DoctorFixHints]:
+    """Collect doctor messages and fix hints for ``cwd``."""
     from .storage import (
         get_agent_trace_home,
         get_project_config_path,
         resolve_project_id,
     )
 
-    cwd = os.getcwd()
     ok: list[str] = []
     warn: list[str] = []
     err: list[str] = []
+    hints = DoctorFixHints()
 
     def _git_out(args: list[str]) -> str:
         try:
@@ -285,7 +318,6 @@ def cmd_doctor(_args):
         except (OSError, subprocess.TimeoutExpired):
             return ""
 
-    # Global home writable
     home = get_agent_trace_home()
     try:
         home.mkdir(parents=True, exist_ok=True)
@@ -298,12 +330,15 @@ def cmd_doctor(_args):
         ok.append(f"Global storage is writable ({home})")
     except OSError as e:
         err.append(f"Global storage not writable ({home}): {e}")
+        if home.exists():
+            hints.chmod_home = True
 
     gf = get_global_config_file()
     if gf.is_file():
         mode = gf.stat().st_mode & 0o777
         if mode & 0o077:
             warn.append(f"Global config should be mode 600 (currently {oct(mode)})")
+            hints.chmod_global_config = gf
         else:
             ok.append("Global config permissions look good (600)")
 
@@ -318,18 +353,14 @@ def cmd_doctor(_args):
             ok.append("Project config readable")
     else:
         warn.append("Project not initialised (run agent-trace init)")
+        hints.init_needed = True
 
-    # Hooks — check global first, then project-level. Each registered
-    # adapter is responsible for its own paths; doctor just iterates.
     for adapter in iter_adapters():
         label = adapter.display_name or adapter.name
         global_path = adapter.global_config_path()
         if adapter.is_installed():
             ok.append(f"{label} global hooks configured ({global_path})")
             continue
-        # Project-level fallback: look for an ``agent-trace record`` mention in
-        # the adapter's project config. The adapter owns the path list via
-        # ``project_config_paths`` — doctor stays agent-agnostic.
         project_paths = _project_hook_paths_for(adapter)
         any_present = False
         for project_path in project_paths:
@@ -349,6 +380,7 @@ def cmd_doctor(_args):
                 break
         if not any_present and initialised:
             warn.append(f"{label} hooks not configured (no global or project hooks)")
+            hints.global_hooks_needed = True
 
     git_hook_ok = False
     git_rewrite_ok = False
@@ -368,12 +400,14 @@ def cmd_doctor(_args):
         ok.append("Git post-commit hook calls agent-trace commit-link")
     elif initialised and os.path.isdir(".git"):
         warn.append("Git post-commit hook missing or does not call agent-trace commit-link")
+        hints.git_hooks_needed = True
     if git_rewrite_ok:
         ok.append("Git post-rewrite hook calls agent-trace rewrite-ledger")
     elif initialised and os.path.isdir(".git"):
         warn.append("Git post-rewrite hook missing or does not call agent-trace rewrite-ledger")
+        if git_hook_ok:
+            hints.git_rewrite_only = True
 
-    # Git notes refspec (optional hint)
     if os.path.isdir(".git"):
         fetch_all = _git_out(["config", "--get-all", "remote.origin.fetch"])
         push_all = _git_out(["config", "--get-all", "remote.origin.push"])
@@ -385,8 +419,9 @@ def cmd_doctor(_args):
                 "Git notes refspec not configured for origin "
                 "(optional; run init or git config --add remote.origin.fetch +refs/notes/agent-trace:...)",
             )
+            if _doctor_git_has_origin(cwd):
+                hints.notes_refspec_needed = True
 
-    # Sync remotes
     if pid:
         remotes = remote_list(pid)
         if not remotes:
@@ -403,7 +438,6 @@ def cmd_doctor(_args):
             else:
                 warn.append(f"Remote '{name}' not reachable at {url} ({detail})")
 
-    # Summary command
     summ = (cfg or {}).get("summary") if cfg else None
     if isinstance(summ, dict) and summ.get("enabled"):
         cmd = summ.get("command") or ""
@@ -417,14 +451,130 @@ def cmd_doctor(_args):
             else:
                 warn.append(f"Summary command may not run (not found: {exe})")
 
-    print("agent-trace doctor\n")
-    for line in ok:
-        print(f"  OK  {line}")
-    for line in warn:
-        print(f"  !!  {line}")
-    for line in err:
-        print(f"  XX  {line}")
-    print()
+    return ok, warn, err, hints
+
+
+def cmd_doctor(args):
+    """Report hook installation, config validity, remotes, and optional tools."""
+    cwd = os.getcwd()
+    fix = getattr(args, "fix", False)
+    dry_run = getattr(args, "dry_run", False)
+    yes = getattr(args, "yes", False)
+
+    def _print_report(ok: list[str], warn: list[str], err: list[str]) -> None:
+        print("agent-trace doctor\n")
+        for line in ok:
+            print(f"  OK  {line}")
+        for line in warn:
+            print(f"  !!  {line}")
+        for line in err:
+            print(f"  XX  {line}")
+        print()
+
+    def _apply_fixes(hints: DoctorFixHints) -> list[str]:
+        """Return human-readable lines describing actions taken (no-op if dry_run)."""
+        from .storage import get_agent_trace_home
+
+        lines: list[str] = []
+        home = get_agent_trace_home()
+
+        if hints.chmod_home and home.exists():
+            msg = f"chmod u+rwx {home}"
+            if dry_run:
+                lines.append(f"[dry-run] would: {msg}")
+            else:
+                try:
+                    os.chmod(home, stat.S_IRWXU)
+                    lines.append(f"Applied: {msg}")
+                except OSError as e:
+                    lines.append(f"Skipped chmod on {home}: {e}")
+
+        if hints.chmod_global_config is not None:
+            p = hints.chmod_global_config
+            msg = f"chmod 600 {p}"
+            if dry_run:
+                lines.append(f"[dry-run] would: {msg}")
+            else:
+                try:
+                    os.chmod(p, 0o600)
+                    lines.append(f"Applied: {msg}")
+                except OSError as e:
+                    lines.append(f"Skipped chmod on {p}: {e}")
+
+        if hints.init_needed:
+            if dry_run:
+                lines.append("[dry-run] would: agent-trace init")
+            elif yes:
+                cmd_init(args)
+                lines.append("Applied: agent-trace init (--yes)")
+            elif sys.stdin.isatty():
+                if _confirm("Initialize agent-trace for this project?", default=True):
+                    cmd_init(args)
+                    lines.append("Applied: agent-trace init (confirmed)")
+                else:
+                    lines.append("Skipped: agent-trace init (not confirmed)")
+            else:
+                lines.append("Skipped: agent-trace init (non-interactive; use --yes to apply)")
+
+        if hints.global_hooks_needed:
+            msg = "hooks setup-global (all registered adapters)"
+            if dry_run:
+                lines.append(f"[dry-run] would: agent-trace {msg}")
+            else:
+                setup_global_hooks()
+                lines.append(f"Applied: agent-trace {msg}")
+
+        if hints.git_hooks_needed:
+            msg = "install git post-commit + post-rewrite hooks"
+            if dry_run:
+                lines.append(f"[dry-run] would: {msg}")
+            else:
+                configure_git_hooks(cwd)
+                lines.append(f"Applied: {msg}")
+        elif hints.git_rewrite_only:
+            msg = "install git post-rewrite hook"
+            if dry_run:
+                lines.append(f"[dry-run] would: {msg}")
+            else:
+                configure_git_post_rewrite_hook(cwd)
+                lines.append(f"Applied: {msg}")
+
+        if hints.notes_refspec_needed:
+            msg = "configure git notes refspec for remote.origin"
+            if dry_run:
+                lines.append(f"[dry-run] would: {msg}")
+            else:
+                if configure_git_notes_refspecs(project_dir=cwd, remote_name="origin"):
+                    lines.append(f"Applied: {msg}")
+                else:
+                    lines.append(f"Skipped: {msg} (git refused or no origin)")
+
+        return lines
+
+    ok, warn, err, hints = _doctor_diagnose(cwd)
+
+    if fix:
+        applied_any = any(
+            (
+                hints.chmod_home,
+                hints.chmod_global_config is not None,
+                hints.init_needed,
+                hints.global_hooks_needed,
+                hints.git_hooks_needed,
+                hints.git_rewrite_only,
+                hints.notes_refspec_needed,
+            ),
+        )
+        if applied_any:
+            print("agent-trace doctor --fix\n")
+            action_lines = _apply_fixes(hints)
+            for line in sorted(action_lines):
+                print(f"  {line}")
+            print()
+            if not dry_run:
+                ok, warn, err, _hints = _doctor_diagnose(cwd)
+
+    _print_report(ok, warn, err)
     if err:
         sys.exit(1)
 
@@ -1763,7 +1913,24 @@ def main():
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     sub.add_parser("init", help="Initialize agent-trace for the current project")
-    sub.add_parser("doctor", help="Check hooks, config, remotes, and optional tools")
+    doc_p = sub.add_parser("doctor", help="Check hooks, config, remotes, and optional tools")
+    doc_p.add_argument(
+        "--fix",
+        action="store_true",
+        help="Apply safe automatic fixes (permissions, init, hooks, git notes refspec)",
+    )
+    doc_p.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="With --fix, show what would change without modifying the system",
+    )
+    doc_p.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="With --fix, apply fixes non-interactively (e.g. run init without prompting)",
+    )
     sub.add_parser("status", help="Show agent-trace status")
     sub.add_parser("reset", help="Reset agent-trace configuration")
     sub_config = sub.add_parser("config", help="Show or update persisted configuration")
