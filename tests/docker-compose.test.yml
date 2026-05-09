@@ -1,0 +1,45 @@
+# Local / CI stack for Step 1.6 remote end-to-end tests.
+#
+# From the agent-trace-cli repo root:
+#   docker compose -f tests/docker-compose.test.yml --project-directory tests up -d --build
+#
+# Then run the CLI tests with the service URL (mapped host port defaults to 8765):
+#   export AGENT_TRACE_E2E_SERVICE_URL=http://127.0.0.1:8765
+#   python -m pytest tests/test_e2e_remote.py -v
+#
+# Stop:
+#   docker compose -f tests/docker-compose.test.yml --project-directory tests down -v
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: agent_trace
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 5s
+      retries: 15
+
+  agent-trace-service:
+    build:
+      context: ../../agent-trace-service
+      dockerfile: Dockerfile
+    ports:
+      - "8765:5000"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: agent_trace
+      AUTH_SECRET: e2e-docker-compose-secret
+      PORT: "5000"
+      FLASK_DEBUG: "0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "python init_db.py create && exec python app.py"
