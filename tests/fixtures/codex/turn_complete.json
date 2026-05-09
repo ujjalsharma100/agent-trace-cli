@@ -1,0 +1,11 @@
+{
+  "hook_event_name": "CodexTurnComplete",
+  "type": "agent-turn-complete",
+  "turn-id": "t-7d9e",
+  "session-id": "sess-codex-1",
+  "input-messages": [
+    {"role": "user", "content": "Refactor the auth middleware."}
+  ],
+  "last-assistant-message": "Refactored auth.py to extract token validation into a helper.",
+  "model": "gpt-5-codex"
+}

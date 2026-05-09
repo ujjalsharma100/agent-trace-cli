@@ -239,7 +239,7 @@ class TestConfigureRefspecs(unittest.TestCase):
             repo = Path(tmp)
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "remote", "add", "origin", "https://example.com/x.git"], cwd=repo, check=True)
-            from agent_trace.hooks import configure_git_notes_refspecs
+            from agent_trace.hooks.git import configure_git_notes_refspecs
 
             self.assertTrue(configure_git_notes_refspecs(str(repo)))
             r = subprocess.run(

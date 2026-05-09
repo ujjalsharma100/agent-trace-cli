@@ -1,8 +1,20 @@
 """
-Trace recording — reads hook events from stdin, constructs trace records,
-and stores them locally (JSONL).
+Trace recording — reads hook events from stdin, dispatches them to the
+right adapter's translator, and stores the resulting trace locally.
 
-Hooks write *only* to local JSONL.  Network calls happen exclusively via
+This module is **agent-agnostic**: it knows nothing about Cursor,
+Claude, Codex, or any future harness. The dispatcher walks the adapter
+registry — each adapter declares which hook event names it owns
+(``adapter.EVENTS``), which env vars hold the transcript path
+(``transcript_env_vars``), which env vars hold the workspace dir
+(``project_dir_env_vars``), and which events should fire the summary
+command (``summary_only_events`` / ``summary_then_trace_events``).
+
+What stays here are *generic* helpers used by every adapter's
+translators: edit-sequence tracking, file IO, range computation, the
+final ``_store_local`` writer.
+
+Hooks write *only* to local JSONL. Network calls happen exclusively via
 ``sync.py`` (``agent-trace push`` / ``agent-trace pull``).
 
 No external dependencies — uses only the Python standard library.
@@ -30,35 +42,53 @@ from .trace import (
     resolve_file_project,
 )
 
-# Claude session JSONL can be large; only scan the tail for the latest ``message.model``.
-_TRANSCRIPT_TAIL_BYTES = 512 * 1024
 
+# -------------------------------------------------------------------
+# Hook payload helpers (registry-driven)
+# -------------------------------------------------------------------
 
 def transcript_path_from_hook(data: dict) -> str | None:
-    """Path to the conversation JSONL: hook JSON, or ``CURSOR_TRANSCRIPT_PATH`` (sessionEnd/stop).
+    """Resolve the conversation transcript path from a hook payload.
 
-    Cursor documents ``transcript_path`` on stdin for some hooks, but **sessionEnd** and
-    **stop** only list session metadata in the JSON; the transcript is in the environment.
-    See Cursor docs: ``CURSOR_TRANSCRIPT_PATH`` when transcripts are enabled.
+    Order of precedence:
+      1. ``data["transcript_path"]`` (Cursor sets this on most hooks)
+      2. The first hit across every adapter's ``transcript_env_vars``
+         (e.g. Cursor sets ``CURSOR_TRANSCRIPT_PATH`` for ``sessionEnd``
+         / ``Stop`` where the JSON omits the path).
+
+    New harnesses contribute their own env-var name on the adapter —
+    this function never names a tool.
     """
     tp = data.get("transcript_path")
     if isinstance(tp, str) and tp.strip():
         return tp.strip()
-    env_tp = os.environ.get("CURSOR_TRANSCRIPT_PATH")
-    if isinstance(env_tp, str) and env_tp.strip():
-        return env_tp.strip()
+    from .hooks import iter_adapters
+
+    for adapter in iter_adapters():
+        for var in getattr(adapter, "transcript_env_vars", ()) or ():
+            v = os.environ.get(var)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
     return None
 
 
 def project_dir_from_hook(data: dict) -> str:
-    """Repo/workspace directory for config resolution: ``cwd``, env, or ``workspace_roots``."""
+    """Resolve the workspace dir from a hook payload.
+
+    Order: ``data["cwd"]`` → adapter-declared env vars (e.g.
+    ``CURSOR_PROJECT_DIR``, ``CLAUDE_PROJECT_DIR``) →
+    ``data["workspace_roots"][0]`` → ``os.getcwd()``.
+    """
     cwd = data.get("cwd")
     if isinstance(cwd, str) and cwd.strip():
         return cwd.strip()
-    for key in ("CURSOR_PROJECT_DIR", "CLAUDE_PROJECT_DIR"):
-        v = os.environ.get(key)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
+    from .hooks import iter_adapters
+
+    for adapter in iter_adapters():
+        for var in getattr(adapter, "project_dir_env_vars", ()) or ():
+            v = os.environ.get(var)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
     roots = data.get("workspace_roots")
     if isinstance(roots, list) and roots:
         r0 = roots[0]
@@ -93,164 +123,8 @@ def project_dir_for_summary_hook(data: dict) -> str:
 
 
 # -------------------------------------------------------------------
-# Session edit sequence tracking
+# Session edit sequence tracking (shared across all adapters)
 # -------------------------------------------------------------------
-
-def _remember_session_model(session_id: str, model: str | None, project_dir: str | None = None) -> None:
-    """Persist model name for a Claude session (PostToolUse does not include ``model``).
-
-    SessionStart includes ``model``; we also refresh from the session JSONL when it
-    contains a newer ``message.model`` (e.g. after ``/model``). Stored as
-    ``model:<session_id>`` so tool traces can set ``contributor.model_id``.
-    """
-    if not session_id or not model:
-        return
-    if project_dir is None:
-        project_dir = get_workspace_root()
-    pid = resolve_project_id(project_dir, create=True)
-    if not pid:
-        return
-    ensure_project_dir(pid)
-    state_path = get_session_state_path(pid)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state: dict = {}
-    if state_path.exists():
-        try:
-            state = json.loads(state_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            state = {}
-    state[f"model:{session_id}"] = model
-    try:
-        state_path.write_text(json.dumps(state))
-    except OSError:
-        pass
-
-
-def _read_transcript_tail_text(path: Path, max_bytes: int) -> str:
-    """Read the last ``max_bytes`` of a file, dropping an initial partial line."""
-    try:
-        size = path.stat().st_size
-        if size <= max_bytes:
-            return path.read_text(encoding="utf-8", errors="replace")
-        with open(path, "rb") as f:
-            f.seek(max(0, size - max_bytes))
-            f.readline()  # discard incomplete first line
-            return f.read().decode("utf-8", errors="replace")
-    except OSError:
-        return ""
-
-
-def _extract_model_from_transcript_obj(obj: object, depth: int = 0) -> str | None:
-    """Pull a model id from one Claude Code transcript JSONL object."""
-    if depth > 8 or not isinstance(obj, dict):
-        return None
-    msg = obj.get("message")
-    if isinstance(msg, dict):
-        for key in ("model", "modelId", "model_id"):
-            v = msg.get(key)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        inner = _extract_model_from_transcript_obj(msg, depth + 1)
-        if inner:
-            return inner
-    for key in ("model", "modelId", "model_id"):
-        v = obj.get(key)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    for nest in ("session", "metadata", "config"):
-        inner = obj.get(nest)
-        if isinstance(inner, dict):
-            got = _extract_model_from_transcript_obj(inner, depth + 1)
-            if got:
-                return got
-    return None
-
-
-def _model_from_claude_transcript_tail(transcript_path: str | None, *, max_bytes: int = _TRANSCRIPT_TAIL_BYTES) -> str | None:
-    """Latest model seen in the transcript file (assistant lines include ``message.model``).
-
-    Covers mid-session ``/model`` changes, which are not exposed on PostToolUse hooks.
-    Scans from the end of the file so the first match is chronologically latest.
-    """
-    if not transcript_path:
-        return None
-    try:
-        p = Path(transcript_path)
-        if not p.is_file():
-            return None
-        text = _read_transcript_tail_text(p, max_bytes)
-        if not text:
-            return None
-        for line in reversed(text.splitlines()):
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            m = _extract_model_from_transcript_obj(obj)
-            if m:
-                return m
-        return None
-    except OSError:
-        return None
-
-
-def _session_model_from_state(session_id: str, project_dir: str | None = None) -> str | None:
-    """Return model string last recorded for this session, if any."""
-    if not session_id:
-        return None
-    if project_dir is None:
-        project_dir = get_workspace_root()
-    pid = resolve_project_id(project_dir, create=False)
-    if not pid:
-        return None
-    state_path = get_session_state_path(pid)
-    if not state_path.exists():
-        return None
-    try:
-        state = json.loads(state_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-    v = state.get(f"model:{session_id}")
-    return str(v) if v else None
-
-
-def _claude_model(d: dict, project_dir: str | None) -> str | None:
-    """Resolve model: hook fields, then transcript (``/model`` / latest turn), then SessionStart cache."""
-    m = d.get("model") or d.get("model_id")
-    if m:
-        return str(m) if m else None
-    sid = d.get("session_id") or ""
-    m = _model_from_claude_transcript_tail(transcript_path_from_hook(d))
-    if m:
-        if sid and project_dir:
-            prev = _session_model_from_state(sid, project_dir)
-            if prev != m:
-                _remember_session_model(sid, m, project_dir)
-        return m
-    return _session_model_from_state(sid, project_dir)
-
-
-def _sync_claude_session_model_from_transcript(data: dict) -> None:
-    """Refresh SessionStart cache from transcript (e.g. after each Stop). No-op if unchanged."""
-    sid = data.get("session_id")
-    tp = transcript_path_from_hook(data)
-    if not sid or not tp:
-        return
-    anchor = project_dir_from_hook(data)
-    res = resolve_file_project(".sessions", anchor_path=anchor)
-    repo = res.repo_root if res else None
-    if not repo:
-        return
-    m = _model_from_claude_transcript_tail(tp)
-    if not m:
-        return
-    prev = _session_model_from_state(str(sid), repo)
-    if prev != m:
-        _remember_session_model(str(sid), m, repo)
-
 
 def _get_next_sequence(session_id: str, project_dir: str | None = None) -> int:
     """Return the next edit sequence number for a session, incrementing atomically.
@@ -289,7 +163,7 @@ def _get_next_sequence(session_id: str, project_dir: str | None = None) -> int:
 
 
 # -------------------------------------------------------------------
-# File helpers
+# File / range helpers (shared)
 # -------------------------------------------------------------------
 
 def _try_read_file(path):
@@ -301,7 +175,6 @@ def _try_read_file(path):
 
 
 def _file_existed_before(file_path: str) -> bool:
-    """Whether the file existed before this edit (for metadata)."""
     try:
         return Path(file_path).exists()
     except OSError:
@@ -374,7 +247,7 @@ def _ranges_from_notebook(_notebook_path: str, ti: dict) -> tuple[list | None, l
 
 def _collect_conversation_contents(trace):
     """Walk all files→conversations, read local file:// URLs (deduplicated)."""
-    seen: dict[str, str | None] = {}  # url → content (or None if unreadable)
+    seen: dict[str, str | None] = {}
     for fe in trace.get("files", []):
         for conv in fe.get("conversations", []):
             url = conv.get("url", "")
@@ -384,239 +257,11 @@ def _collect_conversation_contents(trace):
                 local = url[7:]
                 content = _try_read_file(local)
                 seen[url] = content
-    # Build the array — only include entries where we got content
     return [{"url": u, "content": c} for u, c in seen.items() if c is not None] or None
 
 
 # -------------------------------------------------------------------
-# Cursor event handlers
-# -------------------------------------------------------------------
-
-def _cursor_afterFileEdit(d):
-    edits = d.get("edits", [])
-    fp = d.get("file_path", "")
-    fc = _try_read_file(fp) if fp else None
-    session_id = d.get("conversation_id") or ""
-    res = resolve_file_project(fp)
-    seq = _get_next_sequence(session_id, res.repo_root if res else None) if session_id else None
-    return create_trace(
-        "ai", fp,
-        model=d.get("model"),
-        range_positions=compute_range_positions(edits, fc),
-        range_contents=[e["new_string"] for e in edits if e.get("new_string")],
-        transcript=transcript_path_from_hook(d),
-        metadata={"conversation_id": d.get("conversation_id"), "generation_id": d.get("generation_id")},
-        edit_sequence=seq,
-        resolution=res,
-    ), "afterFileEdit"
-
-
-def _cursor_afterTabFileEdit(d):
-    edits = d.get("edits", [])
-    fp = d.get("file_path", "")
-    session_id = d.get("conversation_id") or ""
-    res = resolve_file_project(fp)
-    seq = _get_next_sequence(session_id, res.repo_root if res else None) if session_id else None
-    return create_trace(
-        "ai", fp,
-        model=d.get("model"),
-        range_positions=compute_range_positions(edits),
-        range_contents=[e["new_string"] for e in edits if e.get("new_string")],
-        metadata={"conversation_id": d.get("conversation_id"), "generation_id": d.get("generation_id")},
-        edit_sequence=seq,
-        resolution=res,
-    ), "afterTabFileEdit"
-
-
-def _cursor_afterShellExecution(d):
-    anchor = project_dir_from_hook(d)
-    res = resolve_file_project(".shell-history", anchor_path=anchor)
-    return create_trace(
-        "ai", ".shell-history",
-        model=d.get("model"),
-        transcript=transcript_path_from_hook(d),
-        metadata={
-            "conversation_id": d.get("conversation_id"),
-            "generation_id": d.get("generation_id"),
-            "command": d.get("command"),
-            "duration_ms": d.get("duration"),
-        },
-        anchor_path=anchor,
-        resolution=res,
-    ), "afterShellExecution"
-
-
-def _cursor_sessionStart(d):
-    anchor = project_dir_from_hook(d)
-    res = resolve_file_project(".sessions", anchor_path=anchor)
-    return create_trace(
-        "ai", ".sessions",
-        model=d.get("model"),
-        metadata={
-            "event": "session_start",
-            "session_id": d.get("session_id"),
-            "conversation_id": d.get("conversation_id"),
-            "is_background_agent": d.get("is_background_agent"),
-            "composer_mode": d.get("composer_mode"),
-        },
-        anchor_path=anchor,
-        resolution=res,
-    ), "sessionStart"
-
-
-def _cursor_sessionEnd(d):
-    anchor = project_dir_from_hook(d)
-    res = resolve_file_project(".sessions", anchor_path=anchor)
-    return create_trace(
-        "ai", ".sessions",
-        model=d.get("model"),
-        transcript=transcript_path_from_hook(d),
-        metadata={
-            "event": "session_end",
-            "session_id": d.get("session_id"),
-            "conversation_id": d.get("conversation_id"),
-            "reason": d.get("reason"),
-            "duration_ms": d.get("duration_ms"),
-        },
-        anchor_path=anchor,
-        resolution=res,
-    ), "sessionEnd"
-
-
-_CURSOR = {
-    "afterFileEdit": _cursor_afterFileEdit,
-    "afterTabFileEdit": _cursor_afterTabFileEdit,
-    "afterShellExecution": _cursor_afterShellExecution,
-    "sessionStart": _cursor_sessionStart,
-    "sessionEnd": _cursor_sessionEnd,
-}
-
-
-# -------------------------------------------------------------------
-# Claude Code event handlers
-# -------------------------------------------------------------------
-
-def _claude_PostToolUse(d):
-    tn = d.get("tool_name", "")
-    if tn == "Bash":
-        ti = d.get("tool_input", {})
-        session_id = d.get("session_id") or ""
-        anchor = ti.get("cwd") or d.get("cwd") or os.getcwd()
-        res = resolve_file_project(".shell-history", anchor_path=anchor)
-        seq = _get_next_sequence(session_id, res.repo_root if res else None) if session_id else None
-        return create_trace(
-            "ai", ".shell-history",
-            model=_claude_model(d, res.repo_root if res else None),
-            transcript=transcript_path_from_hook(d),
-            metadata={
-                "session_id": d.get("session_id"),
-                "tool_name": tn,
-                "tool_use_id": d.get("tool_use_id"),
-                "command": ti.get("command"),
-            },
-            edit_sequence=seq,
-            anchor_path=anchor,
-            resolution=res,
-        ), "PostToolUse"
-
-    ti = d.get("tool_input", {})
-    fp = ti.get("file_path") or ti.get("notebook_path") or ".unknown"
-    anchor = d.get("cwd") or os.getcwd()
-
-    if tn == "Write":
-        existed = _file_existed_before(fp)
-        rp, rc = _ranges_from_write(fp, ti.get("content", ""))
-        meta_extra: dict = {
-            "is_creation": not existed,
-        }
-    elif tn == "Edit":
-        rp, rc = _ranges_from_edit(fp, ti.get("old_string", ""), ti.get("new_string", ""))
-        meta_extra = {}
-    elif tn == "MultiEdit":
-        rp, rc = _ranges_from_multiedit(fp, ti.get("edits", []))
-        meta_extra = {}
-    elif tn == "NotebookEdit":
-        fp = ti.get("notebook_path", fp)
-        rp, rc = _ranges_from_notebook(fp, ti)
-        cell_id = ti.get("cell_id")
-        meta_extra = {"cell_id": cell_id} if cell_id is not None else {}
-    else:
-        return None, "PostToolUse"
-
-    if rp is None or rc is None:
-        return None, "PostToolUse"
-
-    session_id = d.get("session_id") or ""
-    res = resolve_file_project(fp, anchor_path=anchor)
-    seq = _get_next_sequence(session_id, res.repo_root if res else None) if session_id else None
-
-    metadata: dict = {
-        "session_id": d.get("session_id"),
-        "tool_name": tn,
-        "tool_use_id": d.get("tool_use_id"),
-    }
-    metadata = {k: v for k, v in metadata.items() if v is not None}
-    metadata.update(meta_extra)
-
-    return create_trace(
-        "ai", fp,
-        model=_claude_model(d, res.repo_root if res else None),
-        range_positions=rp,
-        range_contents=rc,
-        transcript=transcript_path_from_hook(d),
-        metadata=metadata,
-        edit_sequence=seq,
-        anchor_path=anchor,
-        resolution=res,
-    ), "PostToolUse"
-
-
-def _claude_SessionStart(d):
-    anchor = d.get("cwd") or os.getcwd()
-    res = resolve_file_project(".sessions", anchor_path=anchor)
-    repo = res.repo_root if res else None
-    m = d.get("model") or d.get("model_id")
-    if d.get("session_id") and m and repo:
-        _remember_session_model(str(d["session_id"]), str(m), repo)
-    return create_trace(
-        "ai", ".sessions",
-        model=_claude_model(d, repo),
-        metadata={
-            "event": "session_start",
-            "session_id": d.get("session_id"),
-            "source": d.get("source"),
-        },
-        anchor_path=anchor,
-        resolution=res,
-    ), "SessionStart"
-
-
-def _claude_SessionEnd(d):
-    anchor = d.get("cwd") or os.getcwd()
-    res = resolve_file_project(".sessions", anchor_path=anchor)
-    repo = res.repo_root if res else None
-    return create_trace(
-        "ai", ".sessions",
-        model=_claude_model(d, repo),
-        metadata={
-            "event": "session_end",
-            "session_id": d.get("session_id"),
-            "reason": d.get("reason"),
-        },
-        anchor_path=anchor,
-        resolution=res,
-    ), "SessionEnd"
-
-
-_CLAUDE = {
-    "PostToolUse": _claude_PostToolUse,
-    "SessionStart": _claude_SessionStart,
-    "SessionEnd": _claude_SessionEnd,
-}
-
-
-# -------------------------------------------------------------------
-# Storage backends
+# Storage backend
 # -------------------------------------------------------------------
 
 def _store_local(trace, project_dir=None):
@@ -635,6 +280,31 @@ def _store_local(trace, project_dir=None):
         f.write(json.dumps(trace) + "\n")
 
 
+# -------------------------------------------------------------------
+# Back-compat re-exports
+# -------------------------------------------------------------------
+#
+# Older code (and tests) imports translator functions directly from
+# ``agent_trace.record``. The translators now live next to their
+# adapter, but we keep stable aliases here so nothing breaks.
+
+from .hooks.claude import (  # noqa: E402
+    _PostToolUse as _claude_PostToolUse,
+    _SessionEnd as _claude_SessionEnd,
+    _SessionStart as _claude_SessionStart,
+    _model_from_transcript_tail as _model_from_claude_transcript_tail,
+)
+from .hooks.codex import (  # noqa: E402
+    _SessionStart as _codex_SessionStart,
+    _TurnComplete as _codex_TurnComplete,
+)
+from .hooks.cursor import (  # noqa: E402
+    _afterFileEdit as _cursor_afterFileEdit,
+    _afterShellExecution as _cursor_afterShellExecution,
+    _afterTabFileEdit as _cursor_afterTabFileEdit,
+    _sessionEnd as _cursor_sessionEnd,
+    _sessionStart as _cursor_sessionStart,
+)
 
 
 # -------------------------------------------------------------------
@@ -644,8 +314,18 @@ def _store_local(trace, project_dir=None):
 def record_from_stdin():
     """Read a hook event from stdin, build a trace, and store it locally.
 
-    Hooks write *only* to local JSONL.  Network sync happens via
+    Hooks write *only* to local JSONL. Network sync happens via
     ``agent-trace push`` / ``agent-trace pull``.
+
+    Dispatch is fully registry-driven:
+      1. The event-name to translator mapping comes from each adapter's
+         ``EVENTS`` dict.
+      2. Whether the event triggers the summary command — and whether
+         it should *also* be dispatched as a regular trace — comes from
+         each adapter's ``summary_only_events`` /
+         ``summary_then_trace_events`` declarations.
+      3. Each adapter optionally runs ``pre_summary_hook`` before the
+         summary command (e.g. Claude refreshes its model cache).
     """
     raw = sys.stdin.read().strip()
     if not raw:
@@ -656,36 +336,47 @@ def record_from_stdin():
     except json.JSONDecodeError:
         return
 
-    event = data.get("hook_event_name", "")
+    event = data.get("hook_event_name", "") or ""
 
-    # Session-end: optional pluggable summary (Phase 6); no trace record.
-    # Conversation content syncs via ``agent-trace push``.
-    if event in ("afterAgentResponse", "Stop", "stop"):
-        _sync_claude_session_model_from_transcript(data)
+    from .hooks import iter_adapters
+
+    # Phase 1: session-end / summary classification.
+    summary_owner = None
+    also_dispatch = False
+    for adapter in iter_adapters():
+        triggers, dispatch = adapter.is_session_end(event)
+        if triggers:
+            summary_owner = adapter
+            also_dispatch = dispatch
+            break
+
+    if summary_owner is not None:
+        try:
+            summary_owner.pre_summary_hook(data)
+        except Exception:
+            pass
         try:
             from .summary import run_session_summary_hook
 
             run_session_summary_hook(data)
         except Exception:
             pass
-        return
+        if not also_dispatch:
+            return
+        # Fall through so the event also reaches its adapter's
+        # translator (e.g. Cursor's ``sessionEnd`` records a trace).
 
-    # Cursor's sessionEnd JSON does not include ``transcript_path``; the file is in
-    # ``CURSOR_TRANSCRIPT_PATH`` (see ``transcript_path_from_hook``). Run summary before
-    # the sessionEnd trace.
-    if event == "sessionEnd":
-        try:
-            from .summary import run_session_summary_hook
-
-            run_session_summary_hook(data)
-        except Exception:
-            pass
-
-    handler = _CURSOR.get(event) or _CLAUDE.get(event)
+    # Phase 2: trace handler dispatch via the registry.
+    handler = None
+    for adapter in iter_adapters():
+        events = getattr(adapter, "EVENTS", None) or {}
+        if event in events:
+            handler = events[event]
+            break
     if handler is None:
         return
 
-    trace, hook_event = handler(data)
+    trace, _hook_event = handler(data)
     if trace is None:
         return
 

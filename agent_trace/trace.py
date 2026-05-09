@@ -176,12 +176,22 @@ def get_workspace_root() -> str:
 
 
 def get_tool_info() -> dict:
-    """Detect which AI coding tool invoked the hook."""
-    cursor_ver = os.environ.get("CURSOR_VERSION")
-    if cursor_ver:
-        return {"name": "cursor", "version": cursor_ver}
-    if os.environ.get("CLAUDE_PROJECT_DIR"):
-        return {"name": "claude-code"}
+    """Detect which AI coding tool invoked the hook.
+
+    Walks the adapter registry — each ``CodingAgentAdapter`` may
+    implement ``detect_tool_info`` to return ``{name, version}`` based
+    on env vars or marker files. The first adapter that matches wins.
+    """
+    try:
+        from .hooks import iter_adapters
+
+        for adapter in iter_adapters():
+            info = adapter.detect_tool_info()
+            if info:
+                return info
+    except Exception:
+        # Adapter detection must never crash recording.
+        pass
     return {"name": "unknown"}
 
 

@@ -65,15 +65,14 @@ from .trace import (
     git_repo_root_for_path,
 )
 from .hooks import (
-    configure_claude_hooks,
-    configure_cursor_hooks,
-    configure_git_hooks,
-    configure_git_notes_refspecs,
-    has_global_claude_hooks,
-    has_global_cursor_hooks,
+    AGENT_TRACE_CMD,
+    adapter_names,
+    configure_project_hooks,
+    iter_adapters,
     remove_global_hooks,
     setup_global_hooks,
 )
+from .hooks.git import configure_git_hooks, configure_git_notes_refspecs
 from .rules import add_rule, remove_rule, show_rules, list_available_rules, TOOL_CHOICES
 from .record import record_from_stdin
 from .rewrite import rewrite_ledgers
@@ -100,6 +99,22 @@ from .summary_presets import (
 VERSION = "0.1.0"
 
 VIEWER_BIN = os.path.expanduser("~/.agent-trace/bin/agent-trace-viewer")
+
+
+def _project_hook_paths_for(adapter) -> list[str]:
+    """Return project-scoped config paths declared by the adapter.
+
+    Adapters expose ``project_config_paths()`` to list every relative
+    path that signals "agent-trace hooks installed at project scope".
+    The CLI just iterates — no per-tool branches.
+    """
+    paths_fn = getattr(adapter, "project_config_paths", None)
+    if callable(paths_fn):
+        try:
+            return list(paths_fn())
+        except Exception:
+            return []
+    return []
 
 
 # -------------------------------------------------------------------
@@ -207,21 +222,16 @@ def cmd_init(_args):
         print(f"  Note refspec: skipped (no git remote \"{notes_remote}\" yet — "
               "rerun 'agent-trace reset' after adding one)")
 
-    # Hooks — install everything by default, skip if global already handles it
-    cursor_global = has_global_cursor_hooks()
-    claude_global = has_global_claude_hooks()
-
-    if cursor_global:
-        print("  Cursor hooks: global (~/.cursor/hooks.json) — already set")
-    else:
-        configure_cursor_hooks()
-        print("  Cursor hooks: configured (.cursor/hooks.json)")
-
-    if claude_global:
-        print("  Claude hooks: global (~/.claude/settings.json) — already set")
-    else:
-        configure_claude_hooks()
-        print("  Claude hooks: configured (.claude/settings.json)")
+    # Hooks — install everything by default, skip if global already handles it.
+    # Driven by the adapter registry: new agents are picked up automatically.
+    for adapter in iter_adapters():
+        label = adapter.display_name or adapter.name
+        global_path = adapter.global_config_path()
+        if adapter.is_installed():
+            print(f"  {label} hooks: global ({global_path}) — already set")
+        else:
+            adapter.inject(AGENT_TRACE_CMD, global_install=False)
+            print(f"  {label} hooks: configured (project-level)")
 
     if os.path.isdir(".git"):
         configure_git_hooks()
@@ -309,41 +319,36 @@ def cmd_doctor(_args):
     else:
         warn.append("Project not initialised (run agent-trace init)")
 
-    # Hooks — check global first, then project-level
-    cursor_global = has_global_cursor_hooks()
-    claude_global = has_global_claude_hooks()
-
-    if cursor_global:
-        ok.append("Cursor global hooks configured (~/.cursor/hooks.json)")
-    elif os.path.exists(".cursor/hooks.json"):
-        try:
-            h = json.loads(open(".cursor/hooks.json", encoding="utf-8").read())
-            hooks = h.get("hooks") if isinstance(h, dict) else None
-            if hooks and any(
-                "agent-trace record" in str(v)
-                for v in (hooks.values() if isinstance(hooks, dict) else [])
-            ):
-                ok.append("Cursor project hooks mention agent-trace record")
-            else:
-                warn.append("Cursor .cursor/hooks.json present but no agent-trace record hook found")
-        except (OSError, json.JSONDecodeError):
-            warn.append("Cursor .cursor/hooks.json is not valid JSON")
-    elif initialised:
-        warn.append("Cursor hooks not configured (no global or project hooks)")
-
-    if claude_global:
-        ok.append("Claude Code global hooks configured (~/.claude/settings.json)")
-    elif os.path.exists(".claude/settings.json"):
-        try:
-            raw = open(".claude/settings.json", encoding="utf-8").read()
-            if "agent-trace record" in raw:
-                ok.append("Claude Code project settings mention agent-trace record")
-            else:
-                warn.append("Claude .claude/settings.json present but no agent-trace record hook")
-        except OSError:
-            warn.append("Could not read .claude/settings.json")
-    elif initialised:
-        warn.append("Claude Code hooks not configured (no global or project hooks)")
+    # Hooks — check global first, then project-level. Each registered
+    # adapter is responsible for its own paths; doctor just iterates.
+    for adapter in iter_adapters():
+        label = adapter.display_name or adapter.name
+        global_path = adapter.global_config_path()
+        if adapter.is_installed():
+            ok.append(f"{label} global hooks configured ({global_path})")
+            continue
+        # Project-level fallback: look for an ``agent-trace record`` mention in
+        # the adapter's project config. The adapter owns the path list via
+        # ``project_config_paths`` — doctor stays agent-agnostic.
+        project_paths = _project_hook_paths_for(adapter)
+        any_present = False
+        for project_path in project_paths:
+            if os.path.exists(project_path):
+                any_present = True
+                try:
+                    raw = open(project_path, encoding="utf-8").read()
+                except OSError:
+                    warn.append(f"Could not read {project_path}")
+                    continue
+                if AGENT_TRACE_CMD in raw:
+                    ok.append(f"{label} project hooks mention {AGENT_TRACE_CMD} ({project_path})")
+                else:
+                    warn.append(
+                        f"{label} {project_path} present but no {AGENT_TRACE_CMD} hook found",
+                    )
+                break
+        if not any_present and initialised:
+            warn.append(f"{label} hooks not configured (no global or project hooks)")
 
     git_hook_ok = False
     git_rewrite_ok = False
@@ -478,10 +483,6 @@ def cmd_status(_args):
         except Exception:
             pass
 
-    cursor_global = has_global_cursor_hooks()
-    claude_global = has_global_claude_hooks()
-    cursor_project = os.path.exists(".cursor/hooks.json")
-    claude_project = os.path.exists(".claude/settings.json")
     git_hook_ok = False
     git_rewrite_ok = False
     try:
@@ -504,8 +505,14 @@ def cmd_status(_args):
             return "project"
         return "not configured"
 
-    print(f"\n  Cursor hook:       {_hook_label(cursor_global, cursor_project)}")
-    print(f"  Claude Code hook:  {_hook_label(claude_global, claude_project)}")
+    print()
+    for adapter in iter_adapters():
+        label = adapter.display_name or adapter.name
+        is_global = adapter.is_installed()
+        is_project = any(
+            os.path.exists(p) for p in _project_hook_paths_for(adapter)
+        )
+        print(f"  {label} hook:".ljust(22) + _hook_label(is_global, is_project))
     print(f"  Git post-commit:   {'configured' if git_hook_ok else 'not configured'}")
     print(f"  Git post-rewrite:  {'configured' if git_rewrite_ok else 'not configured'}")
 
@@ -562,12 +569,11 @@ def cmd_reset(_args):
             else:
                 print(f"  -> Skipped (no remote \"{rn}\")")
 
-    if _confirm("Reconfigure Cursor hook?", default=False):
-        configure_cursor_hooks()
-        print("  -> Cursor hooks configured.")
-    if _confirm("Reconfigure Claude Code hook?", default=False):
-        configure_claude_hooks()
-        print("  -> Claude Code hooks configured.")
+    for adapter in iter_adapters():
+        label = adapter.display_name or adapter.name
+        if _confirm(f"Reconfigure {label} hook?", default=False):
+            adapter.inject(AGENT_TRACE_CMD, global_install=False)
+            print(f"  -> {label} hooks configured.")
     if os.path.isdir(".git") and _confirm("Reinstall git hooks?", default=False):
         configure_git_hooks()
         print("  -> Git hooks reinstalled.")
@@ -652,10 +658,6 @@ def _load_safe_remotes(project_id: str) -> dict:
 
 
 def _hook_config_status() -> dict:
-    cursor_global = has_global_cursor_hooks()
-    claude_global = has_global_claude_hooks()
-    cursor_project = os.path.exists(".cursor/hooks.json")
-    claude_project = os.path.exists(".claude/settings.json")
     git_post_commit = False
     git_post_rewrite = False
     try:
@@ -670,14 +672,19 @@ def _hook_config_status() -> dict:
                 git_post_rewrite = "agent-trace rewrite-ledger" in f.read()
     except OSError:
         pass
-    return {
-        "cursor": {"global": cursor_global, "project": cursor_project},
-        "claude": {"global": claude_global, "project": claude_project},
-        "git": {
-            "post_commit": git_post_commit,
-            "post_rewrite": git_post_rewrite,
-        },
+    out: dict = {}
+    for adapter in iter_adapters():
+        out[adapter.name] = {
+            "global": adapter.is_installed(),
+            "project": any(
+                os.path.exists(p) for p in _project_hook_paths_for(adapter)
+            ),
+        }
+    out["git"] = {
+        "post_commit": git_post_commit,
+        "post_rewrite": git_post_rewrite,
     }
+    return out
 
 
 def _full_config_snapshot() -> dict:
@@ -908,7 +915,10 @@ def cmd_config(args):
 # hooks (global hook management)
 # ===================================================================
 
-HOOK_TOOL_CHOICES = ["cursor", "claude"]
+# Computed lazily from the adapter registry so newly registered tools
+# are picked up automatically by the ``--tool`` flag and by status output.
+def _hook_tool_choices() -> list[str]:
+    return adapter_names()
 
 
 def cmd_hooks(args):
@@ -916,7 +926,7 @@ def cmd_hooks(args):
     action = getattr(args, "hooks_action", None)
 
     if action == "setup-global":
-        tools = getattr(args, "tools", None) or HOOK_TOOL_CHOICES
+        tools = getattr(args, "tools", None) or _hook_tool_choices()
         results = setup_global_hooks(tools)
         for tool, ok in results.items():
             if ok:
@@ -925,7 +935,7 @@ def cmd_hooks(args):
                 print(f"  !! Failed to configure global {tool} hooks")
 
     elif action == "remove-global":
-        tools = getattr(args, "tools", None) or HOOK_TOOL_CHOICES
+        tools = getattr(args, "tools", None) or _hook_tool_choices()
         results = remove_global_hooks(tools)
         for tool, removed in results.items():
             if removed:
@@ -934,13 +944,11 @@ def cmd_hooks(args):
                 print(f"  -- Global {tool} hooks were not present")
 
     elif action == "status":
-        cursor_global = has_global_cursor_hooks()
-        claude_global = has_global_claude_hooks()
         print("Global hooks:")
-        print(f"  Cursor:     {'configured' if cursor_global else 'not configured'}"
-              f"  (~/.cursor/hooks.json)")
-        print(f"  Claude Code: {'configured' if claude_global else 'not configured'}"
-              f"  (~/.claude/settings.json)")
+        for adapter in iter_adapters():
+            label = adapter.display_name or adapter.name
+            state = "configured" if adapter.is_installed() else "not configured"
+            print(f"  {label:<12} {state:<16}  ({adapter.global_config_path()})")
 
     else:
         print("Usage: agent-trace hooks {setup-global,remove-global,status}")
@@ -1098,10 +1106,11 @@ def cmd_rule(args):
     """Manage agent rules."""
     rule_action = getattr(args, "rule_action", None)
 
+    rule_tools_help = " | ".join(list(TOOL_CHOICES))
     if rule_action == "add":
         tool = getattr(args, "tool", None)
         if not tool:
-            print("--tool is required. Use --tool cursor or --tool claude", file=sys.stderr)
+            print(f"--tool is required. Use --tool <{rule_tools_help}>", file=sys.stderr)
             sys.exit(1)
         path = add_rule(args.rule_name, tool)
         print(f"Rule '{args.rule_name}' added for {tool}: {path}")
@@ -1109,7 +1118,7 @@ def cmd_rule(args):
     elif rule_action == "remove":
         tool = getattr(args, "tool", None)
         if not tool:
-            print("--tool is required. Use --tool cursor or --tool claude", file=sys.stderr)
+            print(f"--tool is required. Use --tool <{rule_tools_help}>", file=sys.stderr)
             sys.exit(1)
         path = remove_rule(args.rule_name, tool)
         if path:
@@ -1137,7 +1146,7 @@ def cmd_rule(args):
         for entry in available:
             print(f"  {entry['name']:<25} {entry['description']}")
         print()
-        print("Add a rule with: agent-trace rule add <name> --tool <cursor|claude>")
+        print(f"Add a rule with: agent-trace rule add <name> --tool <{'|'.join(list(TOOL_CHOICES))}>")
 
     else:
         print("Usage: agent-trace rule {add,remove,show,list}")
@@ -1774,13 +1783,21 @@ def main():
     )
 
     # hooks {setup-global, remove-global, status}
-    sub_hooks = sub.add_parser("hooks", help="Manage global hooks for coding tools (Cursor, Claude Code)")
+    hook_choices = _hook_tool_choices()
+    hook_choices_help = ", ".join(hook_choices)
+    sub_hooks = sub.add_parser(
+        "hooks",
+        help=f"Manage global hooks for coding tools ({hook_choices_help})",
+    )
     hooks_sub = sub_hooks.add_subparsers(dest="hooks_action", metavar="ACTION")
-    h_setup = hooks_sub.add_parser("setup-global", help="Install global hooks (~/.cursor/hooks.json, ~/.claude/settings.json)")
-    h_setup.add_argument("--tool", "-t", dest="tools", action="append", choices=HOOK_TOOL_CHOICES,
+    h_setup = hooks_sub.add_parser(
+        "setup-global",
+        help="Install global hooks for one or more registered coding-agent adapters",
+    )
+    h_setup.add_argument("--tool", "-t", dest="tools", action="append", choices=hook_choices,
                          help="Tool(s) to configure (default: all). Can be repeated.")
     h_remove = hooks_sub.add_parser("remove-global", help="Remove global hooks")
-    h_remove.add_argument("--tool", "-t", dest="tools", action="append", choices=HOOK_TOOL_CHOICES,
+    h_remove.add_argument("--tool", "-t", dest="tools", action="append", choices=hook_choices,
                           help="Tool(s) to remove (default: all). Can be repeated.")
     hooks_sub.add_parser("status", help="Show global hook status")
 
@@ -1838,17 +1855,20 @@ def main():
     sub_rule = sub.add_parser("rule", help="Manage agent rules for coding agents")
     rule_sub = sub_rule.add_subparsers(dest="rule_action", metavar="ACTION")
 
-    # rule add <name> --tool <cursor|claude>
+    rule_tool_choices = list(TOOL_CHOICES)
+    rule_tool_help = " | ".join(rule_tool_choices) or "(no tools registered)"
+
+    # rule add <name> --tool <...>
     rule_add = rule_sub.add_parser("add", help="Add a prebuilt rule")
     rule_add.add_argument("rule_name", help="Rule name (e.g. context-for-agents)")
-    rule_add.add_argument("--tool", "-t", required=True, choices=TOOL_CHOICES,
-                          help="Tool to add the rule for (cursor or claude)")
+    rule_add.add_argument("--tool", "-t", required=True, choices=rule_tool_choices,
+                          help=f"Tool to add the rule for ({rule_tool_help})")
 
-    # rule remove <name> --tool <cursor|claude>
+    # rule remove <name> --tool <...>
     rule_rm = rule_sub.add_parser("remove", help="Remove a rule")
     rule_rm.add_argument("rule_name", help="Rule name (e.g. context-for-agents)")
-    rule_rm.add_argument("--tool", "-t", required=True, choices=TOOL_CHOICES,
-                         help="Tool to remove the rule from (cursor or claude)")
+    rule_rm.add_argument("--tool", "-t", required=True, choices=rule_tool_choices,
+                         help=f"Tool to remove the rule from ({rule_tool_help})")
 
     # rule show
     rule_sub.add_parser("show", help="Show which rules are configured")
