@@ -19,6 +19,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .conversations import (
+    CHUNK_THRESHOLD_BYTES,
+    ConversationBlob,
+    cache_path_for_sha,
+    enumerate_local_blobs,
+    write_blob_to_cache,
+)
 from .remote import get_remote_token, get_remote_url, resolve_remote
 from .storage import (
     ensure_project_dir,
@@ -117,6 +124,38 @@ def _http_get(url: str, token: str | None, timeout: int = 30) -> dict[str, Any]:
         req.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())
+
+
+def _http_get_bytes(url: str, token: str | None, timeout: int = 60) -> bytes:
+    req = urllib.request.Request(url, method="GET")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _http_head_status(url: str, token: str | None, timeout: int = 15) -> int:
+    """Return the HTTP status code of a HEAD request (or the HTTPError code)."""
+    req = urllib.request.Request(url, method="HEAD")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def _http_post_bytes(
+    url: str, body: bytes, token: str | None, *, content_type: str = "application/octet-stream", timeout: int = 60,
+) -> int:
+    """POST a raw byte body. Returns status code; raises HTTPError on >=400."""
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", content_type)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.status
 
 
 # -------------------------------------------------------------------
@@ -261,12 +300,155 @@ def push(
         elif to_push_c:
             result.commit_links_pushed = len(to_push_c)
 
+    # --- Conversations (chunked, hash-addressed) ---
+    if only is None or only == "conversations":
+        _push_conversations(
+            project_id=project_id,
+            base_url=base_url,
+            token=token,
+            last_push=last_push,
+            since=since,
+            full=full,
+            dry_run=dry_run,
+            result=result,
+        )
+
     # Update sync state
     if not dry_run:
         remote_state["last_push"] = last_push
         _save_sync_state(project_id, sync_state)
 
     return result
+
+
+def _push_conversations(
+    *,
+    project_id: str,
+    base_url: str,
+    token: str | None,
+    last_push: dict[str, Any],
+    since: str | None,
+    full: bool,
+    dry_run: bool,
+    result: PushResult,
+) -> None:
+    """Push transcript blobs and pointers, deduping by SHA-256.
+
+    Protocol per blob:
+      - Inline (size <= CHUNK_THRESHOLD_BYTES): include ``content`` directly
+        in the conversations POST.
+      - Chunked: ``HEAD /api/v1/blobs/<sha>``. If 200, blob is already on
+        the server — send a pointer only. If 404, ``POST /api/v1/blobs``
+        with the raw bytes, then send a pointer. If the blob endpoints are
+        not implemented (404/405 on POST), fall back to inline upload for
+        the rest of this run so older services keep working.
+    """
+    blobs = enumerate_local_blobs(project_id)
+    cursor = last_push.get("conversations_max_updated_at")
+
+    pending: list[ConversationBlob] = []
+    for b in blobs:
+        if not full and cursor and b.mtime <= cursor:
+            continue
+        if since and b.mtime < since:
+            continue
+        pending.append(b)
+
+    if not pending:
+        return
+
+    if dry_run:
+        result.conversations_pushed = len(pending)
+        return
+
+    items: list[dict[str, Any]] = []
+    chunked_supported = True
+    pushed_mtimes: list[str] = []
+
+    for b in pending:
+        item: dict[str, Any] = {
+            "url_hash": b.url_hash,
+            "content_sha256": b.content_sha256,
+            "size": b.size,
+            "updated_at": b.mtime,
+        }
+
+        send_inline = not b.is_chunked()
+
+        if not send_inline and chunked_supported:
+            blob_url = f"{base_url}/api/v1/blobs/{b.content_sha256}"
+            try:
+                head_status = _http_head_status(blob_url, token)
+            except Exception as e:
+                result.errors.append(f"conversations: HEAD {b.content_sha256[:12]}: {e}")
+                continue
+
+            if head_status == 200:
+                pass  # Blob already on server; pointer is enough.
+            else:
+                try:
+                    with open(b.local_path, "rb") as f:
+                        raw = f.read()
+                    _http_post_bytes(
+                        f"{base_url}/api/v1/blobs",
+                        raw,
+                        token,
+                    )
+                except urllib.error.HTTPError as e:
+                    if e.code in (404, 405):
+                        # Server doesn't support blob endpoint — fall back
+                        # to inline for this and all subsequent blobs.
+                        chunked_supported = False
+                        send_inline = True
+                    else:
+                        result.errors.append(
+                            f"conversations: POST blob {b.content_sha256[:12]}: {e}"
+                        )
+                        continue
+                except OSError as e:
+                    result.errors.append(
+                        f"conversations: read {b.local_path}: {e}"
+                    )
+                    continue
+                except Exception as e:
+                    result.errors.append(
+                        f"conversations: POST blob {b.content_sha256[:12]}: {e}"
+                    )
+                    continue
+        elif not send_inline and not chunked_supported:
+            send_inline = True
+
+        if send_inline:
+            try:
+                with open(b.local_path, "rb") as f:
+                    raw = f.read()
+            except OSError as e:
+                result.errors.append(f"conversations: read {b.local_path}: {e}")
+                continue
+            try:
+                item["content"] = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                import base64
+                item["content_b64"] = base64.b64encode(raw).decode("ascii")
+
+        items.append(item)
+        pushed_mtimes.append(b.mtime)
+
+    if not items:
+        return
+
+    try:
+        _http_post(
+            f"{base_url}/api/v1/sync/conversations",
+            {"project_id": project_id, "items": items},
+            token,
+        )
+        result.conversations_pushed = len(items)
+        max_mtime = max(pushed_mtimes, default=None)
+        if max_mtime:
+            last_push["conversations_max_updated_at"] = max_mtime
+    except Exception as e:
+        result.errors.append(f"conversations: {e}")
 
 
 # -------------------------------------------------------------------
@@ -387,6 +569,32 @@ def pull(
     except Exception as e:
         result.errors.append(f"commit-links: {e}")
 
+    # --- Conversations ---
+    try:
+        params = {"project_id": project_id, "limit": "500"}
+        if effective_since:
+            params["since"] = effective_since
+        qs = urllib.parse.urlencode(params)
+        data = _http_get(f"{base_url}/api/v1/sync/conversations?{qs}", token)
+        items = data.get("items", [])
+        if items and not dry_run:
+            result.conversations_pulled = _materialize_conversations(
+                project_id=project_id,
+                base_url=base_url,
+                token=token,
+                items=items,
+                errors=result.errors,
+            )
+        elif items:
+            result.conversations_pulled = len(items)
+    except urllib.error.HTTPError as e:
+        # Older services without the conversations endpoint return 404 —
+        # silently skip to keep pull working against legacy servers.
+        if e.code != 404:
+            result.errors.append(f"conversations: {e}")
+    except Exception as e:
+        result.errors.append(f"conversations: {e}")
+
     # Update pull cursor
     if not dry_run:
         now = datetime.now(timezone.utc).isoformat()
@@ -394,6 +602,56 @@ def pull(
         _save_sync_state(project_id, sync_state)
 
     return result
+
+
+def _materialize_conversations(
+    *,
+    project_id: str,
+    base_url: str,
+    token: str | None,
+    items: list[dict[str, Any]],
+    errors: list[str],
+) -> int:
+    """Write each pulled conversation blob into the local content-addressed
+    cache. Inline ``content`` is used when present; otherwise the blob is
+    fetched from ``GET /api/v1/blobs/<sha>``. Skips blobs already cached.
+
+    Returns the count of blobs newly written.
+    """
+    written = 0
+    for item in items:
+        sha = item.get("content_sha256")
+        if not isinstance(sha, str) or not sha:
+            continue
+        cache_path = cache_path_for_sha(project_id, sha)
+        if cache_path.is_file():
+            continue
+
+        raw: bytes | None = None
+        if isinstance(item.get("content"), str):
+            raw = item["content"].encode("utf-8")
+        elif isinstance(item.get("content_b64"), str):
+            import base64
+            try:
+                raw = base64.b64decode(item["content_b64"])
+            except Exception as e:
+                errors.append(f"conversations: bad b64 for {sha[:12]}: {e}")
+                continue
+        else:
+            try:
+                raw = _http_get_bytes(f"{base_url}/api/v1/blobs/{sha}", token)
+            except Exception as e:
+                errors.append(f"conversations: GET blob {sha[:12]}: {e}")
+                continue
+
+        try:
+            write_blob_to_cache(project_id, sha, raw)
+            written += 1
+        except ValueError as e:
+            errors.append(f"conversations: {e}")
+        except OSError as e:
+            errors.append(f"conversations: write {sha[:12]}: {e}")
+    return written
 
 
 # -------------------------------------------------------------------
