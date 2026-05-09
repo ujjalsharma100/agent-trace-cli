@@ -35,7 +35,7 @@ services:
       DB_USER: postgres
       DB_PASSWORD: postgres
       DB_NAME: agent_trace
-      AUTH_SECRET: e2e-docker-compose-secret
+      ADMIN_SECRET: e2e-docker-compose-admin-secret
       PORT: "5000"
       FLASK_DEBUG: "0"
     depends_on:

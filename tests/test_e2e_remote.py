@@ -35,10 +35,22 @@ def _skip_remote_e2e() -> bool:
     return not _e2e_service_url()
 
 
-def _http_json(method: str, url: str, body: dict | None = None, *, timeout: int = 30) -> dict:
+_ADMIN_SECRET_ENV = "AGENT_TRACE_E2E_ADMIN_SECRET"
+
+
+def _http_json(
+    method: str,
+    url: str,
+    body: dict | None = None,
+    *,
+    timeout: int = 30,
+    headers: dict | None = None,
+) -> dict:
     data = None if body is None else json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
@@ -48,10 +60,20 @@ def _http_json(method: str, url: str, body: dict | None = None, *, timeout: int 
 
 
 def _fetch_bearer_token(base_url: str) -> str:
+    """Mint a fresh bearer token via the admin API.
+
+    The compose stack sets ``ADMIN_SECRET=e2e-docker-compose-admin-secret``;
+    callers can override it with ``AGENT_TRACE_E2E_ADMIN_SECRET`` for ad-hoc
+    runs against a non-compose service.
+    """
+    admin_secret = os.environ.get(
+        _ADMIN_SECRET_ENV, "e2e-docker-compose-admin-secret",
+    )
     out = _http_json(
         "POST",
-        f"{base_url}/api/v1/tokens/generate",
-        {"user_id": "e2e-remote-test-user"},
+        f"{base_url}/api/v1/tokens",
+        {"name": "e2e-remote-test"},
+        headers={"X-Admin-Secret": admin_secret},
     )
     token = out.get("token")
     if not isinstance(token, str) or not token:
