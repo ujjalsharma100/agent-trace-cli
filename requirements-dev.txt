@@ -1,2 +1,5 @@
-jsonschema>=4.20
+# Prefer: pip install -e ".[dev]" (see pyproject.toml [project.optional-dependencies.dev])
+build
 hypothesis>=6.92
+jsonschema>=4.20
+pytest

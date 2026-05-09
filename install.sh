@@ -133,9 +133,9 @@ install_files() {
     # Copy all Python modules (avoid a stale whitelist — new files must ship too)
     cp "${SOURCE_DIR}/agent_trace/"*.py "${LIB_DIR}/agent_trace/"
 
-    if [ -d "${SOURCE_DIR}/schemas" ]; then
-        mkdir -p "${LIB_DIR}/schemas"
-        cp "${SOURCE_DIR}/schemas/"*.json "${LIB_DIR}/schemas/"
+    if [ -d "${SOURCE_DIR}/agent_trace/schemas" ]; then
+        mkdir -p "${LIB_DIR}/agent_trace/schemas"
+        cp "${SOURCE_DIR}/agent_trace/schemas/"*.json "${LIB_DIR}/agent_trace/schemas/"
     fi
 
     # Create the executable entry-point

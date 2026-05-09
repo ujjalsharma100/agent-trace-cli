@@ -1,5 +1,5 @@
 """
-Typed models mirroring JSON Schemas in ``schemas/`` — trace records, ledgers,
+Typed models mirroring JSON Schemas in ``agent_trace/schemas/`` — trace records, ledgers,
 commit links, git notes, remotes, and sync state.
 
 Use :func:`from_dict` dispatchers and ``.to_dict()`` for JSONL round-trips.
@@ -13,8 +13,8 @@ from typing import Any, cast
 
 
 def schemas_dir() -> Path:
-    """Directory containing ``*.schema.json`` (sibling of the ``agent_trace`` package)."""
-    return Path(__file__).resolve().parent.parent / "schemas"
+    """Directory containing ``*.schema.json`` shipped inside the ``agent_trace`` package."""
+    return Path(__file__).resolve().parent / "schemas"
 
 
 # --- Trace record (traces.jsonl) ---

@@ -46,6 +46,18 @@ cd agent-trace-cli
 bash install.sh
 ```
 
+### pip / Python package
+
+The project is published as a wheel (`pyproject.toml`). From a clone, in a virtualenv:
+
+```bash
+pip install .
+# contributors (tests + hypothesis + jsonschema):
+pip install -e ".[dev]"
+```
+
+When released to PyPI: `pip install agent-trace-cli`. Build artifacts locally with `python -m build` after `pip install -e ".[dev]"` (or `pip install build`).
+
 ### What the installer does
 
 1. If run via curl, downloads the repo from GitHub and runs the installer

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-trace-cli"
+version = "0.1.0"
+description = "CLI tool for tracing AI-generated code changes"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "build",
+    "hypothesis>=6.92",
+    "jsonschema>=4.20",
+    "pytest",
+]
+
+[project.scripts]
+agent-trace = "agent_trace.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent_trace*"]
+
+[tool.setuptools.package-data]
+agent_trace = ["schemas/*.schema.json"]
