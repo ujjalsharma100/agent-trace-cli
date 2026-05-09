@@ -33,6 +33,9 @@ Commands:
     agent-trace notes ...         Git notes (attach, rebuild, show, push, pull, …)
     agent-trace summary ...       Pluggable session summaries (enable, generate, show)
     agent-trace doctor            Check hooks, config, remotes, and tooling
+
+Global flags:
+    --telemetry on|off|status     Opt-in anonymous usage telemetry (default off)
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -95,6 +99,11 @@ from .remote import (
     show_remote as remote_show,
 )
 from .sync import pull as sync_pull, push as sync_push, status as sync_status
+from .telemetry import (
+    maybe_report_cli_run,
+    set_telemetry_enabled,
+    telemetry_status_lines,
+)
 from .summary_presets import (
     DEFAULT_OLLAMA_MODEL,
     PRESET_ALIASES,
@@ -772,7 +781,9 @@ def _redact_config_value(value):
         redacted = {}
         for key, val in value.items():
             lk = str(key).lower()
-            if lk in {"auth_token", "token"} or "secret" in lk:
+            if lk == "install_id" and val:
+                redacted[key] = "(anonymous id)"
+            elif lk in {"auth_token", "token"} or "secret" in lk:
                 redacted[key] = "(set)" if val else val
             elif lk == "tokens" and isinstance(val, dict):
                 redacted[key] = {name: "(set)" for name in val}
@@ -1898,8 +1909,71 @@ def cmd_notes(args):
 
 
 # ===================================================================
+# telemetry (global flag)
+# ===================================================================
+
+
+def cmd_telemetry_control(args) -> None:
+    """Handle ``agent-trace --telemetry on|off|status`` (no subcommand)."""
+    mode = args.telemetry
+    if mode == "on":
+        set_telemetry_enabled(True)
+        print("Anonymous telemetry is now enabled (see docs/concepts/telemetry.md).")
+        return
+    if mode == "off":
+        set_telemetry_enabled(False)
+        print("Telemetry is now disabled.")
+        return
+    for line in telemetry_status_lines():
+        print(line)
+
+
+# ===================================================================
 # Entry point
 # ===================================================================
+
+def _run_subcommand(args, set_p, rm_p) -> None:
+    """Run one subcommand; may raise ``SystemExit``."""
+    dispatch = {
+        "init": cmd_init,
+        "doctor": cmd_doctor,
+        "status": cmd_status,
+        "reset": cmd_reset,
+        "config": cmd_config,
+        "hooks": cmd_hooks,
+        "record": cmd_record,
+        "commit-link": cmd_commit_link,
+        "rewrite-ledger": cmd_rewrite_ledger,
+        "viewer": cmd_viewer,
+        "blame": cmd_blame,
+        "context": cmd_context,
+        "projects": cmd_projects,
+        "adopt": cmd_adopt,
+        "push": cmd_push,
+        "pull": cmd_pull,
+        "sync": cmd_sync,
+        "notes": cmd_notes,
+    }
+
+    if args.command in dispatch:
+        dispatch[args.command](args)
+    elif args.command == "remote":
+        cmd_remote(args)
+    elif args.command == "rule":
+        cmd_rule(args)
+    elif args.command == "set":
+        if getattr(args, "set_command", None) == "globaluser":
+            cmd_set_globaluser(args)
+        else:
+            set_p.print_help()
+    elif args.command == "remove":
+        if getattr(args, "remove_command", None) == "globaluser":
+            cmd_remove_globaluser(args)
+        else:
+            rm_p.print_help()
+    elif args.command == "summary":
+        cmd_summary(args)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1908,6 +1982,13 @@ def main():
     )
     parser.add_argument(
         "--version", action="version", version=f"agent-trace {VERSION}",
+    )
+    parser.add_argument(
+        "--telemetry",
+        choices=["on", "off", "status"],
+        default=None,
+        metavar="MODE",
+        help="opt-in anonymous telemetry: on, off, or status (no subcommand; default off)",
     )
 
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
@@ -2251,49 +2332,54 @@ def main():
 
     args = parser.parse_args()
 
+    if getattr(args, "telemetry", None) is not None:
+        if args.command is not None:
+            parser.error(
+                "--telemetry cannot be combined with a subcommand "
+                "(example: agent-trace --telemetry status)",
+            )
+        cmd_telemetry_control(args)
+        return
+
     if args.command is None:
         parser.print_help()
         sys.exit(0)
 
-    dispatch = {
-        "init": cmd_init,
-        "doctor": cmd_doctor,
-        "status": cmd_status,
-        "reset": cmd_reset,
-        "config": cmd_config,
-        "hooks": cmd_hooks,
-        "record": cmd_record,
-        "commit-link": cmd_commit_link,
-        "rewrite-ledger": cmd_rewrite_ledger,
-        "viewer": cmd_viewer,
-        "blame": cmd_blame,
-        "context": cmd_context,
-        "projects": cmd_projects,
-        "adopt": cmd_adopt,
-        "push": cmd_push,
-        "pull": cmd_pull,
-        "sync": cmd_sync,
-        "notes": cmd_notes,
-    }
-
-    if args.command in dispatch:
-        dispatch[args.command](args)
-    elif args.command == "remote":
-        cmd_remote(args)
-    elif args.command == "rule":
-        cmd_rule(args)
-    elif args.command == "set":
-        if getattr(args, "set_command", None) == "globaluser":
-            cmd_set_globaluser(args)
-        else:
-            set_p.print_help()
-    elif args.command == "remove":
-        if getattr(args, "remove_command", None) == "globaluser":
-            cmd_remove_globaluser(args)
-        else:
-            rm_p.print_help()
-    elif args.command == "summary":
-        cmd_summary(args)
+    start = time.monotonic()
+    try:
+        _run_subcommand(args, set_p, rm_p)
+    except SystemExit as exc:
+        code = exc.code
+        exit_code = (
+            0
+            if code is None
+            else (code if isinstance(code, int) else (1 if code else 0))
+        )
+        duration_ms = int((time.monotonic() - start) * 1000)
+        maybe_report_cli_run(
+            version=VERSION,
+            command=args.command,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+        )
+        raise
+    except BaseException:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        maybe_report_cli_run(
+            version=VERSION,
+            command=args.command,
+            exit_code=1,
+            duration_ms=duration_ms,
+        )
+        raise
+    else:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        maybe_report_cli_run(
+            version=VERSION,
+            command=args.command,
+            exit_code=0,
+            duration_ms=duration_ms,
+        )
 
 
 if __name__ == "__main__":

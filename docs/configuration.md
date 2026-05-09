@@ -92,6 +92,14 @@ CLI uses **dotted keys with hyphens** (for example `notes.include-ledger`). On d
 
 ---
 
+## Telemetry
+
+Anonymous CLI usage telemetry is **opt-in** (default **off**). Use **`agent-trace --telemetry on|off|status`**; preferences live in **`$AGENT_TRACE_HOME/config.json`** under a **`telemetry`** object (`enabled`, `install_id`). Override at runtime with **`AGENT_TRACE_TELEMETRY`** — see [Environment variables](environment-variables.md).
+
+**Endpoint decision (M0):** there is no production collector yet. The CLI ships with a **placeholder** POST URL so early adopters can enable the preference without upgrading later; failed sends are ignored. See [Telemetry concept](concepts/telemetry.md) for payload fields and semantics.
+
+---
+
 ## Related commands
 
 - **`agent-trace reset`** — broader interactive reconfiguration wizard (different from `config reset`).

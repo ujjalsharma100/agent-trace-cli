@@ -31,6 +31,18 @@ Resolution order (auth): **`AGENT_TRACE_TOKEN` env → global config file**.
 
 ---
 
+## `AGENT_TRACE_TELEMETRY`
+
+Optional override for **anonymous CLI telemetry** (see [Telemetry](concepts/telemetry.md)).
+
+| When set | Behavior |
+|----------|----------|
+| Truthy (`1`, `true`, `yes`, `on`, …) | Force telemetry **on** (still fail-closed if POST fails) |
+| Falsy (`0`, `false`, `no`, `off`, …) | Force telemetry **off** |
+| Unset | Follow **`telemetry.enabled`** in global `config.json` |
+
+---
+
 ## Hook / GUI `PATH` augmentation (internal)
 
 Summary **preset** execution augments `PATH` with common install locations (for example `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`) so binaries like `ollama` or `cursor` remain discoverable when hooks run under a reduced environment. This is not a user-set variable but explains “works in terminal, fails in IDE” class issues.

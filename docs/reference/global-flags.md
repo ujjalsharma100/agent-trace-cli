@@ -16,6 +16,20 @@ agent-trace --version
 
 ---
 
+## `--telemetry on|off|status`
+
+Controls **opt-in anonymous usage telemetry**. Must be used **without** a subcommand on the same invocation (combining with a command is an error).
+
+```bash
+agent-trace --telemetry on
+agent-trace --telemetry off
+agent-trace --telemetry status
+```
+
+Default is **off**. **`AGENT_TRACE_TELEMETRY`** can override the saved preference — see [Telemetry](../concepts/telemetry.md).
+
+---
+
 ## No subcommand
 
 ```bash
@@ -44,5 +58,7 @@ The CLI does **not** currently expose global flags for:
 - Debug / trace logging level
 - Config file path override (use `AGENT_TRACE_HOME` instead)
 - Non-interactive mode for **all** commands (`config reset` has partial `--yes` support only)
+
+Telemetry uses **`--telemetry`** rather than a separate debug-style flag — see above.
 
 If you need those behaviors for packaging, open a feature request on the repository tracker.
