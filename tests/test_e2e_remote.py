@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -59,6 +60,10 @@ def _http_json(
         raise AssertionError(f"{method} {url} failed: HTTP {e.code}\n{raw}") from e
 
 
+def _admin_secret() -> str:
+    return os.environ.get(_ADMIN_SECRET_ENV, "e2e-docker-compose-admin-secret")
+
+
 def _fetch_bearer_token(base_url: str) -> str:
     """Mint a fresh bearer token via the admin API.
 
@@ -66,19 +71,26 @@ def _fetch_bearer_token(base_url: str) -> str:
     callers can override it with ``AGENT_TRACE_E2E_ADMIN_SECRET`` for ad-hoc
     runs against a non-compose service.
     """
-    admin_secret = os.environ.get(
-        _ADMIN_SECRET_ENV, "e2e-docker-compose-admin-secret",
-    )
     out = _http_json(
         "POST",
         f"{base_url}/api/v1/tokens",
         {"name": "e2e-remote-test"},
-        headers={"X-Admin-Secret": admin_secret},
+        headers={"X-Admin-Secret": _admin_secret()},
     )
     token = out.get("token")
     if not isinstance(token, str) or not token:
         raise AssertionError(f"token missing in response: {out!r}")
     return token
+
+
+def _register_project(base_url: str, slug: str) -> None:
+    """Create a project via the admin path so the slug-bearing URL works."""
+    _http_json(
+        "POST",
+        f"{base_url}/api/v1/projects",
+        {"project_id": slug, "name": "e2e-remote-test"},
+        headers={"X-Admin-Secret": _admin_secret()},
+    )
 
 
 def _cli_json_env(
@@ -128,6 +140,9 @@ class TestRemotePushPullRoundTrip(unittest.TestCase):
         self.assertEqual(health.get("status"), "ok")
 
         token = _fetch_bearer_token(base_url)
+        slug = f"e2e-remote-{int(time.time() * 1000)}"
+        _register_project(base_url, slug)
+        remote_url = f"{base_url}/default/{slug}"
 
         with E2EContext() as ctx:
             ctx.git_init()
@@ -140,7 +155,7 @@ class TestRemotePushPullRoundTrip(unittest.TestCase):
             ctx.claude_write("hello.py", content)
             ctx.commit("ai write hello")
 
-            ctx.cli("remote", "add", "origin", base_url, "--token", token)
+            ctx.cli("remote", "add", "origin", remote_url, "--token", token)
             push_r = ctx.cli("push", "--full")
             self.assertEqual(push_r.returncode, 0, push_r.stderr + push_r.stdout)
             self.assertNotIn("Error:", push_r.stderr)
@@ -171,7 +186,7 @@ class TestRemotePushPullRoundTrip(unittest.TestCase):
                 }
 
                 r_add = subprocess.run(
-                    [sys.executable, "-m", "agent_trace.cli", "remote", "add", "origin", base_url, "--token", token],
+                    [sys.executable, "-m", "agent_trace.cli", "remote", "add", "origin", remote_url, "--token", token],
                     cwd=str(repo2),
                     env=env2,
                     capture_output=True,

@@ -1,9 +1,14 @@
 """
 Remote configuration management — git remote-like model.
 
-Each project can have multiple named remotes, each with a URL and
-separately-stored auth.  Token storage backends:
+Each project can have multiple named remotes. The remote URL has the shape
+``<scheme>://<host>[:port]/<org_slug>/<project_slug>`` — mirroring
+``github.com/<org>/<repo>``. The ``project_slug`` parsed out of the URL is
+the **wire** ``project_id`` used by the sync routes; the local on-disk
+data directory still uses the anchor-derived local id, so the
+standalone-no-service flow is unaffected.
 
+Tokens are stored separately:
   - ``global:<name>``  → ``~/.agent-trace/config.json`` under ``tokens.<name>``
   - ``env:<VAR>``      → ``os.environ[VAR]`` at runtime (never persisted)
   - ``keychain:<name>``→ OS keychain (scaffold only — not yet implemented)
@@ -15,10 +20,68 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
 from .storage import ensure_project_dir, get_project_dir
+
+
+# -------------------------------------------------------------------
+# URL parsing
+# -------------------------------------------------------------------
+
+# Mirrors the server-side CHECK on orgs.slug and projects.project_id.
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+class RemoteUrlError(ValueError):
+    """Raised when a remote URL doesn't match the slug-grammar."""
+
+
+def parse_remote_url(url: str) -> tuple[str, str, str]:
+    """Parse a remote URL into (base_url, org_slug, project_slug).
+
+    Accepts: ``<scheme>://<host>[:port]/<org_slug>/<project_slug>`` with an
+    optional trailing slash. Rejects bare-host URLs and URLs whose path
+    component does not match the slug grammar.
+
+    Raises ``RemoteUrlError`` with a hint pointing at the expected shape.
+    """
+    parsed = urllib.parse.urlsplit(url.strip())
+    if parsed.scheme not in ("http", "https"):
+        raise RemoteUrlError(
+            f"Unsupported scheme {parsed.scheme!r}. Expected http or https."
+        )
+    if not parsed.netloc:
+        raise RemoteUrlError(f"URL is missing host: {url!r}")
+
+    path = parsed.path.strip("/")
+    parts = [p for p in path.split("/") if p]
+    if len(parts) != 2:
+        raise RemoteUrlError(
+            "Remote URL must include the project path. "
+            f"Expected ``<scheme>://<host>/<org_slug>/<project_slug>``; got {url!r}. "
+            "Run `agent-trace project create <url>` if you need to register the slug first."
+        )
+
+    org_slug, project_slug = parts
+    if not _SLUG_RE.match(org_slug):
+        raise RemoteUrlError(
+            f"Org slug {org_slug!r} must match {_SLUG_RE.pattern}."
+        )
+    if not _SLUG_RE.match(project_slug):
+        raise RemoteUrlError(
+            f"Project slug {project_slug!r} must match {_SLUG_RE.pattern}."
+        )
+
+    base = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    return base, org_slug, project_slug
+
+
+def is_slug(value: str) -> bool:
+    return bool(_SLUG_RE.match(value or ""))
 
 
 # -------------------------------------------------------------------
@@ -110,10 +173,16 @@ def add_remote(
     token_env: str | None = None,
     token_keychain: str | None = None,
 ) -> dict[str, Any]:
-    """Add a new named remote.  Returns the remote config dict."""
+    """Add a new named remote.  Returns the remote config dict.
+
+    The URL must include the ``<org>/<project>`` path; ``parse_remote_url``
+    raises ``RemoteUrlError`` otherwise.
+    """
     remotes = _load_remotes(project_id)
     if name in remotes:
         raise ValueError(f"Remote '{name}' already exists. Use set-url to change its URL.")
+
+    base_url, org_slug, project_slug = parse_remote_url(url)
 
     auth: dict[str, str] | None = None
     if token:
@@ -124,7 +193,12 @@ def add_remote(
     elif token_keychain:
         auth = {"type": "bearer", "token_ref": f"keychain:{token_keychain}"}
 
-    entry: dict[str, Any] = {"url": url.rstrip("/")}
+    entry: dict[str, Any] = {
+        "url": url.rstrip("/"),
+        "base_url": base_url,
+        "org_slug": org_slug,
+        "project_slug": project_slug,
+    }
     if auth:
         entry["auth"] = auth
 
@@ -163,11 +237,19 @@ def remove_remote(project_id: str, name: str) -> bool:
 
 
 def set_remote_url(project_id: str, name: str, url: str) -> None:
-    """Change the URL for an existing remote."""
+    """Change the URL for an existing remote. Re-parses to refresh the
+    derived slug fields.
+    """
     remotes = _load_remotes(project_id)
     if name not in remotes:
         raise ValueError(f"Remote '{name}' does not exist.")
-    remotes[name]["url"] = url.rstrip("/")
+    base_url, org_slug, project_slug = parse_remote_url(url)
+    remotes[name].update({
+        "url": url.rstrip("/"),
+        "base_url": base_url,
+        "org_slug": org_slug,
+        "project_slug": project_slug,
+    })
     _save_remotes(project_id, remotes)
 
 
@@ -254,8 +336,56 @@ def resolve_remote(project_id: str, name: str | None = None) -> tuple[str, dict[
 
 
 def get_remote_url(remote_conf: dict[str, Any]) -> str:
-    """Extract URL from a remote config dict."""
+    """Full user-facing URL (including ``/<org>/<project>``)."""
     return remote_conf.get("url", "")
+
+
+def get_remote_base_url(remote_conf: dict[str, Any]) -> str:
+    """Service base URL (``<scheme>://<host>``) — used for API calls.
+
+    Falls back to re-parsing ``url`` for older remotes written before the
+    derived fields existed.
+    """
+    base = remote_conf.get("base_url")
+    if base:
+        return base
+    url = remote_conf.get("url", "")
+    if not url:
+        return ""
+    try:
+        base, _, _ = parse_remote_url(url)
+        return base
+    except RemoteUrlError:
+        return url
+
+
+def get_remote_project_slug(remote_conf: dict[str, Any]) -> str | None:
+    """Wire ``project_id`` for sync calls. ``None`` only for malformed remotes."""
+    slug = remote_conf.get("project_slug")
+    if slug:
+        return slug
+    url = remote_conf.get("url", "")
+    if not url:
+        return None
+    try:
+        _, _, slug = parse_remote_url(url)
+        return slug
+    except RemoteUrlError:
+        return None
+
+
+def get_remote_org_slug(remote_conf: dict[str, Any]) -> str | None:
+    slug = remote_conf.get("org_slug")
+    if slug:
+        return slug
+    url = remote_conf.get("url", "")
+    if not url:
+        return None
+    try:
+        _, slug, _ = parse_remote_url(url)
+        return slug
+    except RemoteUrlError:
+        return None
 
 
 def get_remote_token(remote_conf: dict[str, Any]) -> str | None:
@@ -278,7 +408,71 @@ def show_remote(project_id: str, name: str) -> dict[str, Any] | None:
     return {
         "name": name,
         "url": conf.get("url", ""),
+        "base_url": get_remote_base_url(conf),
+        "org_slug": get_remote_org_slug(conf) or "",
+        "project_slug": get_remote_project_slug(conf) or "",
         "auth_type": auth.get("type", "none"),
         "token_ref": token_ref,
         "token_masked": _mask_token(resolved),
     }
+
+
+# -------------------------------------------------------------------
+# Network: project registration
+# -------------------------------------------------------------------
+
+class ProjectRegistrationError(Exception):
+    """``register_project_via_remote`` raised; carries the HTTP status."""
+
+    def __init__(self, status: int, message: str) -> None:
+        self.status = status
+        super().__init__(message)
+
+
+def register_project_via_remote(
+    base_url: str,
+    project_slug: str,
+    *,
+    token: str | None = None,
+    admin_secret: str | None = None,
+    name: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any]:
+    """POST /api/v1/projects on the service. Returns the project record on
+    success.
+
+    Auth: pass ``token`` for an org-scoped Bearer (must carry
+    ``projects:write``), or ``admin_secret`` for the X-Admin-Secret path.
+    """
+    import json as _json
+    import urllib.error as _ue
+    import urllib.request as _ur
+
+    body: dict[str, Any] = {"project_id": project_slug}
+    if name is not None:
+        body["name"] = name
+    if description is not None:
+        body["description"] = description
+
+    req = _ur.Request(
+        f"{base_url.rstrip('/')}/api/v1/projects",
+        data=_json.dumps(body).encode("utf-8"),
+        method="POST",
+    )
+    req.add_header("Content-Type", "application/json")
+    if admin_secret:
+        req.add_header("X-Admin-Secret", admin_secret)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+
+    try:
+        with _ur.urlopen(req, timeout=30) as resp:
+            return _json.loads(resp.read().decode())
+    except _ue.HTTPError as e:
+        raw = e.read().decode() if e.fp else ""
+        try:
+            payload = _json.loads(raw) if raw else {}
+        except _json.JSONDecodeError:
+            payload = {"raw": raw}
+        msg = payload.get("error") or f"HTTP {e.code}"
+        raise ProjectRegistrationError(e.code, msg) from None

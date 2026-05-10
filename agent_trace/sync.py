@@ -26,7 +26,13 @@ from .conversations import (
     enumerate_local_blobs,
     write_blob_to_cache,
 )
-from .remote import get_remote_token, get_remote_url, resolve_remote
+from .remote import (
+    get_remote_base_url,
+    get_remote_project_slug,
+    get_remote_token,
+    get_remote_url,
+    resolve_remote,
+)
 from .storage import (
     ensure_project_dir,
     get_commit_links_path,
@@ -186,11 +192,18 @@ def push(
     result = PushResult(dry_run=dry_run)
 
     rname, rconf = resolve_remote(project_id, remote_name)
-    base_url = get_remote_url(rconf).rstrip("/")
+    base_url = get_remote_base_url(rconf).rstrip("/")
+    wire_project_id = get_remote_project_slug(rconf)
     token = get_remote_token(rconf)
 
     if not base_url:
         result.errors.append("Remote has no URL configured.")
+        return result
+    if not wire_project_id:
+        result.errors.append(
+            "Remote URL is missing the project path (<scheme>://<host>/<org>/<project>). "
+            "Run `agent-trace remote set-url` to fix it."
+        )
         return result
 
     attributed_ids = compute_attributed_trace_ids(project_id) if not full else None
@@ -224,7 +237,7 @@ def push(
             try:
                 _http_post(
                     f"{base_url}/api/v1/sync/traces",
-                    {"project_id": project_id, "items": to_push},
+                    {"project_id": wire_project_id, "items": to_push},
                     token,
                 )
                 result.traces_pushed = len(to_push)
@@ -253,7 +266,7 @@ def push(
             try:
                 _http_post(
                     f"{base_url}/api/v1/sync/ledgers",
-                    {"project_id": project_id, "items": to_push_l},
+                    {"project_id": wire_project_id, "items": to_push_l},
                     token,
                 )
                 result.ledgers_pushed = len(to_push_l)
@@ -285,7 +298,7 @@ def push(
             try:
                 _http_post(
                     f"{base_url}/api/v1/sync/commit-links",
-                    {"project_id": project_id, "items": to_push_c},
+                    {"project_id": wire_project_id, "items": to_push_c},
                     token,
                 )
                 result.commit_links_pushed = len(to_push_c)
@@ -304,6 +317,7 @@ def push(
     if only is None or only == "conversations":
         _push_conversations(
             project_id=project_id,
+            wire_project_id=wire_project_id,
             base_url=base_url,
             token=token,
             last_push=last_push,
@@ -324,6 +338,7 @@ def push(
 def _push_conversations(
     *,
     project_id: str,
+    wire_project_id: str,
     base_url: str,
     token: str | None,
     last_push: dict[str, Any],
@@ -440,7 +455,7 @@ def _push_conversations(
     try:
         _http_post(
             f"{base_url}/api/v1/sync/conversations",
-            {"project_id": project_id, "items": items},
+            {"project_id": wire_project_id, "items": items},
             token,
         )
         result.conversations_pushed = len(items)
@@ -503,11 +518,17 @@ def pull(
     result = PullResult(dry_run=dry_run)
 
     rname, rconf = resolve_remote(project_id, remote_name)
-    base_url = get_remote_url(rconf).rstrip("/")
+    base_url = get_remote_base_url(rconf).rstrip("/")
+    wire_project_id = get_remote_project_slug(rconf)
     token = get_remote_token(rconf)
 
     if not base_url:
         result.errors.append("Remote has no URL configured.")
+        return result
+    if not wire_project_id:
+        result.errors.append(
+            "Remote URL is missing the project path (<scheme>://<host>/<org>/<project>)."
+        )
         return result
 
     sync_state = _load_sync_state(project_id)
@@ -520,7 +541,7 @@ def pull(
 
     # --- Traces ---
     try:
-        params = {"project_id": project_id, "limit": "500"}
+        params = {"project_id": wire_project_id, "limit": "500"}
         if effective_since:
             params["since"] = effective_since
         qs = urllib.parse.urlencode(params)
@@ -537,7 +558,7 @@ def pull(
 
     # --- Ledgers ---
     try:
-        params = {"project_id": project_id, "limit": "500"}
+        params = {"project_id": wire_project_id, "limit": "500"}
         if effective_since:
             params["since"] = effective_since
         qs = urllib.parse.urlencode(params)
@@ -554,7 +575,7 @@ def pull(
 
     # --- Commit links ---
     try:
-        params = {"project_id": project_id, "limit": "500"}
+        params = {"project_id": wire_project_id, "limit": "500"}
         if effective_since:
             params["since"] = effective_since
         qs = urllib.parse.urlencode(params)
@@ -571,7 +592,7 @@ def pull(
 
     # --- Conversations ---
     try:
-        params = {"project_id": project_id, "limit": "500"}
+        params = {"project_id": wire_project_id, "limit": "500"}
         if effective_since:
             params["since"] = effective_since
         qs = urllib.parse.urlencode(params)

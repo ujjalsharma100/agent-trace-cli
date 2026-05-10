@@ -216,7 +216,7 @@ class TestPushConversationsInline(unittest.TestCase):
         self._env_patch.start()
         self.pid = "test-project"
         ensure_project_dir(self.pid)
-        add_remote(self.pid, "origin", "https://traces.example.com", token="t")
+        add_remote(self.pid, "origin", "https://traces.example.com/acme/myrepo", token="t")
 
         self.transcript = Path(self.tmpdir) / "small.jsonl"
         self.transcript.write_text("tiny transcript\n")
@@ -259,7 +259,7 @@ class TestPushConversationsChunked(unittest.TestCase):
         self._env_patch.start()
         self.pid = "test-project"
         ensure_project_dir(self.pid)
-        add_remote(self.pid, "origin", "https://traces.example.com", token="t")
+        add_remote(self.pid, "origin", "https://traces.example.com/acme/myrepo", token="t")
 
         self.transcript = Path(self.tmpdir) / "big.jsonl"
         # Make it bigger than the chunk threshold.
@@ -354,7 +354,7 @@ class TestSyncStateCursor(unittest.TestCase):
         self._env_patch.start()
         self.pid = "test-project"
         ensure_project_dir(self.pid)
-        add_remote(self.pid, "origin", "https://traces.example.com", token="t")
+        add_remote(self.pid, "origin", "https://traces.example.com/acme/myrepo", token="t")
 
         self.transcript = Path(self.tmpdir) / "small.jsonl"
         self.transcript.write_text("hi\n")
@@ -385,7 +385,7 @@ class TestRoundTrip(unittest.TestCase):
         self._env_patch.start()
         self.pid = "test-project"
         ensure_project_dir(self.pid)
-        add_remote(self.pid, "origin", "https://traces.example.com", token="t")
+        add_remote(self.pid, "origin", "https://traces.example.com/acme/myrepo", token="t")
 
         # 2 MB transcript with deterministic content.
         self.transcript = Path(self.tmpdir) / "big.jsonl"
@@ -451,7 +451,7 @@ class TestRoundTrip(unittest.TestCase):
         fresh_home = tempfile.mkdtemp()
         with patch.dict(os.environ, {"AGENT_TRACE_HOME": fresh_home}):
             ensure_project_dir(self.pid)
-            add_remote(self.pid, "origin", "https://traces.example.com", token="t")
+            add_remote(self.pid, "origin", "https://traces.example.com/acme/myrepo", token="t")
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
                 pull_result = pull(self.pid)
 

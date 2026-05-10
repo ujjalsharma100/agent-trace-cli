@@ -167,7 +167,7 @@ class TestPushDryRun(unittest.TestCase):
         self._env_patch.start()
         self.pid = "test-project"
         ensure_project_dir(self.pid)
-        add_remote(self.pid, "origin", "https://traces.example.com", token="t")
+        add_remote(self.pid, "origin", "https://traces.example.com/acme/myrepo", token="t")
 
     def tearDown(self):
         self._env_patch.stop()

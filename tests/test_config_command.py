@@ -61,12 +61,12 @@ class TestConfigCommand(unittest.TestCase):
 
     def test_show_snapshot_includes_full_config_and_redacts_tokens(self) -> None:
         save_global_config({"auth_token": "top-secret", "tokens": {"origin": "remote-secret"}})
-        add_remote(self.pid, "origin", "https://example.com", token="remote-secret")
+        add_remote(self.pid, "origin", "https://example.com/acme/myrepo", token="remote-secret")
 
         snapshot = _full_config_snapshot()
 
         self.assertEqual(snapshot["project"]["config"]["summary"]["command"], "cat")
-        self.assertEqual(snapshot["project"]["remotes"]["origin"]["url"], "https://example.com")
+        self.assertEqual(snapshot["project"]["remotes"]["origin"]["url"], "https://example.com/acme/myrepo")
         self.assertEqual(snapshot["global"]["config"]["auth_token"], "(set)")
         self.assertEqual(snapshot["global"]["config"]["tokens"]["origin"], "(set)")
 

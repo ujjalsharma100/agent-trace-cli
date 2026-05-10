@@ -88,9 +88,13 @@ from .rules import add_rule, remove_rule, show_rules, list_available_rules, TOOL
 from .record import record_from_stdin
 from .rewrite import rewrite_ledgers
 from .remote import (
+    ProjectRegistrationError,
+    RemoteUrlError,
     add_remote as remote_add,
     get_default_remote,
     list_remotes as remote_list,
+    parse_remote_url,
+    register_project_via_remote,
     remove_remote as remote_remove,
     rename_remote as remote_rename,
     set_default_remote,
@@ -432,6 +436,15 @@ def _doctor_diagnose(cwd: str) -> tuple[list[str], list[str], list[str], DoctorF
                 hints.notes_refspec_needed = True
 
     if pid:
+        from .remote import (
+            RemoteUrlError,
+            get_remote as _doctor_get_remote,
+            get_remote_base_url,
+            get_remote_org_slug,
+            get_remote_project_slug,
+            parse_remote_url,
+        )
+
         remotes = remote_list(pid)
         if not remotes:
             ok.append("No sync remotes configured (optional: agent-trace remote add)")
@@ -441,11 +454,23 @@ def _doctor_diagnose(cwd: str) -> tuple[list[str], list[str], list[str], DoctorF
             if not url:
                 warn.append(f"Remote '{name}' has no URL")
                 continue
-            alive, detail = _probe_remote_health(url)
+            try:
+                parse_remote_url(url)
+            except RemoteUrlError as e:
+                err.append(
+                    f"Remote '{name}' URL is malformed: {e}. "
+                    f"Run `agent-trace remote set-url {name} <scheme>://<host>/<org>/<project>`."
+                )
+                continue
+            conf = _doctor_get_remote(pid, name) or {}
+            base_url = get_remote_base_url(conf)
+            org = get_remote_org_slug(conf) or "?"
+            proj = get_remote_project_slug(conf) or "?"
+            alive, detail = _probe_remote_health(base_url)
             if alive:
-                ok.append(f"Remote '{name}' responds ({detail})")
+                ok.append(f"Remote '{name}' responds at {base_url} (org={org}, project={proj}) ({detail})")
             else:
-                warn.append(f"Remote '{name}' not reachable at {url} ({detail})")
+                warn.append(f"Remote '{name}' not reachable at {base_url} ({detail})")
 
     summ = (cfg or {}).get("summary") if cfg else None
     if isinstance(summ, dict) and summ.get("enabled"):
@@ -1385,6 +1410,59 @@ def cmd_adopt(args):
 
 
 # ===================================================================
+# project create — register a project on a remote service
+# ===================================================================
+
+def cmd_project(args):
+    """Server-side project administration (currently: create)."""
+    action = getattr(args, "project_action", None)
+    if action == "create":
+        return _cmd_project_create(args)
+    print(
+        "Usage: agent-trace project create <remote-url> [--token TOKEN | --token-env VAR] "
+        "[--name NAME] [--description TEXT]",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def _cmd_project_create(args):
+    url = args.url
+    try:
+        base_url, _, project_slug = parse_remote_url(url)
+    except RemoteUrlError as e:
+        print(f"agent-trace project create: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    token_value = getattr(args, "token", None)
+    token_env = getattr(args, "token_env", None)
+    if token_value is None and token_env:
+        token_value = os.environ.get(token_env)
+    admin_secret = os.environ.get("AGENT_TRACE_ADMIN_SECRET")
+
+    if not token_value and not admin_secret:
+        print(
+            "agent-trace project create: a token is required. Pass --token / --token-env, "
+            "or set AGENT_TRACE_ADMIN_SECRET to use the admin path.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        proj = register_project_via_remote(
+            base_url, project_slug,
+            token=token_value, admin_secret=admin_secret,
+            name=getattr(args, "name", None),
+            description=getattr(args, "description", None),
+        )
+    except ProjectRegistrationError as e:
+        print(f"agent-trace project create: {e}", file=sys.stderr)
+        sys.exit(1 if e.status != 409 else 2)
+
+    print(json.dumps(proj, indent=2))
+
+
+# ===================================================================
 # remote
 # ===================================================================
 
@@ -1403,11 +1481,44 @@ def cmd_remote(args):
 
     if action == "add":
         pid = _resolve_pid_for_remote()
+        url = args.url
+        token_value = getattr(args, "token", None)
+        token_env = getattr(args, "token_env", None)
+
+        if getattr(args, "create", False):
+            try:
+                base_url, _, project_slug = parse_remote_url(url)
+            except RemoteUrlError as e:
+                print(f"agent-trace remote add: {e}", file=sys.stderr)
+                sys.exit(1)
+            registration_token = token_value
+            if registration_token is None and token_env:
+                registration_token = os.environ.get(token_env)
+            admin_secret = os.environ.get("AGENT_TRACE_ADMIN_SECRET")
+            if not registration_token and not admin_secret:
+                print(
+                    "agent-trace remote add --create: a token is required to register the "
+                    "project. Pass --token, --token-env, or set AGENT_TRACE_ADMIN_SECRET.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            try:
+                proj = register_project_via_remote(
+                    base_url, project_slug,
+                    token=registration_token, admin_secret=admin_secret,
+                )
+                print(f"Registered project '{proj['project_id']}' on {base_url}")
+            except ProjectRegistrationError as e:
+                if e.status == 409:
+                    print(f"Project '{project_slug}' already exists; binding the remote anyway.")
+                else:
+                    print(f"agent-trace remote add --create: {e}", file=sys.stderr)
+                    sys.exit(1)
+
         try:
             entry = remote_add(
-                pid, args.name, args.url,
-                token=getattr(args, "token", None),
-                token_env=getattr(args, "token_env", None),
+                pid, args.name, url,
+                token=token_value, token_env=token_env,
             )
             print(f"Remote '{args.name}' added: {entry['url']}")
         except ValueError as e:
@@ -1432,6 +1543,9 @@ def cmd_remote(args):
             sys.exit(1)
         print(f"  Name:     {info['name']}")
         print(f"  URL:      {info['url']}")
+        print(f"  Host:     {info['base_url']}")
+        print(f"  Org:      {info['org_slug']}")
+        print(f"  Project:  {info['project_slug']}")
         print(f"  Auth:     {info['auth_type']}")
         print(f"  Token:    {info['token_masked']}  (ref: {info['token_ref']})")
 
@@ -1949,6 +2063,7 @@ def _run_subcommand(args, set_p, rm_p) -> None:
         "context": cmd_context,
         "projects": cmd_projects,
         "adopt": cmd_adopt,
+        "project": cmd_project,
         "push": cmd_push,
         "pull": cmd_pull,
         "sync": cmd_sync,
@@ -2141,9 +2256,13 @@ def main():
 
     r_add = remote_sub.add_parser("add", help="Add a remote")
     r_add.add_argument("name", help="Remote name (e.g. origin)")
-    r_add.add_argument("url", help="Remote URL")
+    r_add.add_argument("url", help="Remote URL: <scheme>://<host>/<org>/<project>")
     r_add.add_argument("--token", default=None, help="Auth token (stored globally)")
     r_add.add_argument("--token-env", default=None, help="Environment variable holding the token")
+    r_add.add_argument(
+        "--create", action="store_true", default=False,
+        help="Register the project on the remote service before storing the remote",
+    )
 
     r_list = remote_sub.add_parser("list", help="List remotes")
 
@@ -2201,6 +2320,26 @@ def main():
         default=".",
         help="Path to repository (default: current directory)",
     )
+
+    # project {create}
+    p_project = sub.add_parser("project", help="Server-side project administration")
+    project_sub = p_project.add_subparsers(dest="project_action", metavar="ACTION")
+
+    p_proj_create = project_sub.add_parser(
+        "create",
+        help="Register a project on a remote service (POST /api/v1/projects)",
+    )
+    p_proj_create.add_argument(
+        "url",
+        help="Remote URL: <scheme>://<host>/<org>/<project>",
+    )
+    p_proj_create.add_argument("--token", default=None, help="Org-scoped token (with projects:write)")
+    p_proj_create.add_argument(
+        "--token-env", default=None,
+        help="Environment variable holding the token",
+    )
+    p_proj_create.add_argument("--name", default=None, help="Optional human-readable display name")
+    p_proj_create.add_argument("--description", default=None, help="Optional description")
 
     # notes {show, attach, rebuild, backfill, strip, push, pull}
     sub_notes = sub.add_parser("notes", help="Git notes (refs/notes/agent-trace)")
