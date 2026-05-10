@@ -128,15 +128,12 @@ install_files() {
     info "Installing to ${INSTALL_DIR} ..."
 
     mkdir -p "${BIN_DIR}"
-    mkdir -p "${LIB_DIR}/agent_trace"
-
-    # Copy all Python modules (avoid a stale whitelist — new files must ship too)
-    cp "${SOURCE_DIR}/agent_trace/"*.py "${LIB_DIR}/agent_trace/"
-
-    if [ -d "${SOURCE_DIR}/agent_trace/schemas" ]; then
-        mkdir -p "${LIB_DIR}/agent_trace/schemas"
-        cp "${SOURCE_DIR}/agent_trace/schemas/"*.json "${LIB_DIR}/agent_trace/schemas/"
-    fi
+    # BSD/macOS cp: if LIB_DIR does not exist, `cp -R agent_trace lib/` flattens package files into lib/
+    # (no lib/agent_trace/), so `import agent_trace` fails. Always create LIB_DIR first.
+    # Replace entire lib/ so a previous broken layout (flattened copy) is removed.
+    rm -rf "${LIB_DIR}"
+    mkdir -p "${LIB_DIR}"
+    cp -R "${SOURCE_DIR}/agent_trace" "${LIB_DIR}/"
 
     # Create the executable entry-point
     cat > "${BIN_DIR}/agent-trace" << 'ENTRY_POINT'
