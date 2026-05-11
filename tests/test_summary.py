@@ -1,4 +1,4 @@
-"""Tests for URL-keyed transcript summaries."""
+"""Tests for conversation-id-keyed transcript summaries."""
 
 from __future__ import annotations
 
@@ -12,6 +12,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_trace.config import get_project_config, save_project_config
+from agent_trace.conversations import (
+    compute_conversation_id,
+    snapshot_transcript_to_cache,
+)
 from agent_trace.record import record_from_stdin
 from agent_trace.session import touch_session_project
 from agent_trace.storage import (
@@ -24,7 +28,7 @@ from agent_trace.summary import (
     append_summary,
     generate_summary_text,
     get_summary_for_commit,
-    latest_summary_by_url,
+    latest_summary_by_id,
     merge_note_summaries,
     run_summary_generate,
 )
@@ -32,14 +36,12 @@ from agent_trace.summary_presets import build_preset_command
 
 
 def _tmp_dir() -> str:
-    """Workspace-local temp (avoids sandbox issues with system temp)."""
     root = Path(__file__).resolve().parent.parent / ".pytest_agent_trace_tmp"
     root.mkdir(parents=True, exist_ok=True)
     return tempfile.mkdtemp(dir=root)
 
 
 def _fake_repo_with_project(parent: Path) -> tuple[Path, str]:
-    """A git-initialized directory + its anchor-derived project_id."""
     from agent_trace.storage import resolve_project_id
 
     base = parent / "repo"
@@ -71,7 +73,9 @@ def _fake_repo_with_project(parent: Path) -> tuple[Path, str]:
     return base, pid
 
 
-def _trace_with_url(tid: str, session_id: str, url: str) -> dict:
+def _trace_with_conversation(
+    tid: str, session_id: str, conversation_id: str, content_sha256: str,
+) -> dict:
     return {
         "version": "2.0",
         "id": tid,
@@ -84,7 +88,8 @@ def _trace_with_url(tid: str, session_id: str, url: str) -> dict:
                     {
                         "contributor": {"type": "ai", "model_id": "claude"},
                         "ranges": [{"start_line": 1, "end_line": 1}],
-                        "url": url,
+                        "id": conversation_id,
+                        "content_sha256": content_sha256,
                     }
                 ],
             }
@@ -93,7 +98,7 @@ def _trace_with_url(tid: str, session_id: str, url: str) -> dict:
     }
 
 
-def _ledger_with_url(commit_sha: str, url: str, trace_id: str = "tid1") -> dict:
+def _ledger_with_conversation(commit_sha: str, conversation_id: str, trace_id: str = "tid1") -> dict:
     return {
         "version": "1.0",
         "commit_sha": commit_sha,
@@ -109,7 +114,7 @@ def _ledger_with_url(commit_sha: str, url: str, trace_id: str = "tid1") -> dict:
                         "end_line": 1,
                         "type": "ai",
                         "trace_id": trace_id,
-                        "conversation_url": url,
+                        "conversation_id": conversation_id,
                     }
                 ]
             }
@@ -150,23 +155,23 @@ class TestAppendAndLookup(unittest.TestCase):
         self._p.stop()
 
     def test_latest_wins(self) -> None:
-        url = "file:///tmp/transcript.jsonl"
-        append_summary(self.pid, url, "first")
-        append_summary(self.pid, url, "second")
-        m = latest_summary_by_url(self.pid)
-        self.assertEqual(m[url], "second")
+        cid = "ab" * 32
+        append_summary(self.pid, cid, "first")
+        append_summary(self.pid, cid, "second")
+        m = latest_summary_by_id(self.pid)
+        self.assertEqual(m[cid], "second")
 
-    def test_summary_for_commit_walks_ledger_urls(self) -> None:
-        url = "file:///tmp/transcript-x.jsonl"
-        append_summary(self.pid, url, "the summary")
+    def test_summary_for_commit_walks_ledger_conversation_ids(self) -> None:
+        cid = "cd" * 32
+        append_summary(self.pid, cid, "the summary")
         commit_sha = "c" * 40
         get_ledgers_path(self.pid).write_text(
-            json.dumps(_ledger_with_url(commit_sha, url)) + "\n",
+            json.dumps(_ledger_with_conversation(commit_sha, cid)) + "\n",
         )
         out = get_summary_for_commit(self.pid, commit_sha)
         self.assertIsNotNone(out)
         assert out is not None
-        self.assertEqual(out, {url: "the summary"})
+        self.assertEqual(out, {cid: "the summary"})
 
     def test_failed_command_does_not_append(self) -> None:
         path = get_session_summaries_path(self.pid)
@@ -188,16 +193,15 @@ class TestMergeNoteSummaries(unittest.TestCase):
     def tearDown(self) -> None:
         self._p.stop()
 
-    def test_url_keyed(self) -> None:
+    def test_id_keyed(self) -> None:
         sha = "a" * 40
-        url = "file:///tmp/transcript-merge.jsonl"
-        append_summary(self.pid, url, "from session")
+        cid = "ef" * 32
+        append_summary(self.pid, cid, "from session")
         get_ledgers_path(self.pid).write_text(
-            json.dumps(_ledger_with_url(sha, url, trace_id="z1")) + "\n",
+            json.dumps(_ledger_with_conversation(sha, cid, trace_id="z1")) + "\n",
         )
-        # Static map argument is accepted for caller compat but ignored.
         m = merge_note_summaries(str(self.repo), {"commit_sha": sha}, {"static.txt": "x"})
-        self.assertEqual(m, {url: "from session"})
+        self.assertEqual(m, {cid: "from session"})
 
 
 class TestSummaryHookIntegration(unittest.TestCase):
@@ -219,9 +223,18 @@ class TestSummaryHookIntegration(unittest.TestCase):
         )
         self.transcript = Path(self.tmp) / "transcript.jsonl"
         self.transcript.write_text("user: hi\nassistant: hello\n")
+        self.cid = compute_conversation_id(str(self.transcript))
 
     def tearDown(self) -> None:
         self._p.stop()
+
+    def _assert_summary_row(self, path: Path, *, session_id: str) -> None:
+        self.assertTrue(path.is_file())
+        line = path.read_text().strip()
+        row = json.loads(line)
+        self.assertEqual(row["conversation_id"], self.cid)
+        self.assertIn("hello", row["summary"])
+        self.assertEqual(row["session_id"], session_id)
 
     def test_stop_hook_reads_transcript_and_writes_jsonl(self) -> None:
         payload = json.dumps(
@@ -236,13 +249,10 @@ class TestSummaryHookIntegration(unittest.TestCase):
 
         with patch.object(sys, "stdin", io.StringIO(payload)):
             record_from_stdin()
-        path = get_session_summaries_path(self.pid)
-        self.assertTrue(path.is_file())
-        line = path.read_text().strip()
-        row = json.loads(line)
-        self.assertEqual(row["conversation_url"], f"file://{self.transcript}")
-        self.assertIn("hello", row["summary"])
-        self.assertEqual(row["session_id"], "conv-99")
+        self._assert_summary_row(
+            get_session_summaries_path(self.pid),
+            session_id="conv-99",
+        )
 
     def test_session_end_hook_reads_transcript_and_writes_jsonl(self) -> None:
         payload = json.dumps(
@@ -257,16 +267,12 @@ class TestSummaryHookIntegration(unittest.TestCase):
 
         with patch.object(sys, "stdin", io.StringIO(payload)):
             record_from_stdin()
-        path = get_session_summaries_path(self.pid)
-        self.assertTrue(path.is_file())
-        line = path.read_text().strip()
-        row = json.loads(line)
-        self.assertEqual(row["conversation_url"], f"file://{self.transcript}")
-        self.assertIn("hello", row["summary"])
-        self.assertEqual(row["session_id"], "conv-session-end")
+        self._assert_summary_row(
+            get_session_summaries_path(self.pid),
+            session_id="conv-session-end",
+        )
 
     def test_session_end_uses_cursor_transcript_env(self) -> None:
-        """Cursor sessionEnd JSON has no transcript_path; use CURSOR_TRANSCRIPT_PATH."""
         payload = json.dumps(
             {
                 "hook_event_name": "sessionEnd",
@@ -289,15 +295,12 @@ class TestSummaryHookIntegration(unittest.TestCase):
         self.assertTrue(path.is_file())
         line = path.read_text().strip()
         row = json.loads(line)
-        self.assertEqual(row["conversation_url"], f"file://{self.transcript}")
+        self.assertEqual(row["conversation_id"], self.cid)
         self.assertIn("hello", row["summary"])
 
     def test_session_end_uses_session_manifest_when_cwd_is_parent_of_nested_repo(
         self,
     ) -> None:
-        """Summary attributes to the inner repo (where file traces and config live) when
-        ``cwd`` is the outer folder — same scenario as a multi-root / parent workspace.
-        """
         outer = Path(self.tmp) / "outer"
         inner = outer / "inner"
         outer.mkdir(parents=True)
@@ -379,7 +382,7 @@ class TestSummaryHookIntegration(unittest.TestCase):
         self.assertTrue(path.is_file(), msg="summary should land in inner repo project")
         line = path.read_text().strip()
         row = json.loads(line)
-        self.assertEqual(row["conversation_url"], f"file://{self.transcript}")
+        self.assertEqual(row["conversation_id"], self.cid)
         self.assertIn("hello", row["summary"])
 
 
@@ -504,9 +507,13 @@ class TestRunSummaryGenerate(unittest.TestCase):
         )
         self.transcript = Path(self.tmp) / "g-transcript.jsonl"
         self.transcript.write_text("session content here")
-        self.url = f"file://{self.transcript}"
+        self.cid = compute_conversation_id(str(self.transcript))
+        # Snapshot bytes into cache so summary generator can read them.
+        snap = snapshot_transcript_to_cache(self.pid, str(self.transcript))
+        assert snap is not None
+        sha, _ = snap
         get_traces_path(self.pid).write_text(
-            json.dumps(_trace_with_url("g1", "sess-gen", self.url)) + "\n",
+            json.dumps(_trace_with_conversation("g1", "sess-gen", self.cid, sha)) + "\n",
         )
 
     def tearDown(self) -> None:
@@ -516,10 +523,10 @@ class TestRunSummaryGenerate(unittest.TestCase):
         out = run_summary_generate(str(self.repo), session_id="sess-gen")
         self.assertIsNotNone(out)
         assert out is not None
-        self.assertEqual(out[self.url], "session content here")
+        self.assertEqual(out[self.cid], "session content here")
         path = get_session_summaries_path(self.pid)
         self.assertIn("session content here", path.read_text())
 
-    def test_generate_by_url(self) -> None:
-        out = run_summary_generate(str(self.repo), conversation_url=self.url)
-        self.assertEqual(out, {self.url: "session content here"})
+    def test_generate_by_conversation_id(self) -> None:
+        out = run_summary_generate(str(self.repo), conversation_id=self.cid)
+        self.assertEqual(out, {self.cid: "session content here"})

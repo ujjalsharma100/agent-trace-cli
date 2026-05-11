@@ -212,7 +212,7 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
   const [resizingSide, setResizingSide] = useState(false);
   const [blamePaneWidth] = useState(200);
   const [tracePaneWidth] = useState(160);
-  const [conversationUrl, setConversationUrl] = useState(null);
+  const [conversationId, setConversationId] = useState(null);
   const [conversationContent, setConversationContent] = useState(null);
   const [conversationLoading, setConversationLoading] = useState(false);
   const [conversationError, setConversationError] = useState(null);
@@ -234,7 +234,7 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
   useEffect(() => {
     if (!hasBlameOrTrace) {
       setPinnedLine(null);
-      setConversationUrl(null);
+      setConversationId(null);
       setConversationContent(null);
       clearTimeout(popoverTimer.current);
       setPopover(null);
@@ -247,23 +247,17 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
   }, [content]);
 
   /* ─── Conversation fetching ─────────────────────────── */
-  const fetchConversation = useCallback((url) => {
-    if (!url) return;
+  const fetchConversation = useCallback((cid) => {
+    if (!cid) return;
     setConversationLoading(true);
     setConversationError(null);
     setConversationContent(null);
-    fetch(`${API}/api/conversation?url=${encodeURIComponent(url)}`)
+    fetch(`${API}/api/conversation?conversation_id=${encodeURIComponent(cid)}`)
       .then((r) => {
         if (!r.ok) return r.json().then((j) => Promise.reject(new Error(j.error || r.statusText)));
         return r.json();
       })
       .then((data) => {
-        if (data.open_external && data.url) {
-          window.open(data.url, '_blank', 'noopener,noreferrer');
-          setConversationUrl(null);
-          setConversationLoading(false);
-          return;
-        }
         setConversationContent(data.content ?? '');
         setConversationLoading(false);
       })
@@ -274,22 +268,22 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
   }, []);
 
   useEffect(() => {
-    if (conversationUrl) fetchConversation(conversationUrl);
-  }, [conversationUrl, fetchConversation]);
+    if (conversationId) fetchConversation(conversationId);
+  }, [conversationId, fetchConversation]);
 
   // Auto-switch conversation when pinned line changes (only when Trace Attribution is on)
   useEffect(() => {
     if (pinnedLine != null && showTraceBlame) {
       const attr = findAttributionForLine(attributions, pinnedLine);
-      if (attr?.conversation_url) {
-        setConversationUrl(attr.conversation_url);
+      if (attr?.conversation_id) {
+        setConversationId(attr.conversation_id);
       } else {
-        setConversationUrl(null);
+        setConversationId(null);
         setConversationContent(null);
         setConversationError(null);
       }
     } else if (!showTraceBlame) {
-      setConversationUrl(null);
+      setConversationId(null);
       setConversationContent(null);
       setConversationError(null);
     }
@@ -680,7 +674,7 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
               <div className="line-label">
                 Line <span>{pinnedLine}</span>
               </div>
-              <button type="button" className="unpin-btn" onClick={() => { setPinnedLine(null); setConversationUrl(null); setConversationContent(null); }}>
+              <button type="button" className="unpin-btn" onClick={() => { setPinnedLine(null); setConversationId(null); setConversationContent(null); }}>
                 Unpin &times;
               </button>
             </div>
@@ -974,12 +968,12 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
                 </CollapsibleSection>
               )}
 
-              {showTraceBlame && conversationUrl != null && (
+              {showTraceBlame && conversationId != null && (
                 <ConversationPanel
                   content={conversationContent}
                   loading={conversationLoading}
                   error={conversationError}
-                  onRetry={() => fetchConversation(conversationUrl)}
+                  onRetry={() => fetchConversation(conversationId)}
                   onMaximize={() => setConvMaximized(true)}
                 />
               )}
@@ -1025,8 +1019,8 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
       )}
 
       {/* ─── Maximized conversation modal ─────────────── */}
-      {convMaximized && conversationUrl && (
-        <ConversationModal conversationUrl={conversationUrl} onClose={() => setConvMaximized(false)} />
+      {convMaximized && conversationId && (
+        <ConversationModal conversationId={conversationId} onClose={() => setConvMaximized(false)} />
       )}
     </div>
   );

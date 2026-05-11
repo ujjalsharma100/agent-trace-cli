@@ -256,27 +256,22 @@ export function ConversationPanel({ content, loading, error, onRetry, onMaximize
 
 /* ─── Full-screen modal version ─────────────────────────── */
 
-export default function ConversationModal({ conversationUrl, onClose }) {
+export default function ConversationModal({ conversationId, onClose }) {
   const [content, setContent] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   const fetchContent = useCallback(() => {
-    if (!conversationUrl) return;
+    if (!conversationId) return;
     setLoading(true);
     setError(null);
     setContent(null);
-    fetch(`${API}/api/conversation?url=${encodeURIComponent(conversationUrl)}`)
+    fetch(`${API}/api/conversation?conversation_id=${encodeURIComponent(conversationId)}`)
       .then((r) => {
         if (!r.ok) return r.json().then((j) => Promise.reject(new Error(j.error || r.statusText)));
         return r.json();
       })
       .then((data) => {
-        if (data.open_external && data.url) {
-          window.open(data.url, '_blank', 'noopener,noreferrer');
-          onClose();
-          return;
-        }
         setContent(data.content ?? '');
         setLoading(false);
       })
@@ -284,7 +279,7 @@ export default function ConversationModal({ conversationUrl, onClose }) {
         setError(e.message || 'Failed to load conversation');
         setLoading(false);
       });
-  }, [conversationUrl]);
+  }, [conversationId]);
 
   useEffect(() => { fetchContent(); }, [fetchContent]);
 

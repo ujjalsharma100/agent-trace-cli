@@ -30,6 +30,7 @@ from .conversations import (
     ConversationBlob,
     cache_path_for_sha,
     enumerate_local_blobs,
+    update_conversation_index,
     write_blob_to_cache,
 )
 from .remote import (
@@ -73,13 +74,15 @@ def _empty_remote_state() -> dict[str, Any]:
             "ledger_shas": [],
             "commit_link_shas": [],
             "blob_shas": [],
-            "conversation_url_hashes": [],
+            "conversation_ids": [],
+            "summary_keys": [],
         },
         "cursor": {
             "traces": None,
             "ledgers": None,
             "commit_links": None,
             "conversations": None,
+            "summaries": None,
         },
     }
 
@@ -263,6 +266,7 @@ class PushResult:
     ledgers_pushed: int = 0
     commit_links_pushed: int = 0
     conversations_pushed: int = 0
+    summaries_pushed: int = 0
     traces_held_back: int = 0
     errors: list[str] = field(default_factory=list)
     dry_run: bool = False
@@ -418,6 +422,19 @@ def push(
             result=result,
         )
 
+    # --- Summaries ---
+    if only is None or only == "summaries":
+        _push_summaries(
+            project_id=project_id,
+            wire_project_id=wire_project_id,
+            base_url=base_url,
+            token=token,
+            rs=rs,
+            since=since,
+            dry_run=dry_run,
+            result=result,
+        )
+
     if not dry_run:
         _save_sync_state(project_id, sync_state)
 
@@ -465,10 +482,10 @@ def _push_conversations(
     """Push transcript blobs and pointers, deduping by SHA-256.
 
     A conversation is "synced" when both its blob (sha) and its pointer
-    (url_hash) are confirmed on the server. We track them separately:
+    (conversation_id) are confirmed on the server. We track them separately:
 
       - ``synced.blob_shas`` — bytes are present on the server.
-      - ``synced.conversation_url_hashes`` — pointer row exists on the server.
+      - ``synced.conversation_ids`` — pointer row exists on the server.
 
     Inline (size <= chunk threshold) conversations carry their bytes in the
     pointer POST, so a successful pointer push implies the blob is present
@@ -477,11 +494,11 @@ def _push_conversations(
     """
     blobs = enumerate_local_blobs(project_id)
     synced_blob_shas = _synced_set(rs, "blob_shas")
-    synced_url_hashes = _synced_set(rs, "conversation_url_hashes")
+    synced_conv_ids = _synced_set(rs, "conversation_ids")
 
     pending: list[ConversationBlob] = []
     for b in blobs:
-        if b.url_hash in synced_url_hashes and b.content_sha256 in synced_blob_shas:
+        if b.conversation_id in synced_conv_ids and b.content_sha256 in synced_blob_shas:
             continue
         if since and b.mtime < since:
             continue
@@ -495,13 +512,14 @@ def _push_conversations(
         return
 
     items: list[dict[str, Any]] = []
-    item_url_hashes: list[str] = []
+    item_conv_ids: list[str] = []
     item_blob_shas: list[str] = []
     chunked_supported = True
 
     for b in pending:
+        cache_path = cache_path_for_sha(project_id, b.content_sha256)
         item: dict[str, Any] = {
-            "url_hash": b.url_hash,
+            "conversation_id": b.conversation_id,
             "content_sha256": b.content_sha256,
             "size": b.size,
             "updated_at": b.mtime,
@@ -524,7 +542,7 @@ def _push_conversations(
                     synced_blob_shas.add(b.content_sha256)
                 else:
                     try:
-                        with open(b.local_path, "rb") as f:
+                        with open(cache_path, "rb") as f:
                             raw = f.read()
                         _http_post_bytes(f"{base_url}/api/v1/blobs", raw, token)
                         synced_blob_shas.add(b.content_sha256)
@@ -538,7 +556,7 @@ def _push_conversations(
                             )
                             continue
                     except OSError as e:
-                        result.errors.append(f"conversations: read {b.local_path}: {e}")
+                        result.errors.append(f"conversations: read cache {b.content_sha256[:12]}: {e}")
                         continue
                     except Exception as e:
                         result.errors.append(
@@ -550,10 +568,10 @@ def _push_conversations(
 
         if send_inline:
             try:
-                with open(b.local_path, "rb") as f:
+                with open(cache_path, "rb") as f:
                     raw = f.read()
             except OSError as e:
-                result.errors.append(f"conversations: read {b.local_path}: {e}")
+                result.errors.append(f"conversations: read cache {b.content_sha256[:12]}: {e}")
                 continue
             try:
                 item["content"] = raw.decode("utf-8")
@@ -562,18 +580,17 @@ def _push_conversations(
                 item["content_b64"] = base64.b64encode(raw).decode("ascii")
 
         items.append(item)
-        item_url_hashes.append(b.url_hash)
+        item_conv_ids.append(b.conversation_id)
         item_blob_shas.append(b.content_sha256)
 
     if not items:
-        # Persist any blobs we did manage to upload (the head-200 / POST cases).
         _persist_synced_set(rs, "blob_shas", synced_blob_shas)
         return
 
     pushed_count = 0
     for start in range(0, len(items), PUSH_BATCH_SIZE):
         batch = items[start : start + PUSH_BATCH_SIZE]
-        batch_url_hashes = item_url_hashes[start : start + PUSH_BATCH_SIZE]
+        batch_conv_ids = item_conv_ids[start : start + PUSH_BATCH_SIZE]
         batch_blob_shas = item_blob_shas[start : start + PUSH_BATCH_SIZE]
         try:
             _http_post(
@@ -584,13 +601,86 @@ def _push_conversations(
         except Exception as e:
             result.errors.append(f"conversations: {e}")
             continue
-        synced_url_hashes.update(batch_url_hashes)
+        synced_conv_ids.update(batch_conv_ids)
         synced_blob_shas.update(batch_blob_shas)
         pushed_count += len(batch)
 
     _persist_synced_set(rs, "blob_shas", synced_blob_shas)
-    _persist_synced_set(rs, "conversation_url_hashes", synced_url_hashes)
+    _persist_synced_set(rs, "conversation_ids", synced_conv_ids)
     result.conversations_pushed = pushed_count
+
+
+def _summary_row_key(row: dict[str, Any]) -> str:
+    cid = str(row.get("conversation_id") or "")
+    ts = str(row.get("created_at") or "")
+    return f"{cid}:{ts}"
+
+
+def _push_summaries(
+    *,
+    project_id: str,
+    wire_project_id: str,
+    base_url: str,
+    token: str | None,
+    rs: dict[str, Any],
+    since: str | None,
+    dry_run: bool,
+    result: PushResult,
+) -> None:
+    """Push summary rows (``session-summaries.jsonl``) the server hasn't seen yet."""
+    from .summary import iter_summary_rows
+
+    rows = iter_summary_rows(project_id)
+    if not rows:
+        return
+
+    synced_keys = _synced_set(rs, "summary_keys")
+    pending: list[dict[str, Any]] = []
+    for row in rows:
+        cid = str(row.get("conversation_id") or "")
+        ts = str(row.get("created_at") or "")
+        if not cid or not ts:
+            continue
+        key = f"{cid}:{ts}"
+        if key in synced_keys:
+            continue
+        if since and ts < since:
+            continue
+        pending.append(row)
+
+    if not pending:
+        return
+
+    if dry_run:
+        result.summaries_pushed = len(pending)
+        return
+
+    pushed_count = 0
+    for start in range(0, len(pending), PUSH_BATCH_SIZE):
+        batch = pending[start : start + PUSH_BATCH_SIZE]
+        try:
+            _http_post(
+                f"{base_url}/api/v1/sync/summaries",
+                {"project_id": wire_project_id, "items": batch},
+                token,
+            )
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                # Older service without the summaries endpoint. Stop the leg
+                # cleanly so push doesn't bail on otherwise-good batches.
+                result.errors.append("summaries: endpoint not implemented (server too old)")
+                break
+            result.errors.append(f"summaries: {e}")
+            continue
+        except Exception as e:
+            result.errors.append(f"summaries: {e}")
+            continue
+        for row in batch:
+            synced_keys.add(_summary_row_key(row))
+        pushed_count += len(batch)
+
+    _persist_synced_set(rs, "summary_keys", synced_keys)
+    result.summaries_pushed = pushed_count
 
 
 # -------------------------------------------------------------------
@@ -603,6 +693,7 @@ class PullResult:
     ledgers_pulled: int = 0
     commit_links_pulled: int = 0
     conversations_pulled: int = 0
+    summaries_pulled: int = 0
     errors: list[str] = field(default_factory=list)
     dry_run: bool = False
 
@@ -835,6 +926,34 @@ def pull(
     except Exception as e:
         result.errors.append(f"conversations: {e}")
 
+    # --- Summaries ---
+    try:
+        items, new_cursor = _pull_paginated(
+            base_url=base_url,
+            path="/api/v1/sync/summaries",
+            wire_project_id=wire_project_id,
+            token=token,
+            cursor=cursor_for("summaries"),
+            error_label="summaries",
+            errors=result.errors,
+        )
+        if items and not dry_run:
+            result.summaries_pulled = _materialize_summaries(
+                project_id=project_id,
+                items=items,
+                rs=rs,
+                errors=result.errors,
+            )
+            if new_cursor:
+                rs["cursor"]["summaries"] = new_cursor
+        elif items:
+            result.summaries_pulled = len(items)
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            result.errors.append(f"summaries: {e}")
+    except Exception as e:
+        result.errors.append(f"summaries: {e}")
+
     if not dry_run:
         _save_sync_state(project_id, sync_state)
 
@@ -851,13 +970,13 @@ def _materialize_conversations(
     errors: list[str],
 ) -> int:
     """Write each pulled conversation blob into the local content-addressed
-    cache and add its sha + url_hash to the synced manifest. Inline content
-    is used when present; chunked blobs are fetched from
+    cache and add its sha + conversation_id to the synced manifest. Inline
+    content is used when present; chunked blobs are fetched from
     ``GET /api/v1/blobs/<sha>``. Returns count of blobs newly written.
     """
     written = 0
     synced_blob_shas = _synced_set(rs, "blob_shas")
-    synced_url_hashes = _synced_set(rs, "conversation_url_hashes")
+    synced_conv_ids = _synced_set(rs, "conversation_ids")
 
     for item in items:
         sha = item.get("content_sha256")
@@ -892,12 +1011,65 @@ def _materialize_conversations(
                     continue
             synced_blob_shas.add(sha)
 
-        url_hash = item.get("url_hash") or item.get("url")
-        if isinstance(url_hash, str) and url_hash:
-            synced_url_hashes.add(url_hash)
+        cid = item.get("conversation_id")
+        if isinstance(cid, str) and cid:
+            synced_conv_ids.add(cid)
+            # Server delivers items in updated_at ASC order, so the last
+            # pair we see for a given conversation_id is the freshest snapshot.
+            if isinstance(sha, str) and sha:
+                update_conversation_index(project_id, cid, sha)
 
     _persist_synced_set(rs, "blob_shas", synced_blob_shas)
-    _persist_synced_set(rs, "conversation_url_hashes", synced_url_hashes)
+    _persist_synced_set(rs, "conversation_ids", synced_conv_ids)
+    return written
+
+
+def _materialize_summaries(
+    *,
+    project_id: str,
+    items: list[dict[str, Any]],
+    rs: dict[str, Any],
+    errors: list[str],
+) -> int:
+    """Append pulled summary rows to ``session-summaries.jsonl``.
+
+    Dedup by synthetic ``<conversation_id>:<created_at>`` key — that pair is
+    the natural unique identifier (the same conversation can have multiple
+    regenerated summaries over time, each with its own timestamp).
+    """
+    from .summary import append_summary, iter_summary_rows
+
+    synced_keys = _synced_set(rs, "summary_keys")
+    existing_keys = {
+        _summary_row_key(row) for row in iter_summary_rows(project_id)
+    }
+    written = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        cid = item.get("conversation_id")
+        summary = item.get("summary")
+        if not isinstance(cid, str) or not isinstance(summary, str) or not cid or not summary:
+            continue
+        created_at = item.get("created_at") or item.get("updated_at")
+        if not isinstance(created_at, str) or not created_at:
+            errors.append(f"summaries: missing created_at for {cid[:12]}")
+            continue
+        key = f"{cid}:{created_at}"
+        if key in existing_keys:
+            synced_keys.add(key)
+            continue
+        session_id = item.get("session_id") if isinstance(item.get("session_id"), str) else None
+        row = append_summary(
+            project_id, cid, summary,
+            session_id=session_id, created_at=created_at,
+        )
+        if row is not None:
+            existing_keys.add(key)
+            synced_keys.add(key)
+            written += 1
+
+    _persist_synced_set(rs, "summary_keys", synced_keys)
     return written
 
 

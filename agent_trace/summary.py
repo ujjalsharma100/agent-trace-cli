@@ -1,19 +1,17 @@
 """
-URL-keyed transcript summaries — pluggable summarization of conversation
-transcripts referenced by traces.
+Conversation summaries — pluggable summarization of transcripts referenced
+by traces, keyed by ``conversation_id``.
 
-For each session, the conversation transcript file (whatever the agent
-writes to ``transcript_path`` — Claude Code JSONL, Cursor's equivalent,
-etc.) is read as raw text and piped to a user-configured command on
-stdin. The command's stdout is treated as the summary text and stored
-keyed by ``conversation_url`` (``file://<transcript_path>``). The
-schema of the transcript is opaque to agent-trace; the command decides
-what to do with it.
+For each session the transcript bytes live in the per-project
+content-addressed cache (``<project>/conversations/<sha[:2]>/<sha>``).
+Summary generation reads the latest cached snapshot referenced by traces
+for a given conversation_id and pipes it to a user-configured command.
+The command's stdout is stored keyed by ``conversation_id``.
 
 Opt-in via ``project-config.json`` → ``summary.enabled`` and
 ``summary.command``. Storage: ``session-summaries.jsonl`` under the
-project dir, one row per (url, summary). Failures never raise through
-hooks.
+project dir, one row per ``(conversation_id, summary)``. Failures never
+raise through hooks.
 """
 
 from __future__ import annotations
@@ -26,6 +24,12 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
+from .conversations import (
+    compute_conversation_id,
+    latest_sha_for_conversation,
+    read_blob_from_cache,
+    snapshot_transcript_to_cache,
+)
 from .storage import (
     ensure_project_dir,
     get_session_summaries_path,
@@ -39,17 +43,29 @@ def _log(msg: str) -> None:
     print(f"agent-trace: {msg}", file=sys.stderr)
 
 
-def _read_transcript(conversation_url: str) -> str | None:
-    """Read transcript bytes from a ``file://`` URL. Returns ``None`` if unreadable."""
-    if not conversation_url or not conversation_url.startswith("file://"):
+# -------------------------------------------------------------------
+# Conversation id → latest content_sha256 lookup (from local traces)
+# -------------------------------------------------------------------
+
+def _read_transcript_from_cache(
+    project_id: str, conversation_id: str,
+) -> str | None:
+    """Read the latest cached transcript bytes for a conversation_id."""
+    sha = latest_sha_for_conversation(project_id, conversation_id)
+    if not sha:
         return None
-    path = conversation_url[len("file://"):]
+    data = read_blob_from_cache(project_id, sha)
+    if data is None:
+        return None
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
-    except OSError:
+        return data.decode("utf-8", errors="replace")
+    except Exception:
         return None
 
+
+# -------------------------------------------------------------------
+# Summary command runner
+# -------------------------------------------------------------------
 
 def generate_summary_text(
     transcript_text: str,
@@ -99,22 +115,31 @@ def generate_summary_text(
     return out
 
 
+# -------------------------------------------------------------------
+# session-summaries.jsonl I/O
+# -------------------------------------------------------------------
+
 def append_summary(
     project_id: str,
-    conversation_url: str,
+    conversation_id: str,
     summary: str,
     *,
     session_id: str | None = None,
-) -> None:
-    """Append one row to ``session-summaries.jsonl``: ``{conversation_url, summary, ...}``."""
-    if not conversation_url or not summary:
-        return
+    created_at: str | None = None,
+) -> dict[str, Any] | None:
+    """Append one row to ``session-summaries.jsonl``: ``{conversation_id, summary, ...}``.
+
+    Returns the appended row dict (used by sync materialisation to track the
+    synthetic ``<conversation_id>:<created_at>`` key) or ``None`` on error.
+    """
+    if not conversation_id or not summary:
+        return None
     ensure_project_dir(project_id)
     path = get_session_summaries_path(project_id)
     row: dict[str, Any] = {
-        "conversation_url": conversation_url,
+        "conversation_id": conversation_id,
         "summary": summary,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": created_at or datetime.now(timezone.utc).isoformat(),
     }
     if session_id:
         row["session_id"] = session_id
@@ -122,15 +147,16 @@ def append_summary(
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     except OSError:
-        pass
+        return None
+    return row
 
 
-def latest_summary_by_url(project_id: str) -> dict[str, str]:
-    """Map ``conversation_url`` → latest summary across all rows."""
+def iter_summary_rows(project_id: str) -> list[dict[str, Any]]:
+    """All summary rows for a project, in file order. Used by sync push."""
     path = get_session_summaries_path(project_id)
     if not path.exists():
-        return {}
-    out: dict[str, str] = {}
+        return []
+    out: list[dict[str, Any]] = []
     try:
         for line in path.read_text().splitlines():
             line = line.strip()
@@ -140,22 +166,38 @@ def latest_summary_by_url(project_id: str) -> dict[str, str]:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            url = row.get("conversation_url")
-            summary = row.get("summary")
-            if isinstance(url, str) and isinstance(summary, str) and url and summary:
-                out[url] = summary
+            if (
+                isinstance(row, dict)
+                and isinstance(row.get("conversation_id"), str)
+                and isinstance(row.get("summary"), str)
+            ):
+                out.append(row)
     except OSError:
         pass
     return out
 
 
-def get_summary_for_url(project_dir: str, conversation_url: str) -> str | None:
-    """Lookup a single URL's latest summary."""
+def latest_summary_by_id(project_id: str) -> dict[str, str]:
+    """Map ``conversation_id → latest summary`` across all rows (file order)."""
+    out: dict[str, str] = {}
+    for row in iter_summary_rows(project_id):
+        cid = row.get("conversation_id")
+        s = row.get("summary")
+        if isinstance(cid, str) and isinstance(s, str) and cid and s:
+            out[cid] = s
+    return out
+
+
+def get_summary_for_id(project_dir: str, conversation_id: str) -> str | None:
     pid = resolve_project_id(project_dir, create=False)
     if not pid:
         return None
-    return latest_summary_by_url(pid).get(conversation_url)
+    return latest_summary_by_id(pid).get(conversation_id)
 
+
+# -------------------------------------------------------------------
+# Per-ledger / per-commit summary lookup (used by git notes)
+# -------------------------------------------------------------------
 
 def _ledger_for_commit(project_id: str, commit_sha: str) -> dict[str, Any] | None:
     from .storage import get_ledgers_path
@@ -179,33 +221,33 @@ def _ledger_for_commit(project_id: str, commit_sha: str) -> dict[str, Any] | Non
     return None
 
 
-def _urls_in_ledger(ledger: dict[str, Any]) -> set[str]:
-    urls: set[str] = set()
+def _ids_in_ledger(ledger: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
     files = ledger.get("files", {})
     if not isinstance(files, dict):
-        return urls
+        return ids
     for fl in files.values():
         if not isinstance(fl, dict):
             continue
         for seg in fl.get("line_attributions", []):
             if not isinstance(seg, dict):
                 continue
-            url = seg.get("conversation_url")
-            if isinstance(url, str) and url:
-                urls.add(url)
-    return urls
+            cid = seg.get("conversation_id")
+            if isinstance(cid, str) and cid:
+                ids.add(cid)
+    return ids
 
 
 def get_summary_for_commit(project_id: str, commit_sha: str) -> dict[str, str] | None:
-    """``{conversation_url: summary}`` for every URL referenced by the commit's ledger."""
+    """``{conversation_id: summary}`` for every id referenced by the commit's ledger."""
     led = _ledger_for_commit(project_id, commit_sha)
     if not led:
         return None
-    urls = _urls_in_ledger(led)
-    if not urls:
+    ids = _ids_in_ledger(led)
+    if not ids:
         return None
-    by_url = latest_summary_by_url(project_id)
-    out = {u: by_url[u] for u in urls if u in by_url}
+    by_id = latest_summary_by_id(project_id)
+    out = {c: by_id[c] for c in ids if c in by_id}
     return out if out else None
 
 
@@ -214,7 +256,7 @@ def merge_note_summaries(
     ledger: dict[str, Any],
     static_summaries: dict[str, Any] | None = None,  # accepted for caller compat; ignored
 ) -> dict[str, str] | None:
-    """Resolve URL→summary for the git note. Static map is ignored."""
+    """Resolve conversation_id → summary for the git note. Static map is ignored."""
     del static_summaries
     pid = resolve_project_id(project_dir, create=False)
     if not pid:
@@ -230,11 +272,8 @@ def all_session_conversations_for_ledger(
     ledger: dict[str, Any],
 ) -> list[dict[str, Any]] | None:
     """Build ``all_session_conversations`` for a git note: every distinct
-    ``conversation_url`` from traces in the same staging window as the ledger,
-    with the latest stored summary per URL (if any).
-
-    Unlike :func:`get_summary_for_commit`, this is not limited to URLs that
-    appear in attributed line segments.
+    ``conversation_id`` from traces in the same staging window as the ledger,
+    with the latest stored summary per id (if any).
     """
     from .ledger import list_traces_in_staging_window
 
@@ -242,10 +281,6 @@ def all_session_conversations_for_ledger(
     parent_at = ledger.get("parent_committed_at")
     committed_at = ledger.get("committed_at")
 
-    # Single-parent shape (the common case). Merge commits also call here,
-    # but their staging-window scoping is best handled at ledger build time;
-    # this caller only needs the conversation URLs that belonged to the
-    # primary-parent staging window for the note's audit list.
     parents: list[tuple[str, str | None]] = []
     if parent_sha:
         parents.append((str(parent_sha), str(parent_at) if parent_at else None))
@@ -254,7 +289,7 @@ def all_session_conversations_for_ledger(
         parents,
         str(committed_at) if committed_at else None,
     )
-    urls: list[str] = []
+    ids: list[str] = []
     seen: set[str] = set()
     for t in raw:
         for fe in t.get("files") or []:
@@ -263,30 +298,31 @@ def all_session_conversations_for_ledger(
             for conv in fe.get("conversations") or []:
                 if not isinstance(conv, dict):
                     continue
-                url = conv.get("url")
-                if isinstance(url, str) and url and url not in seen:
-                    seen.add(url)
-                    urls.append(url)
-    if not urls:
+                cid = conv.get("id")
+                if isinstance(cid, str) and cid and cid not in seen:
+                    seen.add(cid)
+                    ids.append(cid)
+    if not ids:
         return None
     pid = resolve_project_id(project_dir, create=False)
     if not pid:
-        return [{"conversation_url": u, "summary": None} for u in urls]
-    by_url = latest_summary_by_url(pid)
+        return [{"conversation_id": c, "summary": None} for c in ids]
+    by_id = latest_summary_by_id(pid)
     out: list[dict[str, Any]] = []
-    for u in urls:
-        s = by_url.get(u)
-        row: dict[str, Any] = {"conversation_url": u}
-        if s is not None:
-            row["summary"] = s
-        else:
-            row["summary"] = None
+    for cid in ids:
+        s = by_id.get(cid)
+        row: dict[str, Any] = {"conversation_id": cid}
+        row["summary"] = s if s is not None else None
         out.append(row)
     return out
 
 
-def _conversation_urls_for_session(project_id: str, session_id: str) -> list[str]:
-    """All distinct ``conversation_url``s referenced by traces in this session, in first-seen order."""
+# -------------------------------------------------------------------
+# Session-id → conversation_ids helper (for `summary generate --session-id`)
+# -------------------------------------------------------------------
+
+def _conversation_ids_for_session(project_id: str, session_id: str) -> list[str]:
+    """All distinct ``conversation_id``s referenced by traces in this session, in first-seen order."""
     path = get_traces_path(project_id)
     if not path.exists():
         return []
@@ -311,37 +347,41 @@ def _conversation_urls_for_session(project_id: str, session_id: str) -> list[str
                 for conv in fe.get("conversations", []) or []:
                     if not isinstance(conv, dict):
                         continue
-                    url = conv.get("url")
-                    if isinstance(url, str) and url and url not in seen_set:
-                        seen.append(url)
-                        seen_set.add(url)
+                    cid = conv.get("id")
+                    if isinstance(cid, str) and cid and cid not in seen_set:
+                        seen.append(cid)
+                        seen_set.add(cid)
     except OSError:
         pass
     return seen
 
 
-def _summarize_url(
+# -------------------------------------------------------------------
+# Summarize a single conversation_id (used by hooks + manual regenerate)
+# -------------------------------------------------------------------
+
+def _summarize_id(
     project_id: str,
-    conversation_url: str,
+    conversation_id: str,
     command: str,
     timeout_seconds: int,
     session_id: str | None,
 ) -> str | None:
-    text = _read_transcript(conversation_url)
+    text = _read_transcript_from_cache(project_id, conversation_id)
     if not text:
         return None
     summary = generate_summary_text(text, command, timeout_seconds=timeout_seconds)
     if summary:
-        append_summary(project_id, conversation_url, summary, session_id=session_id)
+        append_summary(project_id, conversation_id, summary, session_id=session_id)
     return summary
 
 
 def run_session_summary_hook(data: dict[str, Any]) -> None:
     """Called from ``record`` on stop / agent-response / Cursor ``sessionEnd``; never raises.
 
-    Resolves the transcript path from the hook JSON (``transcript_path``) and/or
-    ``CURSOR_TRANSCRIPT_PATH`` (Cursor **sessionEnd** / **stop**), then pipes the
-    file to the configured summary command. The result is stored keyed by ``file://<path>``.
+    Resolves the live transcript path, snapshots its current bytes into the
+    project content-addressed cache, then pipes those bytes to the configured
+    summary command. The result is stored keyed by ``conversation_id``.
     """
     try:
         from .config import get_project_config
@@ -370,9 +410,26 @@ def run_session_summary_hook(data: dict[str, Any]) -> None:
         transcript_path = transcript_path_from_hook(data)
         if not transcript_path:
             return
-        url = f"file://{transcript_path}"
-        summary = _summarize_url(pid, url, command, timeout, session_id)
-        if summary is None:
+
+        # Snapshot the current transcript state into the cache so the
+        # summary command (and any future readers) see a stable blob.
+        snap = snapshot_transcript_to_cache(pid, transcript_path)
+        if snap is None:
+            return
+        sha, _size = snap
+        data_bytes = read_blob_from_cache(pid, sha)
+        if data_bytes is None:
+            return
+        try:
+            text = data_bytes.decode("utf-8", errors="replace")
+        except Exception:
+            return
+
+        cid = compute_conversation_id(transcript_path)
+        summary = generate_summary_text(text, command, timeout_seconds=timeout)
+        if summary:
+            append_summary(pid, cid, summary, session_id=session_id)
+        else:
             _log("summary command failed or produced no output")
     except Exception as exc:
         _log(f"summary hook error: {exc}")
@@ -381,11 +438,11 @@ def run_session_summary_hook(data: dict[str, Any]) -> None:
 def run_summary_generate(
     project_dir: str,
     *,
-    conversation_url: str | None = None,
+    conversation_id: str | None = None,
     session_id: str | None = None,
 ) -> dict[str, str] | None:
-    """Manual regeneration. Pass ``conversation_url`` (one URL) or ``session_id``
-    (every URL referenced by that session's traces). Returns ``{url: summary}``."""
+    """Manual regeneration. Pass ``conversation_id`` (one id) or ``session_id``
+    (every id referenced by that session's traces). Returns ``{conversation_id: summary}``."""
     from .config import get_project_config
 
     cfg = get_project_config(project_dir=project_dir)
@@ -402,17 +459,17 @@ def run_summary_generate(
     if not pid:
         return None
 
-    urls: list[str] = []
-    if conversation_url:
-        urls = [conversation_url]
+    ids: list[str] = []
+    if conversation_id:
+        ids = [conversation_id]
     elif session_id:
-        urls = _conversation_urls_for_session(pid, session_id)
-    if not urls:
+        ids = _conversation_ids_for_session(pid, session_id)
+    if not ids:
         return None
 
     out: dict[str, str] = {}
-    for url in urls:
-        s = _summarize_url(pid, url, command, timeout, session_id)
+    for cid in ids:
+        s = _summarize_id(pid, cid, command, timeout, session_id)
         if s:
-            out[url] = s
+            out[cid] = s
     return out or None

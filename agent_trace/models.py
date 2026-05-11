@@ -91,7 +91,8 @@ class Contributor:
 class Conversation:
     contributor: Contributor
     ranges: list[Range]
-    url: str | None = None
+    id: str | None = None
+    content_sha256: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Conversation:
@@ -99,7 +100,8 @@ class Conversation:
         return cls(
             contributor=Contributor.from_dict(cast(dict[str, Any], d["contributor"])),
             ranges=ranges,
-            url=d.get("url"),
+            id=d.get("id"),
+            content_sha256=d.get("content_sha256"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -107,8 +109,10 @@ class Conversation:
             "contributor": self.contributor.to_dict(),
             "ranges": [r.to_dict() for r in self.ranges],
         }
-        if self.url is not None:
-            out["url"] = self.url
+        if self.id is not None:
+            out["id"] = self.id
+        if self.content_sha256 is not None:
+            out["content_sha256"] = self.content_sha256
         return out
 
 
@@ -207,7 +211,7 @@ class LineSegment:
     trace_id: str
     type: str = "ai"
     model_id: str | None = None
-    conversation_url: str | None = None
+    conversation_id: str | None = None
     evidence: list[LineEvidence] | None = None
 
     @classmethod
@@ -226,7 +230,7 @@ class LineSegment:
             type=str(d.get("type", "ai")),
             trace_id=str(d["trace_id"]),
             model_id=d.get("model_id"),
-            conversation_url=d.get("conversation_url"),
+            conversation_id=d.get("conversation_id"),
             evidence=evidence,
         )
 
@@ -239,8 +243,8 @@ class LineSegment:
         }
         if self.model_id is not None:
             out["model_id"] = self.model_id
-        if self.conversation_url is not None:
-            out["conversation_url"] = self.conversation_url
+        if self.conversation_id is not None:
+            out["conversation_id"] = self.conversation_id
         if self.evidence is not None:
             out["evidence"] = [e.to_dict() for e in self.evidence]
         return out
@@ -521,7 +525,8 @@ class SyncedManifest:
     ledger_shas: list[str] = field(default_factory=list)
     commit_link_shas: list[str] = field(default_factory=list)
     blob_shas: list[str] = field(default_factory=list)
-    conversation_url_hashes: list[str] = field(default_factory=list)
+    conversation_ids: list[str] = field(default_factory=list)
+    summary_keys: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> SyncedManifest:
@@ -534,7 +539,8 @@ class SyncedManifest:
             ledger_shas=_strs("ledger_shas"),
             commit_link_shas=_strs("commit_link_shas"),
             blob_shas=_strs("blob_shas"),
-            conversation_url_hashes=_strs("conversation_url_hashes"),
+            conversation_ids=_strs("conversation_ids"),
+            summary_keys=_strs("summary_keys"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -547,6 +553,7 @@ class PullCursors:
     ledgers: str | None = None
     commit_links: str | None = None
     conversations: str | None = None
+    summaries: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> PullCursors:
@@ -555,6 +562,7 @@ class PullCursors:
             ledgers=d.get("ledgers"),
             commit_links=d.get("commit_links"),
             conversations=d.get("conversations"),
+            summaries=d.get("summaries"),
         )
 
     def to_dict(self) -> dict[str, Any]:

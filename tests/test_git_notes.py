@@ -122,8 +122,8 @@ class TestBuildNote(unittest.TestCase):
             },
         )
         asc = [
-            {"conversation_url": "file:///tmp/a.jsonl", "summary": "s1"},
-            {"conversation_url": "file:///tmp/b.jsonl", "summary": None},
+            {"conversation_id": "a" * 64, "summary": "s1"},
+            {"conversation_id": "b" * 64, "summary": None},
         ]
         note = git_notes.build_note(
             leg,

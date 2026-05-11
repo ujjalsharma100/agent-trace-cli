@@ -1627,7 +1627,9 @@ def cmd_push(args):
     prefix = "[dry-run] " if result.dry_run else ""
     print(f"{prefix}Pushed {result.traces_pushed} trace(s), "
           f"{result.ledgers_pushed} ledger(s), "
-          f"{result.commit_links_pushed} commit-link(s)")
+          f"{result.commit_links_pushed} commit-link(s), "
+          f"{result.conversations_pushed} conversation(s), "
+          f"{result.summaries_pushed} summary(ies)")
     if result.traces_held_back:
         print(f"  ({result.traces_held_back} unattributed trace(s) held back; "
               "use --full to push)")
@@ -1652,7 +1654,9 @@ def cmd_pull(args):
     prefix = "[dry-run] " if result.dry_run else ""
     print(f"{prefix}Pulled {result.traces_pulled} trace(s), "
           f"{result.ledgers_pulled} ledger(s), "
-          f"{result.commit_links_pulled} commit-link(s)")
+          f"{result.commit_links_pulled} commit-link(s), "
+          f"{result.conversations_pulled} conversation(s), "
+          f"{result.summaries_pulled} summary(ies)")
     for err in result.errors:
         print(f"  Error: {err}", file=sys.stderr)
 
@@ -1675,11 +1679,15 @@ def cmd_sync(args):
     if push_r:
         print(f"Pushed {push_r.traces_pushed} trace(s), "
               f"{push_r.ledgers_pushed} ledger(s), "
-              f"{push_r.commit_links_pushed} commit-link(s)")
+              f"{push_r.commit_links_pushed} commit-link(s), "
+              f"{push_r.conversations_pushed} conversation(s), "
+              f"{push_r.summaries_pushed} summary(ies)")
     if pull_r:
         print(f"Pulled {pull_r.traces_pulled} trace(s), "
               f"{pull_r.ledgers_pulled} ledger(s), "
-              f"{pull_r.commit_links_pulled} commit-link(s)")
+              f"{pull_r.commit_links_pulled} commit-link(s), "
+              f"{pull_r.conversations_pulled} conversation(s), "
+              f"{pull_r.summaries_pulled} summary(ies)")
 
 
 # ===================================================================
@@ -1827,17 +1835,17 @@ def cmd_summary(args):
         return
 
     if action == "generate":
-        url = (getattr(args, "conversation_url", None) or "").strip()
+        cid = (getattr(args, "conversation_id", None) or "").strip()
         sid = (getattr(args, "session_id", None) or "").strip()
-        if not (url or sid):
+        if not (cid or sid):
             print(
-                "agent-trace summary generate: --conversation-url URL or --session-id SID required",
+                "agent-trace summary generate: --conversation ID or --session-id SID required",
                 file=sys.stderr,
             )
             sys.exit(1)
         out = run_summary_generate(
             cwd,
-            conversation_url=url or None,
+            conversation_id=cid or None,
             session_id=sid or None,
         )
         if out is None:
@@ -2453,23 +2461,23 @@ def main():
     sum_sub.add_parser("disable", help="Disable session-end summaries")
     s_gen = sum_sub.add_parser(
         "generate",
-        help="Re-run summary for a conversation URL or every URL in a session",
+        help="Re-run summary for a conversation id or every id in a session",
     )
     s_gen.add_argument(
-        "--conversation-url",
-        dest="conversation_url",
+        "--conversation",
+        dest="conversation_id",
         default=None,
-        help="A specific conversation_url (e.g. file:///path/to/transcript.jsonl)",
+        help="A specific conversation_id (64-hex sha256 over the original transcript URL)",
     )
     s_gen.add_argument(
         "--session-id",
         dest="session_id",
         default=None,
-        help="conversation_id / session_id; regenerates every URL referenced by traces in that session",
+        help="session_id; regenerates every conversation id referenced by traces in that session",
     )
     s_show = sum_sub.add_parser(
         "show",
-        help="Show {conversation_url: summary} for a commit",
+        help="Show {conversation_id: summary} for a commit",
     )
     s_show.add_argument("commit", nargs="?", default="HEAD", help="Commit (default HEAD)")
 

@@ -22,24 +22,36 @@ import sys
 from typing import Any
 
 from .blame import blame_file
-from .summary import latest_summary_by_url
+from .conversations import cache_path_for_sha, latest_sha_for_conversation
 from .storage import resolve_project_id
+from .summary import latest_summary_by_id
 
 
 # ===================================================================
 # Conversation content helpers
 # ===================================================================
 
-def _resolve_conversation_local(url: str) -> str | None:
-    """Read full conversation content from a file:// URL."""
-    if not url.startswith("file://"):
+def _resolve_conversation_from_cache(
+    project_id: str, content_sha256: str,
+) -> str | None:
+    """Read full conversation bytes from the per-project cache."""
+    if not project_id or not content_sha256:
         return None
-    local_path = url[7:]
+    p = cache_path_for_sha(project_id, content_sha256)
     try:
-        with open(local_path, "r") as f:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
             return f.read()
     except (OSError, IOError):
         return None
+
+
+def _content_sha_for_conversation_id(
+    project_id: str, conversation_id: str,
+) -> str | None:
+    """Latest cached ``content_sha256`` for a given ``conversation_id``."""
+    if not project_id or not conversation_id:
+        return None
+    return latest_sha_for_conversation(project_id, conversation_id)
 
 
 def _compute_conversation_stats(content: str) -> dict[str, int]:
@@ -105,7 +117,7 @@ def get_context(
     cwd = project_dir or os.getcwd()
 
     pid = resolve_project_id(cwd, create=False)
-    summary_lookup = latest_summary_by_url(pid) if pid else {}
+    summary_lookup = latest_summary_by_id(pid) if pid else {}
 
     # Run blame in JSON mode to get structured attribution data
     blame_json = blame_file(
@@ -182,19 +194,21 @@ def get_context(
         confidence = attr.get("confidence", 0.0)
         segment["confidence"] = confidence
 
-        conversation_url = attr.get("conversation_url")
-        if conversation_url:
-            segment["conversation_url"] = conversation_url
+        conversation_id = attr.get("conversation_id")
+        if conversation_id:
+            segment["conversation_id"] = conversation_id
 
-        # Pluggable summary (URL-keyed) takes precedence over the raw preview.
-        summary_text = summary_lookup.get(conversation_url) if conversation_url else None
+        # Pluggable summary (id-keyed) takes precedence over the raw preview.
+        summary_text = summary_lookup.get(conversation_id) if conversation_id else None
         if summary_text:
             segment["summary"] = summary_text
 
-        # Try to resolve conversation content (local file:// only)
+        # Try to resolve conversation content from the local content-addressed cache.
         conversation_content = None
-        if conversation_url and conversation_url.startswith("file://"):
-            conversation_content = _resolve_conversation_local(conversation_url)
+        if conversation_id and pid:
+            sha = _content_sha_for_conversation_id(pid, conversation_id)
+            if sha:
+                conversation_content = _resolve_conversation_from_cache(pid, sha)
 
         if conversation_content:
             # Compute size stats

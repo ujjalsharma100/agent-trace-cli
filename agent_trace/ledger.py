@@ -361,7 +361,7 @@ def _ledger_evidence_to_index_entries(
     entry shape (the same shape :func:`_build_trace_hash_index` produces).
 
     The ledger's segments already carry ``trace_id``, ``model_id``, and
-    ``conversation_url``; ``evidence`` carries the per-line hashes. There
+    ``conversation_id``; ``evidence`` carries the per-line hashes. There
     is no ``edit_sequence`` on the ledger side — entries built from ledger
     evidence are tagged with ``edit_sequence=None`` so trace-derived
     entries (which do carry edit sequence) win on tie-break.
@@ -385,7 +385,7 @@ def _ledger_evidence_to_index_entries(
                 "trace_id": tid,
                 "model_id": seg.get("model_id"),
                 "tool": None,
-                "conversation_url": seg.get("conversation_url"),
+                "conversation_id": seg.get("conversation_id"),
                 "edit_sequence": None,
             }
             for ev in seg.get("evidence", []) or []:
@@ -504,7 +504,7 @@ def _build_trace_hash_index(
     alternate_paths: list[str] | None = None,
     cross_file: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """Map ``hash → {trace_id, model_id, tool, conversation_url, edit_sequence}``.
+    """Map ``hash → {trace_id, model_id, tool, conversation_id, edit_sequence}``.
 
     Full 256-bit SHA-256 hashes give cryptographic uniqueness, so a hash
     match is sufficient for attribution — no content equality guard needed.
@@ -528,15 +528,15 @@ def _build_trace_hash_index(
                 continue
 
             model_id: str | None = None
-            conversation_url: str | None = None
+            conversation_id: str | None = None
             for conv in fe.get("conversations", []):
                 if not isinstance(conv, dict):
                     continue
                 contributor = conv.get("contributor") or {}
                 if contributor.get("model_id") and not model_id:
                     model_id = contributor["model_id"]
-                if conv.get("url") and not conversation_url:
-                    conversation_url = conv["url"]
+                if conv.get("id") and not conversation_id:
+                    conversation_id = conv["id"]
 
                 for r in conv.get("ranges", []):
                     if not isinstance(r, dict):
@@ -562,7 +562,7 @@ def _build_trace_hash_index(
                             "trace_id": trace_id,
                             "model_id": model_id,
                             "tool": tool,
-                            "conversation_url": conversation_url,
+                            "conversation_id": conversation_id,
                             "edit_sequence": edit_seq,
                         }
 
@@ -790,7 +790,7 @@ def build_attribution_ledger(
             line_attr[ln] = {
                 "trace_id": tid,
                 "model_id": entry.get("model_id"),
-                "conversation_url": entry.get("conversation_url"),
+                "conversation_id": entry.get("conversation_id"),
                 "hash": h,
                 "content": content,
             }
@@ -819,7 +819,7 @@ def build_attribution_ledger(
                 line_attr[ln] = {
                     "trace_id": tid,
                     "model_id": entry.get("model_id"),
-                    "conversation_url": entry.get("conversation_url"),
+                    "conversation_id": entry.get("conversation_id"),
                     "hash": h,
                     "content": content,
                 }
@@ -834,7 +834,7 @@ def build_attribution_ledger(
                 line_attr[ln] = {
                     "trace_id": prev["trace_id"],
                     "model_id": prev["model_id"],
-                    "conversation_url": prev["conversation_url"],
+                    "conversation_id": prev["conversation_id"],
                     "hash": _line_hash(file_lines[ln - 1]),
                     "content": file_lines[ln - 1],
                 }
@@ -900,7 +900,7 @@ def _merge_into_segments(line_attr: dict[int, dict[str, Any]]) -> list[dict[str,
                 "type": "ai",
                 "trace_id": la["trace_id"],
                 "model_id": la.get("model_id"),
-                "conversation_url": la.get("conversation_url"),
+                "conversation_id": la.get("conversation_id"),
                 "evidence": [evidence_entry],
             }
 

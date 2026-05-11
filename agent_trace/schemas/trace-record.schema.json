@@ -101,7 +101,16 @@
           "minItems": 1,
           "items": { "$ref": "#/$defs/range" }
         },
-        "url": { "type": "string" }
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Opaque conversation identifier (sha256 over the original local transcript URL). Stable per-(machine, session); referenced everywhere transcripts are addressed."
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the transcript bytes at the moment this trace was recorded. Resolves to a blob in the per-project content-addressed cache."
+        }
       }
     },
     "fileEntry": {

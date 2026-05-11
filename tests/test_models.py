@@ -151,13 +151,15 @@ class TestGitNoteRemotesSync(unittest.TestCase):
                         "ledger_shas": ["abc"],
                         "commit_link_shas": [],
                         "blob_shas": ["sha1"],
-                        "conversation_url_hashes": ["uh1"],
+                        "conversation_ids": ["cid1"],
+                        "summary_keys": ["cid1:2026-05-01T00:00:00+00:00"],
                     },
                     "cursor": {
                         "traces": "2026-04-12T09:32:00+00:00",
                         "ledgers": "2026-04-12T09:32:00+00:00",
                         "commit_links": None,
                         "conversations": None,
+                        "summaries": None,
                     },
                 }
             },

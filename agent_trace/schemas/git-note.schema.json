@@ -53,7 +53,7 @@
                     "type": { "type": "string", "const": "ai" },
                     "trace_id": { "type": "string" },
                     "model_id": { "type": "string" },
-                    "conversation_url": { "type": "string" }
+                    "conversation_id": { "type": "string" }
                   }
                 }
               }
@@ -64,7 +64,7 @@
     },
     "summary": {
       "type": "object",
-      "description": "Map of conversation_url (file:// URL of the agent transcript) to summary prose (optional)",
+      "description": "Map of conversation_id (sha256 over the original local transcript URL) to summary prose (optional)",
       "additionalProperties": { "type": "string" }
     },
     "prompts": {
@@ -73,13 +73,13 @@
     },
     "all_session_conversations": {
       "type": "array",
-      "description": "Every conversation_url from traces in the commit staging window (not only lines attributed in the commit), with optional stored summary per URL",
+      "description": "Every conversation_id from traces in the commit staging window (not only those attributed in the commit), with optional stored summary per id",
       "items": {
         "type": "object",
-        "required": ["conversation_url", "summary"],
+        "required": ["conversation_id", "summary"],
         "additionalProperties": false,
         "properties": {
-          "conversation_url": { "type": "string" },
+          "conversation_id": { "type": "string" },
           "summary": { "type": ["string", "null"] }
         }
       }

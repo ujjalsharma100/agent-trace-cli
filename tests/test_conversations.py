@@ -1,4 +1,4 @@
-"""Tests for conversation enumeration, hashing, and chunked sync (Step 1.3)."""
+"""Tests for conversation enumeration, hashing, and chunked sync."""
 
 from __future__ import annotations
 
@@ -10,15 +10,18 @@ import unittest
 import urllib.error
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from agent_trace.conversations import (
     CHUNK_THRESHOLD_BYTES,
     cache_path_for_sha,
+    compute_conversation_id,
+    conversation_index_path,
     enumerate_local_blobs,
+    hash_bytes,
     hash_file,
-    hash_url,
-    url_to_local_path,
+    latest_sha_for_conversation,
+    snapshot_transcript_to_cache,
     write_blob_to_cache,
 )
 from agent_trace.remote import add_remote
@@ -30,11 +33,17 @@ from agent_trace.storage import (
 from agent_trace.sync import pull, push
 
 
-def _seed_trace_with_conversation(pid: str, transcript_path: str) -> None:
+def _seed_trace_with_conversation(pid: str, transcript_path: str, trace_id: str = "trace-1") -> tuple[str, str]:
+    """Snapshot the live transcript into the cache, then write a trace
+    record referencing it. Returns (conversation_id, content_sha256)."""
+    cid = compute_conversation_id(transcript_path)
+    snap = snapshot_transcript_to_cache(pid, transcript_path)
+    assert snap is not None, "snapshot should succeed for a readable file"
+    sha, _size = snap
     tp = get_traces_path(pid)
     rec = {
         "version": "2.0",
-        "id": "trace-1",
+        "id": trace_id,
         "timestamp": "2026-05-09T00:00:00Z",
         "tool": {"name": "test"},
         "files": [{
@@ -42,21 +51,32 @@ def _seed_trace_with_conversation(pid: str, transcript_path: str) -> None:
             "conversations": [{
                 "contributor": {"type": "ai"},
                 "ranges": [{"start_line": 1, "end_line": 1}],
-                "url": f"file://{transcript_path}",
+                "id": cid,
+                "content_sha256": sha,
             }],
         }],
     }
-    tp.write_text(json.dumps(rec) + "\n")
+    with open(tp, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+    return cid, sha
 
 
 class TestHashing(unittest.TestCase):
-    def test_hash_url_deterministic(self):
-        self.assertEqual(hash_url("file:///a/b"), hash_url("file:///a/b"))
-        self.assertNotEqual(hash_url("file:///a"), hash_url("file:///b"))
-        # exact value: sha256 of bytes
+    def test_compute_conversation_id_deterministic(self):
         self.assertEqual(
-            hash_url("x"),
-            hashlib.sha256(b"x").hexdigest(),
+            compute_conversation_id("/a/b"),
+            compute_conversation_id("/a/b"),
+        )
+        self.assertNotEqual(
+            compute_conversation_id("/a"),
+            compute_conversation_id("/b"),
+        )
+
+    def test_compute_conversation_id_recipe(self):
+        # Recipe: sha256("file://" + path)
+        self.assertEqual(
+            compute_conversation_id("/x"),
+            hashlib.sha256(b"file:///x").hexdigest(),
         )
 
     def test_hash_file(self):
@@ -68,10 +88,78 @@ class TestHashing(unittest.TestCase):
         finally:
             os.unlink(p)
 
-    def test_url_to_local_path(self):
-        self.assertEqual(url_to_local_path("file:///tmp/x"), "/tmp/x")
-        self.assertIsNone(url_to_local_path("https://example.com/x"))
-        self.assertIsNone(url_to_local_path(""))
+    def test_hash_bytes(self):
+        self.assertEqual(hash_bytes(b"x"), hashlib.sha256(b"x").hexdigest())
+
+
+class TestSnapshotToCache(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._env_patch = patch.dict(os.environ, {"AGENT_TRACE_HOME": self.tmpdir})
+        self._env_patch.start()
+        self.pid = "test-project"
+        ensure_project_dir(self.pid)
+
+    def tearDown(self):
+        self._env_patch.stop()
+
+    def test_snapshot_writes_to_cache(self):
+        src = Path(self.tmpdir) / "transcript.jsonl"
+        src.write_bytes(b"hello world")
+        res = snapshot_transcript_to_cache(self.pid, str(src))
+        self.assertIsNotNone(res)
+        sha, size = res
+        self.assertEqual(sha, hashlib.sha256(b"hello world").hexdigest())
+        self.assertEqual(size, 11)
+        self.assertEqual(
+            cache_path_for_sha(self.pid, sha).read_bytes(),
+            b"hello world",
+        )
+
+    def test_snapshot_idempotent(self):
+        src = Path(self.tmpdir) / "transcript.jsonl"
+        src.write_bytes(b"x")
+        r1 = snapshot_transcript_to_cache(self.pid, str(src))
+        r2 = snapshot_transcript_to_cache(self.pid, str(src))
+        self.assertEqual(r1, r2)
+
+    def test_snapshot_missing_file_returns_none(self):
+        self.assertIsNone(
+            snapshot_transcript_to_cache(self.pid, "/nonexistent/x.jsonl"),
+        )
+
+    def test_index_tracks_latest_sha_across_growing_transcript(self):
+        """Regression: blame/context/viewer were reading a mid-session
+        snapshot because the readers walked traces and the last trace
+        fires at the last tool call, not at session-end. The index keeps
+        the latest snapshot from every write path, including the
+        session-end summary hook that no trace pins.
+        """
+        src = Path(self.tmpdir) / "growing.jsonl"
+        cid = compute_conversation_id(str(src))
+
+        src.write_bytes(b"early")
+        r1 = snapshot_transcript_to_cache(self.pid, str(src))
+        assert r1 is not None
+        sha_early, _ = r1
+        self.assertEqual(latest_sha_for_conversation(self.pid, cid), sha_early)
+
+        src.write_bytes(b"early\nmiddle")
+        r2 = snapshot_transcript_to_cache(self.pid, str(src))
+        assert r2 is not None
+        sha_mid, _ = r2
+
+        src.write_bytes(b"early\nmiddle\ntail-from-session-end")
+        r3 = snapshot_transcript_to_cache(self.pid, str(src))
+        assert r3 is not None
+        sha_tail, _ = r3
+
+        # Latest write wins — including snapshots after the last trace,
+        # which is the bug the index fixes.
+        self.assertEqual(latest_sha_for_conversation(self.pid, cid), sha_tail)
+        self.assertNotEqual(sha_tail, sha_mid)
+        self.assertNotEqual(sha_tail, sha_early)
+        self.assertTrue(conversation_index_path(self.pid).is_file())
 
 
 class TestEnumerateLocalBlobs(unittest.TestCase):
@@ -85,15 +173,29 @@ class TestEnumerateLocalBlobs(unittest.TestCase):
     def tearDown(self):
         self._env_patch.stop()
 
-    def test_enumerates_traces_and_ledgers(self):
-        # transcript referenced by trace
+    def test_enumerates_traces(self):
         t1 = Path(self.tmpdir) / "transcript-a.jsonl"
         t1.write_text("hello\n")
-        _seed_trace_with_conversation(self.pid, str(t1))
+        _seed_trace_with_conversation(self.pid, str(t1), trace_id="a")
 
-        # transcript referenced only by ledger
         t2 = Path(self.tmpdir) / "transcript-b.jsonl"
         t2.write_text("world\n")
+        _seed_trace_with_conversation(self.pid, str(t2), trace_id="b")
+
+        blobs = enumerate_local_blobs(self.pid)
+        self.assertEqual(len(blobs), 2)
+        cids = sorted(b.conversation_id for b in blobs)
+        self.assertEqual(cids, sorted([
+            compute_conversation_id(str(t1)),
+            compute_conversation_id(str(t2)),
+        ]))
+        for b in blobs:
+            self.assertEqual(len(b.content_sha256), 64)
+            self.assertGreater(b.size, 0)
+
+    def test_ledger_only_reference_without_sha_is_skipped(self):
+        # Ledger references a conversation_id we never wrote a trace for —
+        # there's no sha pin and no cache blob, so it's not enumerable.
         ledger = {
             "version": "2.0",
             "commit_sha": "abc",
@@ -106,60 +208,27 @@ class TestEnumerateLocalBlobs(unittest.TestCase):
                     "line_attributions": [{
                         "start_line": 1, "end_line": 1, "type": "ai",
                         "trace_id": "trace-2",
-                        "conversation_url": f"file://{t2}",
+                        "conversation_id": "ff" * 32,
                     }],
                 },
             },
         }
         get_ledgers_path(self.pid).write_text(json.dumps(ledger) + "\n")
-
-        blobs = enumerate_local_blobs(self.pid)
-        urls = sorted(b.url for b in blobs)
-        self.assertEqual(urls, sorted([f"file://{t1}", f"file://{t2}"]))
-        for b in blobs:
-            self.assertEqual(len(b.content_sha256), 64)
-            self.assertGreater(b.size, 0)
-
-    def test_missing_transcript_skipped(self):
-        _seed_trace_with_conversation(self.pid, "/nonexistent/path/x.jsonl")
         self.assertEqual(enumerate_local_blobs(self.pid), [])
 
-    def test_non_file_url_skipped(self):
-        tp = get_traces_path(self.pid)
-        rec = {
-            "version": "2.0", "id": "t", "timestamp": "2026-05-09T00:00:00Z",
-            "tool": {"name": "test"},
-            "files": [{
-                "path": "x.py",
-                "conversations": [{
-                    "contributor": {"type": "ai"},
-                    "ranges": [{"start_line": 1, "end_line": 1}],
-                    "url": "https://example.com/x",
-                }],
-            }],
-        }
-        tp.write_text(json.dumps(rec) + "\n")
+    def test_missing_cache_blob_skipped(self):
+        # Trace pins a sha but the cache file is gone — skipped.
+        t = Path(self.tmpdir) / "ephemeral.jsonl"
+        t.write_text("payload\n")
+        cid, sha = _seed_trace_with_conversation(self.pid, str(t))
+        cache_path_for_sha(self.pid, sha).unlink()
         self.assertEqual(enumerate_local_blobs(self.pid), [])
 
     def test_dedupes_across_traces(self):
         t = Path(self.tmpdir) / "shared.jsonl"
         t.write_text("payload\n")
-        # two trace records, same conversation URL
-        rec_template = {
-            "version": "2.0", "timestamp": "2026-05-09T00:00:00Z",
-            "tool": {"name": "test"},
-            "files": [{
-                "path": "src/foo.py",
-                "conversations": [{
-                    "contributor": {"type": "ai"},
-                    "ranges": [{"start_line": 1, "end_line": 1}],
-                    "url": f"file://{t}",
-                }],
-            }],
-        }
-        with open(get_traces_path(self.pid), "w") as f:
-            for tid in ("a", "b"):
-                f.write(json.dumps({**rec_template, "id": tid}) + "\n")
+        _seed_trace_with_conversation(self.pid, str(t), trace_id="a")
+        _seed_trace_with_conversation(self.pid, str(t), trace_id="b")
 
         blobs = enumerate_local_blobs(self.pid)
         self.assertEqual(len(blobs), 1)
@@ -220,7 +289,7 @@ class TestPushConversationsInline(unittest.TestCase):
 
         self.transcript = Path(self.tmpdir) / "small.jsonl"
         self.transcript.write_text("tiny transcript\n")
-        _seed_trace_with_conversation(self.pid, str(self.transcript))
+        self.cid, self.sha = _seed_trace_with_conversation(self.pid, str(self.transcript))
 
     def tearDown(self):
         self._env_patch.stop()
@@ -243,11 +312,9 @@ class TestPushConversationsInline(unittest.TestCase):
         self.assertEqual(result.conversations_pushed, 1)
         self.assertIn("items", captured["body"])
         item = captured["body"]["items"][0]
+        self.assertEqual(item["conversation_id"], self.cid)
         self.assertEqual(item["content"], "tiny transcript\n")
-        self.assertEqual(
-            item["content_sha256"],
-            hashlib.sha256(b"tiny transcript\n").hexdigest(),
-        )
+        self.assertEqual(item["content_sha256"], self.sha)
 
 
 class TestPushConversationsChunked(unittest.TestCase):
@@ -262,11 +329,9 @@ class TestPushConversationsChunked(unittest.TestCase):
         add_remote(self.pid, "origin", "https://traces.example.com/acme/myrepo", token="t")
 
         self.transcript = Path(self.tmpdir) / "big.jsonl"
-        # Make it bigger than the chunk threshold.
         payload = ("x" * 1024 + "\n") * (CHUNK_THRESHOLD_BYTES // 1024 + 4)
         self.transcript.write_text(payload)
-        _seed_trace_with_conversation(self.pid, str(self.transcript))
-        self.expected_sha = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        self.cid, self.expected_sha = _seed_trace_with_conversation(self.pid, str(self.transcript))
 
     def tearDown(self):
         self._env_patch.stop()
@@ -297,10 +362,10 @@ class TestPushConversationsChunked(unittest.TestCase):
         self.assertTrue(any(m == "POST" and u.endswith("/api/v1/blobs") for m, u in methods))
         self.assertTrue(any(m == "POST" and u.endswith("/api/v1/sync/conversations") for m, u in methods))
 
-        # The pointer call carries no inline content.
         sync_call = next(c for c in calls if c[1].endswith("/api/v1/sync/conversations"))
         body = json.loads(sync_call[2].decode())
         self.assertNotIn("content", body["items"][0])
+        self.assertEqual(body["items"][0]["conversation_id"], self.cid)
         self.assertEqual(body["items"][0]["content_sha256"], self.expected_sha)
 
     def test_head_200_skips_blob_post(self):
@@ -317,7 +382,6 @@ class TestPushConversationsChunked(unittest.TestCase):
 
         self.assertEqual(result.errors, [])
         self.assertEqual(result.conversations_pushed, 1)
-        # No /api/v1/blobs POST should have happened.
         self.assertFalse(any(m == "POST" and u.endswith("/api/v1/blobs") for m, u in calls))
 
     def test_blob_endpoint_404_falls_back_to_inline(self):
@@ -342,7 +406,6 @@ class TestPushConversationsChunked(unittest.TestCase):
         self.assertEqual(result.errors, [])
         self.assertEqual(result.conversations_pushed, 1)
         item = captured["body"]["items"][0]
-        # Fell back to inline.
         self.assertIn("content", item)
         self.assertEqual(item["content_sha256"], self.expected_sha)
 
@@ -371,7 +434,6 @@ class TestSyncStateCursor(unittest.TestCase):
             r1 = push(self.pid, only="conversations")
             self.assertEqual(r1.conversations_pushed, 1)
 
-            # Second push without changes: cursor blocks the same blob.
             r2 = push(self.pid, only="conversations")
             self.assertEqual(r2.conversations_pushed, 0)
 
@@ -387,7 +449,6 @@ class TestRoundTrip(unittest.TestCase):
         ensure_project_dir(self.pid)
         add_remote(self.pid, "origin", "https://traces.example.com/acme/myrepo", token="t")
 
-        # 2 MB transcript with deterministic content.
         self.transcript = Path(self.tmpdir) / "big.jsonl"
         chunk = b"".join(
             (json.dumps({"i": i, "msg": "x" * 200}) + "\n").encode("utf-8")
@@ -397,13 +458,12 @@ class TestRoundTrip(unittest.TestCase):
         self.expected_size = self.transcript.stat().st_size
         self.expected_sha = hashlib.sha256(chunk).hexdigest()
         self.expected_bytes = chunk
-        _seed_trace_with_conversation(self.pid, str(self.transcript))
+        self.cid, _ = _seed_trace_with_conversation(self.pid, str(self.transcript))
 
     def tearDown(self):
         self._env_patch.stop()
 
     def test_push_then_pull_byte_identical(self):
-        # Server-side state captured across calls.
         blob_store: dict[str, bytes] = {}
         pointers: list[dict] = []
 
@@ -411,7 +471,6 @@ class TestRoundTrip(unittest.TestCase):
             url = req.full_url
             method = req.get_method()
 
-            # --- Push side ---
             if method == "HEAD" and "/api/v1/blobs/" in url:
                 sha = url.rsplit("/", 1)[-1]
                 if sha in blob_store:
@@ -427,14 +486,12 @@ class TestRoundTrip(unittest.TestCase):
                 pointers.extend(body["items"])
                 return _FakeResp(b'{"ok": true}')
 
-            # --- Pull side ---
             if method == "GET" and "/api/v1/sync/conversations" in url:
                 return _FakeResp(json.dumps({"items": pointers}).encode())
             if method == "GET" and "/api/v1/blobs/" in url:
                 sha = url.split("/api/v1/blobs/")[-1]
                 return _FakeResp(blob_store[sha])
 
-            # The other resource endpoints called by pull/push:
             if method == "POST":
                 return _FakeResp(b'{"ok": true}')
             return _FakeResp(b'{"items": []}')

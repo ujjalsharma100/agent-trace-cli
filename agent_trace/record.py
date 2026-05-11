@@ -245,21 +245,6 @@ def _ranges_from_notebook(_notebook_path: str, ti: dict) -> tuple[list | None, l
     return rp, rc
 
 
-def _collect_conversation_contents(trace):
-    """Walk all files→conversations, read local file:// URLs (deduplicated)."""
-    seen: dict[str, str | None] = {}
-    for fe in trace.get("files", []):
-        for conv in fe.get("conversations", []):
-            url = conv.get("url", "")
-            if not url or url in seen:
-                continue
-            if url.startswith("file://"):
-                local = url[7:]
-                content = _try_read_file(local)
-                seen[url] = content
-    return [{"url": u, "content": c} for u, c in seen.items() if c is not None] or None
-
-
 # -------------------------------------------------------------------
 # Storage backend
 # -------------------------------------------------------------------

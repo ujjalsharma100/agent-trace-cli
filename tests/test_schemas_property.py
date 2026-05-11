@@ -76,7 +76,9 @@ def _conversation_obj(draw) -> dict:
     ranges = [draw(_range_obj()) for _ in range(n_ranges)]
     conv = {"contributor": contrib, "ranges": ranges}
     if draw(st.booleans()):
-        conv["url"] = draw(st.sampled_from(["file:///tmp/t.jsonl", "https://example/c"]))
+        conv["id"] = draw(st.sampled_from(["a" * 64, "b" * 64]))
+    if draw(st.booleans()):
+        conv["content_sha256"] = draw(st.sampled_from(["c" * 64, "d" * 64]))
     return conv
 
 
@@ -142,7 +144,7 @@ def _line_segment(draw) -> dict:
     if draw(st.booleans()):
         seg["model_id"] = draw(st.one_of(st.none(), _ascii_text(min_size=1, max_size=40)))
     if draw(st.booleans()):
-        seg["conversation_url"] = draw(st.one_of(st.none(), st.just("file:///a.jsonl")))
+        seg["conversation_id"] = draw(st.one_of(st.none(), st.just("a" * 64)))
     if draw(st.booleans()):
         n = draw(st.integers(min_value=0, max_value=5))
         if n:

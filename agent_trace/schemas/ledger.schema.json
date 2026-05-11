@@ -72,7 +72,10 @@
         },
         "trace_id": { "type": "string", "minLength": 1 },
         "model_id": { "type": ["string", "null"] },
-        "conversation_url": { "type": ["string", "null"] },
+        "conversation_id": {
+          "type": ["string", "null"],
+          "description": "Opaque conversation identifier (sha256 over the original local transcript URL); same id used in trace records."
+        },
         "evidence": {
           "type": "array",
           "items": { "$ref": "#/$defs/lineEvidence" }

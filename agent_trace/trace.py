@@ -340,7 +340,21 @@ def create_trace(
 
     root = res.repo_root
     model_id = normalize_model_id(model)
-    conversation_url = f"file://{transcript}" if transcript else None
+
+    # Snapshot the live transcript into the per-project content-addressed
+    # cache and record an opaque conversation_id + content_sha256 on the
+    # trace. The raw filesystem path never enters the record itself.
+    conversation_id: str | None = None
+    content_sha256: str | None = None
+    if transcript:
+        from .conversations import (
+            compute_conversation_id,
+            snapshot_transcript_to_cache,
+        )
+        conversation_id = compute_conversation_id(transcript)
+        snap = snapshot_transcript_to_cache(res.project_id, transcript)
+        if snap is not None:
+            content_sha256, _ = snap
 
     # Build ranges
     ranges: list[dict] = []
@@ -361,8 +375,10 @@ def create_trace(
     }
     if model_id:
         conversation["contributor"]["model_id"] = model_id
-    if conversation_url:
-        conversation["url"] = conversation_url
+    if conversation_id:
+        conversation["id"] = conversation_id
+    if content_sha256:
+        conversation["content_sha256"] = content_sha256
 
     trace: dict = {
         "version": "2.0",

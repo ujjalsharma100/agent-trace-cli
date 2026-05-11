@@ -78,7 +78,7 @@ def _write_trace(
     timestamp: str | None = None,
     edit_sequence: int = 1,
     model_id: str = "test-model",
-    conversation_url: str = "file:///tmp/conv.jsonl",
+    conversation_id: str = "c" * 64,
 ) -> None:
     """Append a synthesized trace row to the project's traces.jsonl.
 
@@ -105,7 +105,7 @@ def _write_trace(
                 "path": file_path,
                 "conversations": [
                     {
-                        "url": conversation_url,
+                        "id": conversation_id,
                         "contributor": {"model_id": model_id},
                         "ranges": [
                             {

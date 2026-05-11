@@ -23,7 +23,7 @@ from .blame_meta import (
 from .git_notes import ledger_from_note_for_blame, read_note
 from .ledger import load_local_ledgers
 from .storage import resolve_project_id
-from .summary import latest_summary_by_url
+from .summary import latest_summary_by_id
 
 
 def _merge_ledgers_from_git_notes(
@@ -70,7 +70,8 @@ def _attribute_from_ledger(
     ledgers: dict[str, dict[str, Any]],
     file_path: str,
     traces: list[dict[str, Any]] | None = None,
-    summary_by_url: dict[str, str] | None = None,
+    summary_by_id: dict[str, str] | None = None,
+    project_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     attributed: list[dict[str, Any]] = []
     remaining: list[dict[str, Any]] = []
@@ -121,9 +122,14 @@ def _attribute_from_ledger(
                         if trace_rec
                         else {}
                     )
-                    conv_url = la.get("conversation_url") or meta.get("conversation_url")
-                    conv_summary = (summary_by_url or {}).get(conv_url) if conv_url else None
-                    conv_preview = _load_conversation_preview(conv_url) if not conv_summary else None
+                    conv_id = la.get("conversation_id") or meta.get("conversation_id")
+                    conv_sha = meta.get("content_sha256")
+                    conv_summary = (summary_by_id or {}).get(conv_id) if conv_id else None
+                    conv_preview = (
+                        _load_conversation_preview(project_id, conv_sha)
+                        if not conv_summary
+                        else None
+                    )
 
                     attributed.append({
                         "start_line": final_start,
@@ -135,7 +141,7 @@ def _attribute_from_ledger(
                         "model_id": la.get("model_id") or meta.get("model_id"),
                         "contributor_type": attr_type,
                         "tool": trace_rec.get("tool") if trace_rec else None,
-                        "conversation_url": conv_url,
+                        "conversation_id": conv_id,
                         "conversation_summary": conv_summary,
                         "conversation_preview": conv_preview,
                         "matched_range": {
@@ -186,7 +192,7 @@ def _no_attribution_entry(seg: dict[str, Any]) -> dict[str, Any]:
         "model_id": None,
         "contributor_type": None,
         "tool": None,
-        "conversation_url": None,
+        "conversation_id": None,
         "conversation_summary": None,
         "conversation_preview": None,
         "matched_range": None,
@@ -201,14 +207,15 @@ def _attribute_deterministic(
     file_path: str,
     ledgers: dict[str, dict[str, Any]],
     traces: list[dict[str, Any]],
-    summary_by_url: dict[str, str] | None = None,
+    summary_by_id: dict[str, str] | None = None,
+    project_id: str | None = None,
 ) -> list[dict[str, Any]]:
     ledger_results: list[dict[str, Any]] = []
     remaining = blame_segments
     if ledgers:
         ledger_results, remaining = _attribute_from_ledger(
             blame_segments, ledgers, file_path, traces=traces,
-            summary_by_url=summary_by_url,
+            summary_by_id=summary_by_id, project_id=project_id,
         )
 
     gap_results = [_no_attribution_entry(seg) for seg in remaining]
@@ -289,18 +296,18 @@ def _format_terminal(file_path: str, attributions: list[dict[str, Any]]) -> str:
 
         conv_summary = attr.get("conversation_summary") or ""
         conv_preview = attr.get("conversation_preview") or ""
-        conv_url = attr.get("conversation_url") or ""
+        conv_id = attr.get("conversation_id") or ""
         if conv_summary:
             lines.append(f"              summary: {conv_summary}")
-            if conv_url:
-                lines.append(f"              {_DIM}conversation: {conv_url}{_RESET}")
+            if conv_id:
+                lines.append(f"              {_DIM}conversation: {conv_id[:16]}{_RESET}")
         elif conv_preview:
             preview_line = conv_preview.replace("\n", " ").strip()
             if len(preview_line) > 120:
                 preview_line = preview_line[:120] + "..."
             lines.append(f"              conversation: \"{preview_line}\"")
-        elif conv_url:
-            lines.append(f"              conversation: {conv_url}")
+        elif conv_id:
+            lines.append(f"              conversation: {conv_id[:16]}")
 
         trace_id = attr.get("trace_id") or ""
         commit_sha = attr.get("commit_sha") or ""
@@ -341,8 +348,8 @@ def _format_json(file_path: str, attributions: list[dict[str, Any]]) -> str:
             entry["timestamp"] = attr["timestamp"]
         if attr.get("commit_sha"):
             entry["commit_sha"] = attr["commit_sha"]
-        if attr.get("conversation_url"):
-            entry["conversation_url"] = attr["conversation_url"]
+        if attr.get("conversation_id"):
+            entry["conversation_id"] = attr["conversation_id"]
         if attr.get("conversation_summary"):
             entry["conversation_summary"] = attr["conversation_summary"]
         if attr.get("conversation_preview"):
@@ -440,10 +447,11 @@ def blame_file(
     ledgers = _merge_ledgers_from_git_notes(git_root, segments, ledgers)
 
     pid = resolve_project_id(git_root, create=False)
-    summary_by_url = latest_summary_by_url(pid) if pid else {}
+    summary_by_id = latest_summary_by_id(pid) if pid else {}
 
     raw_attrs = _attribute_deterministic(
-        segments, rel_path, ledgers, traces, summary_by_url=summary_by_url,
+        segments, rel_path, ledgers, traces,
+        summary_by_id=summary_by_id, project_id=pid,
     )
     attributions = _merge_attributions(raw_attrs)
 

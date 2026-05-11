@@ -18,11 +18,12 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "trace_ids":               { "type": "array", "items": { "type": "string" } },
-        "ledger_shas":             { "type": "array", "items": { "type": "string" } },
-        "commit_link_shas":        { "type": "array", "items": { "type": "string" } },
-        "blob_shas":               { "type": "array", "items": { "type": "string" } },
-        "conversation_url_hashes": { "type": "array", "items": { "type": "string" } }
+        "trace_ids":         { "type": "array", "items": { "type": "string" } },
+        "ledger_shas":       { "type": "array", "items": { "type": "string" } },
+        "commit_link_shas":  { "type": "array", "items": { "type": "string" } },
+        "blob_shas":         { "type": "array", "items": { "type": "string" } },
+        "conversation_ids":  { "type": "array", "items": { "type": "string" } },
+        "summary_keys":      { "type": "array", "items": { "type": "string" } }
       }
     },
     "pullCursors": {
@@ -32,7 +33,8 @@
         "traces":        { "type": ["string", "null"] },
         "ledgers":       { "type": ["string", "null"] },
         "commit_links":  { "type": ["string", "null"] },
-        "conversations": { "type": ["string", "null"] }
+        "conversations": { "type": ["string", "null"] },
+        "summaries":     { "type": ["string", "null"] }
       }
     },
     "remoteSync": {

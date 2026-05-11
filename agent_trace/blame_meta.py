@@ -30,26 +30,34 @@ def _load_local_traces(project_dir: str) -> list[dict[str, Any]]:
     return traces
 
 
-def _load_conversation_preview(url: str | None, max_chars: int = 200) -> str | None:
-    """First ``max_chars`` of the transcript file at ``url`` (a ``file://`` URL).
-
-    Distinct from a generated summary — this is just a raw head-of-file
-    preview used as a fallback when no summary is configured/available.
+def _load_conversation_preview(
+    project_id: str | None,
+    content_sha256: str | None,
+    max_chars: int = 200,
+) -> str | None:
+    """First ``max_chars`` of the cached transcript bytes referenced by
+    ``content_sha256``. Distinct from a generated summary — this is just a
+    raw head-of-blob preview used as a fallback when no summary is
+    configured/available.
     """
-    if not url or not url.startswith("file://"):
+    if not project_id or not content_sha256:
         return None
-    local_path = url[7:]
+    from .conversations import cache_path_for_sha
+
+    p = cache_path_for_sha(project_id, content_sha256)
+    if not p.is_file():
+        return None
     try:
-        with open(local_path, "r") as f:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
             content = f.read(max_chars + 100)
-        content = content.strip()
-        if not content:
-            return None
-        if len(content) > max_chars:
-            content = content[:max_chars] + "..."
-        return content
-    except (OSError, IOError):
+    except OSError:
         return None
+    content = content.strip()
+    if not content:
+        return None
+    if len(content) > max_chars:
+        content = content[:max_chars] + "..."
+    return content
 
 
 def _find_matching_file(files: list[dict[str, Any]], file_path: str) -> dict[str, Any] | None:
@@ -118,9 +126,11 @@ def _extract_trace_meta(
                 meta["model_id"] = contributor["model_id"]
             if contributor.get("type") and not meta.get("contributor_type"):
                 meta["contributor_type"] = contributor["type"]
-            if conv.get("url") and not meta.get("conversation_url"):
-                meta["conversation_url"] = conv["url"]
-            if meta.get("model_id") and meta.get("conversation_url"):
+            if conv.get("id") and not meta.get("conversation_id"):
+                meta["conversation_id"] = conv["id"]
+            if conv.get("content_sha256") and not meta.get("content_sha256"):
+                meta["content_sha256"] = conv["content_sha256"]
+            if meta.get("model_id") and meta.get("conversation_id"):
                 break
         ranges = _collect_ranges(matched_file)
         best = None
@@ -138,7 +148,7 @@ def _extract_trace_meta(
                     best_dist = dist
         if best:
             meta["matched_range"] = {"start_line": best[0], "end_line": best[1]}
-    if not meta.get("model_id") or not meta.get("conversation_url"):
+    if not meta.get("model_id") or not meta.get("conversation_id"):
         for fe in files_data:
             if not isinstance(fe, dict) or fe is matched_file:
                 continue
@@ -148,8 +158,10 @@ def _extract_trace_meta(
                 contributor = conv.get("contributor") or {}
                 if contributor.get("model_id") and not meta.get("model_id"):
                     meta["model_id"] = contributor["model_id"]
-                if conv.get("url") and not meta.get("conversation_url"):
-                    meta["conversation_url"] = conv["url"]
-            if meta.get("model_id") and meta.get("conversation_url"):
+                if conv.get("id") and not meta.get("conversation_id"):
+                    meta["conversation_id"] = conv["id"]
+                if conv.get("content_sha256") and not meta.get("content_sha256"):
+                    meta["content_sha256"] = conv["content_sha256"]
+            if meta.get("model_id") and meta.get("conversation_id"):
                 break
     return meta
