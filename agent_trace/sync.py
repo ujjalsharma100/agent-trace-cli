@@ -1,26 +1,32 @@
 """
-Push/Pull sync protocol — explicit git-like sync between local and remote.
+Push/Pull sync protocol — content-ID manifests, no timestamp cursors as truth.
 
-Hooks write only to local JSONL.  ``push()`` and ``pull()`` are the sole
-network callers.
+Each remote keeps a per-resource set of IDs known to be on the server in
+``sync-state.json``. Push sends only locally-held items whose ID is not yet
+in the manifest; pull paginates through the server, dedupes by ID against
+the local store, and adds every received ID to the manifest. Status is
+``local_ids - synced_ids`` — no timestamp comparisons, no false positives
+after pull.
 
-No external dependencies — stdlib only (urllib for HTTP).
+The per-resource ``cursor`` (server's ``max(created_at)`` from the prior
+response) is a paging hint only. The manifest is the source of truth, so
+losing or rebuilding the cursor only costs one extra full scan; it never
+drops data.
+
+No external dependencies — stdlib only.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .conversations import (
-    CHUNK_THRESHOLD_BYTES,
     ConversationBlob,
     cache_path_for_sha,
     enumerate_local_blobs,
@@ -42,6 +48,16 @@ from .storage import (
 )
 
 
+SYNC_STATE_VERSION = 2
+
+# Server-side page size for pull. The server caps at 1000 (app.py).
+PULL_PAGE_LIMIT = 500
+
+# Per-batch size for push payloads. Keeps individual POSTs bounded so a
+# single oversized JSON body can't stall a sync.
+PUSH_BATCH_SIZE = 500
+
+
 # -------------------------------------------------------------------
 # Sync state persistence
 # -------------------------------------------------------------------
@@ -50,21 +66,89 @@ def _sync_state_path(project_id: str) -> Path:
     return get_project_dir(project_id) / "sync-state.json"
 
 
+def _empty_remote_state() -> dict[str, Any]:
+    return {
+        "synced": {
+            "trace_ids": [],
+            "ledger_shas": [],
+            "commit_link_shas": [],
+            "blob_shas": [],
+            "conversation_url_hashes": [],
+        },
+        "cursor": {
+            "traces": None,
+            "ledgers": None,
+            "commit_links": None,
+            "conversations": None,
+        },
+    }
+
+
 def _load_sync_state(project_id: str) -> dict[str, Any]:
+    """Load sync-state.json, normalising legacy or partial files in memory.
+
+    Legacy files (v1) used ``last_push`` / ``last_pull`` timestamp cursors.
+    Those are silently discarded — the manifest will rebuild itself on the
+    next sync (server dedupes pushes; pulls dedupe by id locally).
+    """
     p = _sync_state_path(project_id)
     if not p.is_file():
-        return {"remotes": {}}
+        return {"version": SYNC_STATE_VERSION, "remotes": {}}
     try:
         data = json.loads(p.read_text())
-        return data if isinstance(data, dict) else {"remotes": {}}
     except (json.JSONDecodeError, OSError):
-        return {"remotes": {}}
+        return {"version": SYNC_STATE_VERSION, "remotes": {}}
+    if not isinstance(data, dict):
+        return {"version": SYNC_STATE_VERSION, "remotes": {}}
+
+    out: dict[str, Any] = {"version": SYNC_STATE_VERSION, "remotes": {}}
+    raw_remotes = data.get("remotes")
+    if isinstance(raw_remotes, dict):
+        for name, rs in raw_remotes.items():
+            if not isinstance(rs, dict):
+                continue
+            out["remotes"][str(name)] = _normalise_remote_state(rs)
+    return out
+
+
+def _normalise_remote_state(rs: dict[str, Any]) -> dict[str, Any]:
+    base = _empty_remote_state()
+    synced = rs.get("synced")
+    if isinstance(synced, dict):
+        for k in base["synced"]:
+            v = synced.get(k)
+            if isinstance(v, list):
+                base["synced"][k] = [str(x) for x in v if isinstance(x, str)]
+    cursor = rs.get("cursor")
+    if isinstance(cursor, dict):
+        for k in base["cursor"]:
+            v = cursor.get(k)
+            if isinstance(v, str):
+                base["cursor"][k] = v
+    return base
 
 
 def _save_sync_state(project_id: str, state: dict[str, Any]) -> None:
     ensure_project_dir(project_id)
     p = _sync_state_path(project_id)
     p.write_text(json.dumps(state, indent=2) + "\n")
+
+
+def _get_remote_state(state: dict[str, Any], rname: str) -> dict[str, Any]:
+    remotes = state.setdefault("remotes", {})
+    rs = remotes.get(rname)
+    if not isinstance(rs, dict):
+        rs = _empty_remote_state()
+        remotes[rname] = rs
+    return rs
+
+
+def _synced_set(rs: dict[str, Any], key: str) -> set[str]:
+    return set(rs["synced"].get(key, []))
+
+
+def _persist_synced_set(rs: dict[str, Any], key: str, ids: set[str]) -> None:
+    rs["synced"][key] = sorted(ids)
 
 
 # -------------------------------------------------------------------
@@ -164,6 +248,11 @@ def _http_post_bytes(
         return resp.status
 
 
+def _chunked(items: list[Any], n: int) -> Iterable[list[Any]]:
+    for i in range(0, len(items), n):
+        yield items[i : i + n]
+
+
 # -------------------------------------------------------------------
 # Push
 # -------------------------------------------------------------------
@@ -188,7 +277,13 @@ def push(
     since: str | None = None,
     dry_run: bool = False,
 ) -> PushResult:
-    """Push local data to a remote service."""
+    """Push local items the server hasn't seen yet.
+
+    ``full=True`` includes unattributed traces (those referenced by no local
+    ledger). ``only`` restricts to a single resource class. ``since`` is an
+    ISO timestamp lower-bound on the item's own timestamp field — useful for
+    one-off backfills, but unrelated to the synced manifest.
+    """
     result = PushResult(dry_run=dry_run)
 
     rname, rconf = resolve_remote(project_id, remote_name)
@@ -208,24 +303,23 @@ def push(
 
     attributed_ids = compute_attributed_trace_ids(project_id) if not full else None
 
-    # Load sync state
     sync_state = _load_sync_state(project_id)
-    remote_state = sync_state.setdefault("remotes", {}).setdefault(rname, {})
-    last_push = remote_state.get("last_push", {})
+    rs = _get_remote_state(sync_state, rname)
 
     # --- Traces ---
     if only is None or only == "traces":
+        synced_ids = _synced_set(rs, "trace_ids")
         traces = _read_traces(project_id)
-        traces_since = last_push.get("traces_max_timestamp")
-        to_push = []
         held_back = 0
+        to_push: list[dict[str, Any]] = []
         for t in traces:
-            ts = t.get("timestamp", "")
-            if traces_since and ts <= traces_since:
-                continue
-            if since and ts < since:
-                continue
             tid = t.get("id", "")
+            if not tid:
+                continue
+            if tid in synced_ids:
+                continue
+            if since and t.get("timestamp", "") < since:
+                continue
             if attributed_ids is not None and tid not in attributed_ids:
                 held_back += 1
                 continue
@@ -234,82 +328,80 @@ def push(
         result.traces_held_back = held_back
 
         if to_push and not dry_run:
-            try:
-                _http_post(
-                    f"{base_url}/api/v1/sync/traces",
-                    {"project_id": wire_project_id, "items": to_push},
-                    token,
-                )
-                result.traces_pushed = len(to_push)
-                max_ts = max((t.get("timestamp", "") for t in to_push), default=None)
-                if max_ts:
-                    last_push["traces_max_timestamp"] = max_ts
-            except Exception as e:
-                result.errors.append(f"traces: {e}")
+            pushed_ids = _push_batched(
+                f"{base_url}/api/v1/sync/traces",
+                wire_project_id,
+                to_push,
+                token,
+                id_of=lambda t: t.get("id", ""),
+                error_label="traces",
+                errors=result.errors,
+            )
+            synced_ids.update(pushed_ids)
+            _persist_synced_set(rs, "trace_ids", synced_ids)
+            result.traces_pushed = len(pushed_ids)
         elif to_push:
             result.traces_pushed = len(to_push)
 
     # --- Ledgers ---
     if only is None or only == "ledgers":
+        synced_shas = _synced_set(rs, "ledger_shas")
         ledgers = _read_ledgers(project_id)
-        ledgers_since = last_push.get("ledgers_max_commit_at")
-        to_push_l = []
+        to_push_l: list[dict[str, Any]] = []
         for led in ledgers:
-            ca = led.get("committed_at") or led.get("created_at", "")
-            if ledgers_since and ca <= ledgers_since:
+            sha = led.get("commit_sha", "")
+            if not sha or sha in synced_shas:
                 continue
-            if since and ca < since:
-                continue
+            if since:
+                ca = led.get("committed_at") or led.get("created_at", "")
+                if ca and ca < since:
+                    continue
             to_push_l.append(led)
 
         if to_push_l and not dry_run:
-            try:
-                _http_post(
-                    f"{base_url}/api/v1/sync/ledgers",
-                    {"project_id": wire_project_id, "items": to_push_l},
-                    token,
-                )
-                result.ledgers_pushed = len(to_push_l)
-                max_ca = max(
-                    (l.get("committed_at") or l.get("created_at", "") for l in to_push_l),
-                    default=None,
-                )
-                if max_ca:
-                    last_push["ledgers_max_commit_at"] = max_ca
-            except Exception as e:
-                result.errors.append(f"ledgers: {e}")
+            pushed_shas = _push_batched(
+                f"{base_url}/api/v1/sync/ledgers",
+                wire_project_id,
+                to_push_l,
+                token,
+                id_of=lambda l: l.get("commit_sha", ""),
+                error_label="ledgers",
+                errors=result.errors,
+            )
+            synced_shas.update(pushed_shas)
+            _persist_synced_set(rs, "ledger_shas", synced_shas)
+            result.ledgers_pushed = len(pushed_shas)
         elif to_push_l:
             result.ledgers_pushed = len(to_push_l)
 
     # --- Commit links ---
     if only is None or only == "commit-links":
+        synced_shas = _synced_set(rs, "commit_link_shas")
         links = _read_commit_links(project_id)
-        links_since = last_push.get("commit_links_max_commit_at")
-        to_push_c = []
+        to_push_c: list[dict[str, Any]] = []
         for cl in links:
-            ca = cl.get("committed_at") or cl.get("created_at", "")
-            if links_since and ca <= links_since:
+            sha = cl.get("commit_sha", "")
+            if not sha or sha in synced_shas:
                 continue
-            if since and ca < since:
-                continue
+            if since:
+                ca = cl.get("committed_at") or cl.get("created_at", "")
+                if ca and ca < since:
+                    continue
             to_push_c.append(cl)
 
         if to_push_c and not dry_run:
-            try:
-                _http_post(
-                    f"{base_url}/api/v1/sync/commit-links",
-                    {"project_id": wire_project_id, "items": to_push_c},
-                    token,
-                )
-                result.commit_links_pushed = len(to_push_c)
-                max_ca = max(
-                    (c.get("committed_at") or c.get("created_at", "") for c in to_push_c),
-                    default=None,
-                )
-                if max_ca:
-                    last_push["commit_links_max_commit_at"] = max_ca
-            except Exception as e:
-                result.errors.append(f"commit-links: {e}")
+            pushed_shas = _push_batched(
+                f"{base_url}/api/v1/sync/commit-links",
+                wire_project_id,
+                to_push_c,
+                token,
+                id_of=lambda c: c.get("commit_sha", ""),
+                error_label="commit-links",
+                errors=result.errors,
+            )
+            synced_shas.update(pushed_shas)
+            _persist_synced_set(rs, "commit_link_shas", synced_shas)
+            result.commit_links_pushed = len(pushed_shas)
         elif to_push_c:
             result.commit_links_pushed = len(to_push_c)
 
@@ -320,19 +412,43 @@ def push(
             wire_project_id=wire_project_id,
             base_url=base_url,
             token=token,
-            last_push=last_push,
+            rs=rs,
             since=since,
-            full=full,
             dry_run=dry_run,
             result=result,
         )
 
-    # Update sync state
     if not dry_run:
-        remote_state["last_push"] = last_push
         _save_sync_state(project_id, sync_state)
 
     return result
+
+
+def _push_batched(
+    url: str,
+    wire_project_id: str,
+    items: list[dict[str, Any]],
+    token: str | None,
+    *,
+    id_of,
+    error_label: str,
+    errors: list[str],
+) -> set[str]:
+    """POST items in PUSH_BATCH_SIZE chunks. Returns set of IDs whose batch
+    was acknowledged by the server. A failed batch leaves its IDs unsynced
+    so the next push retries them."""
+    acked: set[str] = set()
+    for batch in _chunked(items, PUSH_BATCH_SIZE):
+        try:
+            _http_post(url, {"project_id": wire_project_id, "items": batch}, token)
+        except Exception as e:
+            errors.append(f"{error_label}: {e}")
+            continue
+        for item in batch:
+            iid = id_of(item)
+            if iid:
+                acked.add(iid)
+    return acked
 
 
 def _push_conversations(
@@ -341,29 +457,31 @@ def _push_conversations(
     wire_project_id: str,
     base_url: str,
     token: str | None,
-    last_push: dict[str, Any],
+    rs: dict[str, Any],
     since: str | None,
-    full: bool,
     dry_run: bool,
     result: PushResult,
 ) -> None:
     """Push transcript blobs and pointers, deduping by SHA-256.
 
-    Protocol per blob:
-      - Inline (size <= CHUNK_THRESHOLD_BYTES): include ``content`` directly
-        in the conversations POST.
-      - Chunked: ``HEAD /api/v1/blobs/<sha>``. If 200, blob is already on
-        the server — send a pointer only. If 404, ``POST /api/v1/blobs``
-        with the raw bytes, then send a pointer. If the blob endpoints are
-        not implemented (404/405 on POST), fall back to inline upload for
-        the rest of this run so older services keep working.
+    A conversation is "synced" when both its blob (sha) and its pointer
+    (url_hash) are confirmed on the server. We track them separately:
+
+      - ``synced.blob_shas`` — bytes are present on the server.
+      - ``synced.conversation_url_hashes`` — pointer row exists on the server.
+
+    Inline (size <= chunk threshold) conversations carry their bytes in the
+    pointer POST, so a successful pointer push implies the blob is present
+    too. Chunked conversations upload the blob first (HEAD/POST blob), then
+    send a pointer-only POST.
     """
     blobs = enumerate_local_blobs(project_id)
-    cursor = last_push.get("conversations_max_updated_at")
+    synced_blob_shas = _synced_set(rs, "blob_shas")
+    synced_url_hashes = _synced_set(rs, "conversation_url_hashes")
 
     pending: list[ConversationBlob] = []
     for b in blobs:
-        if not full and cursor and b.mtime <= cursor:
+        if b.url_hash in synced_url_hashes and b.content_sha256 in synced_blob_shas:
             continue
         if since and b.mtime < since:
             continue
@@ -377,8 +495,9 @@ def _push_conversations(
         return
 
     items: list[dict[str, Any]] = []
+    item_url_hashes: list[str] = []
+    item_blob_shas: list[str] = []
     chunked_supported = True
-    pushed_mtimes: list[str] = []
 
     for b in pending:
         item: dict[str, Any] = {
@@ -391,45 +510,41 @@ def _push_conversations(
         send_inline = not b.is_chunked()
 
         if not send_inline and chunked_supported:
-            blob_url = f"{base_url}/api/v1/blobs/{b.content_sha256}"
-            try:
-                head_status = _http_head_status(blob_url, token)
-            except Exception as e:
-                result.errors.append(f"conversations: HEAD {b.content_sha256[:12]}: {e}")
-                continue
-
-            if head_status == 200:
-                pass  # Blob already on server; pointer is enough.
+            if b.content_sha256 in synced_blob_shas:
+                pass  # Already-synced blob — pointer-only.
             else:
+                blob_url = f"{base_url}/api/v1/blobs/{b.content_sha256}"
                 try:
-                    with open(b.local_path, "rb") as f:
-                        raw = f.read()
-                    _http_post_bytes(
-                        f"{base_url}/api/v1/blobs",
-                        raw,
-                        token,
-                    )
-                except urllib.error.HTTPError as e:
-                    if e.code in (404, 405):
-                        # Server doesn't support blob endpoint — fall back
-                        # to inline for this and all subsequent blobs.
-                        chunked_supported = False
-                        send_inline = True
-                    else:
+                    head_status = _http_head_status(blob_url, token)
+                except Exception as e:
+                    result.errors.append(f"conversations: HEAD {b.content_sha256[:12]}: {e}")
+                    continue
+
+                if head_status == 200:
+                    synced_blob_shas.add(b.content_sha256)
+                else:
+                    try:
+                        with open(b.local_path, "rb") as f:
+                            raw = f.read()
+                        _http_post_bytes(f"{base_url}/api/v1/blobs", raw, token)
+                        synced_blob_shas.add(b.content_sha256)
+                    except urllib.error.HTTPError as e:
+                        if e.code in (404, 405):
+                            chunked_supported = False
+                            send_inline = True
+                        else:
+                            result.errors.append(
+                                f"conversations: POST blob {b.content_sha256[:12]}: {e}"
+                            )
+                            continue
+                    except OSError as e:
+                        result.errors.append(f"conversations: read {b.local_path}: {e}")
+                        continue
+                    except Exception as e:
                         result.errors.append(
                             f"conversations: POST blob {b.content_sha256[:12]}: {e}"
                         )
                         continue
-                except OSError as e:
-                    result.errors.append(
-                        f"conversations: read {b.local_path}: {e}"
-                    )
-                    continue
-                except Exception as e:
-                    result.errors.append(
-                        f"conversations: POST blob {b.content_sha256[:12]}: {e}"
-                    )
-                    continue
         elif not send_inline and not chunked_supported:
             send_inline = True
 
@@ -447,23 +562,35 @@ def _push_conversations(
                 item["content_b64"] = base64.b64encode(raw).decode("ascii")
 
         items.append(item)
-        pushed_mtimes.append(b.mtime)
+        item_url_hashes.append(b.url_hash)
+        item_blob_shas.append(b.content_sha256)
 
     if not items:
+        # Persist any blobs we did manage to upload (the head-200 / POST cases).
+        _persist_synced_set(rs, "blob_shas", synced_blob_shas)
         return
 
-    try:
-        _http_post(
-            f"{base_url}/api/v1/sync/conversations",
-            {"project_id": wire_project_id, "items": items},
-            token,
-        )
-        result.conversations_pushed = len(items)
-        max_mtime = max(pushed_mtimes, default=None)
-        if max_mtime:
-            last_push["conversations_max_updated_at"] = max_mtime
-    except Exception as e:
-        result.errors.append(f"conversations: {e}")
+    pushed_count = 0
+    for start in range(0, len(items), PUSH_BATCH_SIZE):
+        batch = items[start : start + PUSH_BATCH_SIZE]
+        batch_url_hashes = item_url_hashes[start : start + PUSH_BATCH_SIZE]
+        batch_blob_shas = item_blob_shas[start : start + PUSH_BATCH_SIZE]
+        try:
+            _http_post(
+                f"{base_url}/api/v1/sync/conversations",
+                {"project_id": wire_project_id, "items": batch},
+                token,
+            )
+        except Exception as e:
+            result.errors.append(f"conversations: {e}")
+            continue
+        synced_url_hashes.update(batch_url_hashes)
+        synced_blob_shas.update(batch_blob_shas)
+        pushed_count += len(batch)
+
+    _persist_synced_set(rs, "blob_shas", synced_blob_shas)
+    _persist_synced_set(rs, "conversation_url_hashes", synced_url_hashes)
+    result.conversations_pushed = pushed_count
 
 
 # -------------------------------------------------------------------
@@ -507,6 +634,57 @@ def _append_jsonl_dedupe(path: Path, records: list[dict], key: str = "id") -> in
     return added
 
 
+def _pull_paginated(
+    *,
+    base_url: str,
+    path: str,
+    wire_project_id: str,
+    token: str | None,
+    cursor: str | None,
+    error_label: str,
+    errors: list[str],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Walk pages of ``GET <path>?since=<cursor>`` until a short page lands.
+
+    Returns ``(all_items, new_cursor)``. ``new_cursor`` is the last
+    ``max_timestamp`` returned by the server (or the original cursor if no
+    items came back).
+    """
+    all_items: list[dict[str, Any]] = []
+    next_cursor = cursor
+    while True:
+        params: dict[str, str] = {"project_id": wire_project_id, "limit": str(PULL_PAGE_LIMIT)}
+        if next_cursor:
+            params["since"] = next_cursor
+        qs = urllib.parse.urlencode(params)
+        try:
+            data = _http_get(f"{base_url}{path}?{qs}", token)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                # Endpoint not implemented (e.g., legacy server, conversations).
+                raise
+            errors.append(f"{error_label}: {e}")
+            break
+        except Exception as e:
+            errors.append(f"{error_label}: {e}")
+            break
+
+        items = data.get("items") or data.get("traces") or []
+        max_ts = data.get("max_timestamp")
+        if not items:
+            break
+
+        all_items.extend(items)
+        if isinstance(max_ts, str) and max_ts:
+            next_cursor = max_ts
+        if len(items) < PULL_PAGE_LIMIT:
+            break
+        if not isinstance(max_ts, str) or not max_ts:
+            # Server didn't advance the cursor — stop to avoid infinite loop.
+            break
+    return all_items, next_cursor
+
+
 def pull(
     project_id: str,
     remote_name: str | None = None,
@@ -514,7 +692,16 @@ def pull(
     since: str | None = None,
     dry_run: bool = False,
 ) -> PullResult:
-    """Pull remote data into local storage."""
+    """Pull remote data into local storage.
+
+    Paginates each resource until the server returns a short page, advances
+    the per-resource cursor to the server-returned ``max_timestamp``, and
+    adds every received ID to the synced manifest so subsequent status /
+    push calls don't re-treat them as local-only.
+
+    ``since`` overrides the stored cursor for this run only — useful for
+    backfilling after manifest loss.
+    """
     result = PullResult(dry_run=dry_run)
 
     rname, rconf = resolve_remote(project_id, remote_name)
@@ -532,25 +719,34 @@ def pull(
         return result
 
     sync_state = _load_sync_state(project_id)
-    remote_state = sync_state.setdefault("remotes", {}).setdefault(rname, {})
-    last_pull_at = remote_state.get("last_pull", {}).get("at")
-
-    effective_since = since or last_pull_at or ""
+    rs = _get_remote_state(sync_state, rname)
 
     ensure_project_dir(project_id)
 
+    def cursor_for(name: str) -> str | None:
+        return since if since else rs["cursor"].get(name)
+
     # --- Traces ---
     try:
-        params = {"project_id": wire_project_id, "limit": "500"}
-        if effective_since:
-            params["since"] = effective_since
-        qs = urllib.parse.urlencode(params)
-        data = _http_get(f"{base_url}/api/v1/sync/traces?{qs}", token)
-        items = data.get("items", data.get("traces", []))
+        items, new_cursor = _pull_paginated(
+            base_url=base_url,
+            path="/api/v1/sync/traces",
+            wire_project_id=wire_project_id,
+            token=token,
+            cursor=cursor_for("traces"),
+            error_label="traces",
+            errors=result.errors,
+        )
         if items and not dry_run:
             result.traces_pulled = _append_jsonl_dedupe(
                 get_traces_path(project_id), items, key="id",
             )
+            ids = {t.get("id", "") for t in items if t.get("id")}
+            synced = _synced_set(rs, "trace_ids")
+            synced.update(ids)
+            _persist_synced_set(rs, "trace_ids", synced)
+            if new_cursor:
+                rs["cursor"]["traces"] = new_cursor
         elif items:
             result.traces_pulled = len(items)
     except Exception as e:
@@ -558,16 +754,25 @@ def pull(
 
     # --- Ledgers ---
     try:
-        params = {"project_id": wire_project_id, "limit": "500"}
-        if effective_since:
-            params["since"] = effective_since
-        qs = urllib.parse.urlencode(params)
-        data = _http_get(f"{base_url}/api/v1/sync/ledgers?{qs}", token)
-        items = data.get("items", [])
+        items, new_cursor = _pull_paginated(
+            base_url=base_url,
+            path="/api/v1/sync/ledgers",
+            wire_project_id=wire_project_id,
+            token=token,
+            cursor=cursor_for("ledgers"),
+            error_label="ledgers",
+            errors=result.errors,
+        )
         if items and not dry_run:
             result.ledgers_pulled = _append_jsonl_dedupe(
                 get_ledgers_path(project_id), items, key="commit_sha",
             )
+            shas = {l.get("commit_sha", "") for l in items if l.get("commit_sha")}
+            synced = _synced_set(rs, "ledger_shas")
+            synced.update(shas)
+            _persist_synced_set(rs, "ledger_shas", synced)
+            if new_cursor:
+                rs["cursor"]["ledgers"] = new_cursor
         elif items:
             result.ledgers_pulled = len(items)
     except Exception as e:
@@ -575,16 +780,25 @@ def pull(
 
     # --- Commit links ---
     try:
-        params = {"project_id": wire_project_id, "limit": "500"}
-        if effective_since:
-            params["since"] = effective_since
-        qs = urllib.parse.urlencode(params)
-        data = _http_get(f"{base_url}/api/v1/sync/commit-links?{qs}", token)
-        items = data.get("items", [])
+        items, new_cursor = _pull_paginated(
+            base_url=base_url,
+            path="/api/v1/sync/commit-links",
+            wire_project_id=wire_project_id,
+            token=token,
+            cursor=cursor_for("commit_links"),
+            error_label="commit-links",
+            errors=result.errors,
+        )
         if items and not dry_run:
             result.commit_links_pulled = _append_jsonl_dedupe(
                 get_commit_links_path(project_id), items, key="commit_sha",
             )
+            shas = {c.get("commit_sha", "") for c in items if c.get("commit_sha")}
+            synced = _synced_set(rs, "commit_link_shas")
+            synced.update(shas)
+            _persist_synced_set(rs, "commit_link_shas", synced)
+            if new_cursor:
+                rs["cursor"]["commit_links"] = new_cursor
         elif items:
             result.commit_links_pulled = len(items)
     except Exception as e:
@@ -592,34 +806,36 @@ def pull(
 
     # --- Conversations ---
     try:
-        params = {"project_id": wire_project_id, "limit": "500"}
-        if effective_since:
-            params["since"] = effective_since
-        qs = urllib.parse.urlencode(params)
-        data = _http_get(f"{base_url}/api/v1/sync/conversations?{qs}", token)
-        items = data.get("items", [])
+        items, new_cursor = _pull_paginated(
+            base_url=base_url,
+            path="/api/v1/sync/conversations",
+            wire_project_id=wire_project_id,
+            token=token,
+            cursor=cursor_for("conversations"),
+            error_label="conversations",
+            errors=result.errors,
+        )
         if items and not dry_run:
             result.conversations_pulled = _materialize_conversations(
                 project_id=project_id,
                 base_url=base_url,
                 token=token,
                 items=items,
+                rs=rs,
                 errors=result.errors,
             )
+            if new_cursor:
+                rs["cursor"]["conversations"] = new_cursor
         elif items:
             result.conversations_pulled = len(items)
     except urllib.error.HTTPError as e:
-        # Older services without the conversations endpoint return 404 —
-        # silently skip to keep pull working against legacy servers.
+        # Older services without the conversations endpoint return 404.
         if e.code != 404:
             result.errors.append(f"conversations: {e}")
     except Exception as e:
         result.errors.append(f"conversations: {e}")
 
-    # Update pull cursor
     if not dry_run:
-        now = datetime.now(timezone.utc).isoformat()
-        remote_state["last_pull"] = {"at": now}
         _save_sync_state(project_id, sync_state)
 
     return result
@@ -631,47 +847,57 @@ def _materialize_conversations(
     base_url: str,
     token: str | None,
     items: list[dict[str, Any]],
+    rs: dict[str, Any],
     errors: list[str],
 ) -> int:
     """Write each pulled conversation blob into the local content-addressed
-    cache. Inline ``content`` is used when present; otherwise the blob is
-    fetched from ``GET /api/v1/blobs/<sha>``. Skips blobs already cached.
-
-    Returns the count of blobs newly written.
+    cache and add its sha + url_hash to the synced manifest. Inline content
+    is used when present; chunked blobs are fetched from
+    ``GET /api/v1/blobs/<sha>``. Returns count of blobs newly written.
     """
     written = 0
+    synced_blob_shas = _synced_set(rs, "blob_shas")
+    synced_url_hashes = _synced_set(rs, "conversation_url_hashes")
+
     for item in items:
         sha = item.get("content_sha256")
-        if not isinstance(sha, str) or not sha:
-            continue
-        cache_path = cache_path_for_sha(project_id, sha)
-        if cache_path.is_file():
-            continue
+        if isinstance(sha, str) and sha:
+            cache_path = cache_path_for_sha(project_id, sha)
+            if not cache_path.is_file():
+                raw: bytes | None = None
+                if isinstance(item.get("content"), str):
+                    raw = item["content"].encode("utf-8")
+                elif isinstance(item.get("content_b64"), str):
+                    import base64
+                    try:
+                        raw = base64.b64decode(item["content_b64"])
+                    except Exception as e:
+                        errors.append(f"conversations: bad b64 for {sha[:12]}: {e}")
+                        continue
+                else:
+                    try:
+                        raw = _http_get_bytes(f"{base_url}/api/v1/blobs/{sha}", token)
+                    except Exception as e:
+                        errors.append(f"conversations: GET blob {sha[:12]}: {e}")
+                        continue
 
-        raw: bytes | None = None
-        if isinstance(item.get("content"), str):
-            raw = item["content"].encode("utf-8")
-        elif isinstance(item.get("content_b64"), str):
-            import base64
-            try:
-                raw = base64.b64decode(item["content_b64"])
-            except Exception as e:
-                errors.append(f"conversations: bad b64 for {sha[:12]}: {e}")
-                continue
-        else:
-            try:
-                raw = _http_get_bytes(f"{base_url}/api/v1/blobs/{sha}", token)
-            except Exception as e:
-                errors.append(f"conversations: GET blob {sha[:12]}: {e}")
-                continue
+                try:
+                    write_blob_to_cache(project_id, sha, raw)
+                    written += 1
+                except ValueError as e:
+                    errors.append(f"conversations: {e}")
+                    continue
+                except OSError as e:
+                    errors.append(f"conversations: write {sha[:12]}: {e}")
+                    continue
+            synced_blob_shas.add(sha)
 
-        try:
-            write_blob_to_cache(project_id, sha, raw)
-            written += 1
-        except ValueError as e:
-            errors.append(f"conversations: {e}")
-        except OSError as e:
-            errors.append(f"conversations: write {sha[:12]}: {e}")
+        url_hash = item.get("url_hash") or item.get("url")
+        if isinstance(url_hash, str) and url_hash:
+            synced_url_hashes.add(url_hash)
+
+    _persist_synced_set(rs, "blob_shas", synced_blob_shas)
+    _persist_synced_set(rs, "conversation_url_hashes", synced_url_hashes)
     return written
 
 
@@ -691,8 +917,10 @@ class StatusReport:
     unpushed_ledgers: int = 0
     unpushed_commit_links: int = 0
     unattributed_traces: int = 0
-    last_push: str | None = None
-    last_pull: str | None = None
+    traces_cursor: str | None = None
+    ledgers_cursor: str | None = None
+    commit_links_cursor: str | None = None
+    conversations_cursor: str | None = None
 
 
 def status(project_id: str, remote_name: str | None = None) -> StatusReport:
@@ -719,29 +947,30 @@ def status(project_id: str, remote_name: str | None = None) -> StatusReport:
         return report
 
     sync_state = _load_sync_state(project_id)
-    remote_state = sync_state.get("remotes", {}).get(rname, {})
-    last_push = remote_state.get("last_push", {})
-    last_pull = remote_state.get("last_pull", {})
+    rs = _get_remote_state(sync_state, rname)
 
-    push_ts = last_push.get("traces_max_timestamp")
-    pull_at = last_pull.get("at")
-    report.last_push = push_ts
-    report.last_pull = pull_at
+    synced_trace_ids = _synced_set(rs, "trace_ids")
+    synced_ledger_shas = _synced_set(rs, "ledger_shas")
+    synced_link_shas = _synced_set(rs, "commit_link_shas")
 
     report.unpushed_traces = sum(
         1 for t in traces
         if t.get("id", "") in attributed_ids
-        and (not push_ts or t.get("timestamp", "") > push_ts)
+        and t.get("id", "") not in synced_trace_ids
     )
-    ledger_ts = last_push.get("ledgers_max_commit_at")
     report.unpushed_ledgers = sum(
         1 for l in ledgers
-        if not ledger_ts or (l.get("committed_at") or l.get("created_at", "")) > ledger_ts
+        if l.get("commit_sha", "") and l.get("commit_sha", "") not in synced_ledger_shas
     )
-    link_ts = last_push.get("commit_links_max_commit_at")
     report.unpushed_commit_links = sum(
         1 for c in links
-        if not link_ts or (c.get("committed_at") or c.get("created_at", "")) > link_ts
+        if c.get("commit_sha", "") and c.get("commit_sha", "") not in synced_link_shas
     )
+
+    cursors = rs.get("cursor", {})
+    report.traces_cursor = cursors.get("traces")
+    report.ledgers_cursor = cursors.get("ledgers")
+    report.commit_links_cursor = cursors.get("commit_links")
+    report.conversations_cursor = cursors.get("conversations")
 
     return report

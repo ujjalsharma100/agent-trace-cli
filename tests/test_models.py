@@ -143,15 +143,24 @@ class TestGitNoteRemotesSync(unittest.TestCase):
 
     def test_sync_state_roundtrip(self) -> None:
         raw = {
+            "version": 2,
             "remotes": {
                 "origin": {
-                    "last_push": {
-                        "traces_max_timestamp": "2026-04-12T09:32:00+00:00",
-                        "ledgers_max_commit_at": "2026-04-12T09:32:00+00:00",
+                    "synced": {
+                        "trace_ids": ["t1", "t2"],
+                        "ledger_shas": ["abc"],
+                        "commit_link_shas": [],
+                        "blob_shas": ["sha1"],
+                        "conversation_url_hashes": ["uh1"],
                     },
-                    "last_pull": {"at": "2026-04-11T18:00:00+00:00"},
+                    "cursor": {
+                        "traces": "2026-04-12T09:32:00+00:00",
+                        "ledgers": "2026-04-12T09:32:00+00:00",
+                        "commit_links": None,
+                        "conversations": None,
+                    },
                 }
-            }
+            },
         }
         ss = SyncState.from_dict(raw)
         self.assertEqual(SyncState.from_dict(ss.to_dict()), ss)

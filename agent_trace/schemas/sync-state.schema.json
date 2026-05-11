@@ -2,41 +2,45 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/schemas/sync-state.schema.json",
   "title": "SyncState",
-  "description": "Push/pull cursors per remote (~/.agent-trace/projects/<id>/sync-state.json). Timestamps are ISO-8601.",
+  "description": "Per-remote manifest of synced item IDs (~/.agent-trace/projects/<id>/sync-state.json). The manifest is the source of truth for what's on the server; cursors are paging hints only.",
   "type": "object",
   "required": ["remotes"],
   "additionalProperties": false,
   "properties": {
+    "version": { "type": "integer" },
     "remotes": {
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/remoteSync" }
     }
   },
   "$defs": {
-    "lastPush": {
+    "syncedManifest": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "traces_max_timestamp": { "type": "string" },
-        "ledgers_max_commit_at": { "type": "string" },
-        "commit_links_max_commit_at": { "type": "string" },
-        "conversations_max_updated_at": { "type": "string" }
+        "trace_ids":               { "type": "array", "items": { "type": "string" } },
+        "ledger_shas":             { "type": "array", "items": { "type": "string" } },
+        "commit_link_shas":        { "type": "array", "items": { "type": "string" } },
+        "blob_shas":               { "type": "array", "items": { "type": "string" } },
+        "conversation_url_hashes": { "type": "array", "items": { "type": "string" } }
       }
     },
-    "lastPull": {
+    "pullCursors": {
       "type": "object",
-      "required": ["at"],
       "additionalProperties": false,
       "properties": {
-        "at": { "type": "string" }
+        "traces":        { "type": ["string", "null"] },
+        "ledgers":       { "type": ["string", "null"] },
+        "commit_links":  { "type": ["string", "null"] },
+        "conversations": { "type": ["string", "null"] }
       }
     },
     "remoteSync": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "last_push": { "$ref": "#/$defs/lastPush" },
-        "last_pull": { "$ref": "#/$defs/lastPull" }
+        "synced": { "$ref": "#/$defs/syncedManifest" },
+        "cursor": { "$ref": "#/$defs/pullCursors" }
       }
     }
   }

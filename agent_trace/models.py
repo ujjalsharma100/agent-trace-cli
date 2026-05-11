@@ -516,66 +516,73 @@ class RemotesConfig:
 
 
 @dataclass
-class LastPushCursors:
-    traces_max_timestamp: str | None = None
-    ledgers_max_commit_at: str | None = None
-    commit_links_max_commit_at: str | None = None
-    conversations_max_updated_at: str | None = None
+class SyncedManifest:
+    trace_ids: list[str] = field(default_factory=list)
+    ledger_shas: list[str] = field(default_factory=list)
+    commit_link_shas: list[str] = field(default_factory=list)
+    blob_shas: list[str] = field(default_factory=list)
+    conversation_url_hashes: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> LastPushCursors:
+    def from_dict(cls, d: dict[str, Any]) -> SyncedManifest:
+        def _strs(key: str) -> list[str]:
+            v = d.get(key)
+            return [str(x) for x in v if isinstance(x, str)] if isinstance(v, list) else []
+
         return cls(
-            traces_max_timestamp=d.get("traces_max_timestamp"),
-            ledgers_max_commit_at=d.get("ledgers_max_commit_at"),
-            commit_links_max_commit_at=d.get("commit_links_max_commit_at"),
-            conversations_max_updated_at=d.get("conversations_max_updated_at"),
+            trace_ids=_strs("trace_ids"),
+            ledger_shas=_strs("ledger_shas"),
+            commit_link_shas=_strs("commit_link_shas"),
+            blob_shas=_strs("blob_shas"),
+            conversation_url_hashes=_strs("conversation_url_hashes"),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        r = asdict(self)
-        return {k: v for k, v in r.items() if v is not None}
+        return asdict(self)
 
 
 @dataclass
-class LastPullInfo:
-    at: str
+class PullCursors:
+    traces: str | None = None
+    ledgers: str | None = None
+    commit_links: str | None = None
+    conversations: str | None = None
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> LastPullInfo:
-        return cls(at=str(d["at"]))
+    def from_dict(cls, d: dict[str, Any]) -> PullCursors:
+        return cls(
+            traces=d.get("traces"),
+            ledgers=d.get("ledgers"),
+            commit_links=d.get("commit_links"),
+            conversations=d.get("conversations"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"at": self.at}
+        return asdict(self)
 
 
 @dataclass
 class RemoteSyncState:
-    last_push: LastPushCursors | None = None
-    last_pull: LastPullInfo | None = None
+    synced: SyncedManifest = field(default_factory=SyncedManifest)
+    cursor: PullCursors = field(default_factory=PullCursors)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> RemoteSyncState:
-        lp = d.get("last_push")
-        lpl = d.get("last_pull")
+        synced = d.get("synced")
+        cursor = d.get("cursor")
         return cls(
-            last_push=LastPushCursors.from_dict(cast(dict[str, Any], lp)) if isinstance(lp, dict) else None,
-            last_pull=LastPullInfo.from_dict(cast(dict[str, Any], lpl)) if isinstance(lpl, dict) else None,
+            synced=SyncedManifest.from_dict(cast(dict[str, Any], synced)) if isinstance(synced, dict) else SyncedManifest(),
+            cursor=PullCursors.from_dict(cast(dict[str, Any], cursor)) if isinstance(cursor, dict) else PullCursors(),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {}
-        if self.last_push is not None:
-            lp = self.last_push.to_dict()
-            if lp:
-                out["last_push"] = lp
-        if self.last_pull is not None:
-            out["last_pull"] = self.last_pull.to_dict()
-        return out
+        return {"synced": self.synced.to_dict(), "cursor": self.cursor.to_dict()}
 
 
 @dataclass
 class SyncState:
     remotes: dict[str, RemoteSyncState]
+    version: int = 2
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> SyncState:
@@ -585,10 +592,14 @@ class SyncState:
             for name, rv in raw.items():
                 if isinstance(rv, dict):
                     remotes[str(name)] = RemoteSyncState.from_dict(rv)
-        return cls(remotes=remotes)
+        version = d.get("version") if isinstance(d.get("version"), int) else 2
+        return cls(remotes=remotes, version=version)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"remotes": {k: v.to_dict() for k, v in self.remotes.items()}}
+        return {
+            "version": self.version,
+            "remotes": {k: v.to_dict() for k, v in self.remotes.items()},
+        }
 
 
 def trace_from_dict(d: dict[str, Any]) -> Trace:

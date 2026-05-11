@@ -657,10 +657,14 @@ def cmd_status(_args):
                       f"({report.unattributed_traces} unattributed held back)")
                 print(f"              {report.unpushed_ledgers} ledgers")
                 print(f"              {report.unpushed_commit_links} commit-links")
-                if report.last_push:
-                    print(f"    Last push: {report.last_push}")
-                if report.last_pull:
-                    print(f"    Last pull: {report.last_pull}")
+                if report.traces_cursor:
+                    print(f"    Traces cursor:        {report.traces_cursor}")
+                if report.ledgers_cursor:
+                    print(f"    Ledgers cursor:       {report.ledgers_cursor}")
+                if report.commit_links_cursor:
+                    print(f"    Commit-links cursor:  {report.commit_links_cursor}")
+                if report.conversations_cursor:
+                    print(f"    Conversations cursor: {report.conversations_cursor}")
                 print()
                 print("  Run 'agent-trace push' to share attributed work.")
                 print("  Run 'agent-trace pull' to fetch teammates' changes.")

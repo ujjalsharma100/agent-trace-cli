@@ -1,4 +1,4 @@
-"""Tests for push/pull sync protocol (Phase 4)."""
+"""Tests for push/pull sync protocol — content-ID manifest model."""
 
 from __future__ import annotations
 
@@ -18,12 +18,15 @@ from agent_trace.sync import (
     _read_ledgers,
     _read_commit_links,
     _append_jsonl_dedupe,
+    _empty_remote_state,
+    _get_remote_state,
+    _load_sync_state,
+    _save_sync_state,
+    _synced_set,
     compute_attributed_trace_ids,
     push,
     pull,
     status,
-    _load_sync_state,
-    _save_sync_state,
 )
 from agent_trace.remote import add_remote
 
@@ -41,13 +44,33 @@ class TestSyncStateRoundTrip(unittest.TestCase):
 
     def test_load_empty(self):
         state = _load_sync_state(self.pid)
-        self.assertEqual(state, {"remotes": {}})
+        self.assertEqual(state, {"version": 2, "remotes": {}})
 
     def test_save_load(self):
-        state = {"remotes": {"origin": {"last_push": {"traces_max_timestamp": "2026-01-01T00:00:00Z"}}}}
+        rs = _empty_remote_state()
+        rs["synced"]["trace_ids"] = ["t1", "t2"]
+        rs["cursor"]["traces"] = "2026-01-01T00:00:00Z"
+        state = {"version": 2, "remotes": {"origin": rs}}
         _save_sync_state(self.pid, state)
         loaded = _load_sync_state(self.pid)
-        self.assertEqual(loaded, state)
+        self.assertEqual(loaded["remotes"]["origin"]["synced"]["trace_ids"], ["t1", "t2"])
+        self.assertEqual(loaded["remotes"]["origin"]["cursor"]["traces"], "2026-01-01T00:00:00Z")
+
+    def test_legacy_v1_state_is_discarded(self):
+        """Legacy last_push/last_pull cursors are silently dropped on load —
+        the manifest rebuilds itself on the next sync."""
+        legacy = {
+            "remotes": {
+                "origin": {
+                    "last_push": {"traces_max_timestamp": "2026-01-01T00:00:00Z"},
+                    "last_pull": {"at": "2026-01-02T00:00:00Z"},
+                }
+            }
+        }
+        _save_sync_state(self.pid, legacy)
+        loaded = _load_sync_state(self.pid)
+        self.assertIn("origin", loaded["remotes"])
+        self.assertEqual(loaded["remotes"]["origin"], _empty_remote_state())
 
 
 class TestLocalReaders(unittest.TestCase):
@@ -157,6 +180,34 @@ class TestStatusReport(unittest.TestCase):
         self.assertEqual(report.total_ledgers, 1)
         self.assertEqual(report.unattributed_traces, 1)
 
+    def test_pulled_traces_are_not_reported_as_unpushed(self):
+        """Regression: with timestamp cursors, traces pulled from remote
+        showed as ``unpushed`` because their own timestamp could be newer
+        than the local push high-water-mark. Manifest model fixes this."""
+        add_remote(self.pid, "origin", "https://traces.example.com/acme/myrepo", token="t")
+
+        tp = get_traces_path(self.pid)
+        tp.write_text(
+            json.dumps({"id": "t1", "timestamp": "2026-05-09"}) + "\n"
+            + json.dumps({"id": "t2", "timestamp": "2026-05-10"}) + "\n"
+        )
+        lp = get_ledgers_path(self.pid)
+        lp.write_text(
+            json.dumps({"commit_sha": "abc", "trace_ids": ["t1", "t2"], "created_at": "2026-05-09"}) + "\n"
+        )
+
+        # Simulate that both traces and the ledger were pulled from origin —
+        # they should already be in the synced manifest.
+        state = _load_sync_state(self.pid)
+        rs = _get_remote_state(state, "origin")
+        rs["synced"]["trace_ids"] = ["t1", "t2"]
+        rs["synced"]["ledger_shas"] = ["abc"]
+        _save_sync_state(self.pid, state)
+
+        report = status(self.pid, remote_name="origin")
+        self.assertEqual(report.unpushed_traces, 0)
+        self.assertEqual(report.unpushed_ledgers, 0)
+
 
 class TestPushDryRun(unittest.TestCase):
     """Verify push --dry-run counts correctly without making HTTP calls."""
@@ -197,6 +248,106 @@ class TestPushDryRun(unittest.TestCase):
         result = push(self.pid, full=True, dry_run=True)
         self.assertEqual(result.traces_pushed, 2)
         self.assertEqual(result.traces_held_back, 0)
+
+    def test_push_skips_already_synced(self):
+        """Items already in the manifest are not re-pushed — even in dry-run."""
+        tp = get_traces_path(self.pid)
+        tp.write_text(
+            json.dumps({"id": "t1", "timestamp": "2026-01-01"}) + "\n"
+            + json.dumps({"id": "t2", "timestamp": "2026-01-02"}) + "\n"
+        )
+        lp = get_ledgers_path(self.pid)
+        lp.write_text(
+            json.dumps({"commit_sha": "abc", "trace_ids": ["t1", "t2"], "created_at": "2026-01-01"}) + "\n"
+        )
+        # Mark t1 as already synced.
+        state = _load_sync_state(self.pid)
+        rs = _get_remote_state(state, "origin")
+        rs["synced"]["trace_ids"] = ["t1"]
+        _save_sync_state(self.pid, state)
+
+        result = push(self.pid, dry_run=True)
+        self.assertEqual(result.traces_pushed, 1)  # only t2
+
+
+class TestPushRecordsManifest(unittest.TestCase):
+    """Successful pushes add IDs to the synced manifest so the next push is a no-op."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._env_patch = patch.dict(os.environ, {"AGENT_TRACE_HOME": self.tmpdir})
+        self._env_patch.start()
+        self.pid = "test-project"
+        ensure_project_dir(self.pid)
+        add_remote(self.pid, "origin", "https://traces.example.com/acme/myrepo", token="t")
+
+    def tearDown(self):
+        self._env_patch.stop()
+
+    def test_push_then_repeat_pushes_nothing(self):
+        tp = get_traces_path(self.pid)
+        tp.write_text(json.dumps({"id": "t1", "timestamp": "2026-01-01"}) + "\n")
+        lp = get_ledgers_path(self.pid)
+        lp.write_text(
+            json.dumps({"commit_sha": "abc", "trace_ids": ["t1"], "created_at": "2026-01-01"}) + "\n"
+        )
+
+        with patch("agent_trace.sync._http_post") as mock_post:
+            mock_post.return_value = {"ok": True, "count": 1}
+            r1 = push(self.pid)
+            self.assertEqual(r1.traces_pushed, 1)
+            self.assertEqual(r1.ledgers_pushed, 1)
+
+            r2 = push(self.pid)
+            self.assertEqual(r2.traces_pushed, 0)
+            self.assertEqual(r2.ledgers_pushed, 0)
+
+        state = _load_sync_state(self.pid)
+        rs = state["remotes"]["origin"]
+        self.assertIn("t1", rs["synced"]["trace_ids"])
+        self.assertIn("abc", rs["synced"]["ledger_shas"])
+
+
+class TestPullPaginatesAndManifests(unittest.TestCase):
+    """A single pull walks pages until short, dedupes by ID, and records IDs."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._env_patch = patch.dict(os.environ, {"AGENT_TRACE_HOME": self.tmpdir})
+        self._env_patch.start()
+        self.pid = "test-project"
+        ensure_project_dir(self.pid)
+        add_remote(self.pid, "origin", "https://traces.example.com/acme/myrepo", token="t")
+
+    def tearDown(self):
+        self._env_patch.stop()
+
+    def test_pull_paginates_traces(self):
+        # Build two pages: 500 traces, then 1 trace.
+        page_size = 500
+        page1 = [{"id": f"t{i}", "timestamp": "2026-01-01"} for i in range(page_size)]
+        page2 = [{"id": "t-tail", "timestamp": "2026-01-02"}]
+
+        responses = [
+            {"items": page1, "max_timestamp": "2026-04-30T00:00:00+00:00"},
+            {"items": page2, "max_timestamp": "2026-05-01T00:00:00+00:00"},
+            # ledgers / commit-links / conversations all empty.
+            {"items": [], "max_timestamp": None},
+            {"items": [], "max_timestamp": None},
+            {"items": [], "max_timestamp": None},
+        ]
+
+        with patch("agent_trace.sync._http_get") as mock_get:
+            mock_get.side_effect = responses
+            result = pull(self.pid)
+
+        self.assertEqual(result.traces_pulled, page_size + 1)
+
+        state = _load_sync_state(self.pid)
+        rs = state["remotes"]["origin"]
+        self.assertIn("t-tail", rs["synced"]["trace_ids"])
+        self.assertIn("t0", rs["synced"]["trace_ids"])
+        self.assertEqual(rs["cursor"]["traces"], "2026-05-01T00:00:00+00:00")
 
 
 class TestHttpStrippedFromHooks(unittest.TestCase):
