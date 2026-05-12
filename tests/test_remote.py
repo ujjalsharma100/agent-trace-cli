@@ -289,9 +289,38 @@ class TestRemoteTokenInRemote(unittest.TestCase):
     def test_add_with_token_stores_globally(self):
         add_remote(self.pid, "origin", _URL_A, token="secret")
         cfg = json.loads((Path(self.tmpdir) / "config.json").read_text())
-        self.assertEqual(cfg["tokens"]["origin"], "secret")
-        tok = get_remote_token(get_remote(self.pid, "origin"))
-        self.assertEqual(tok, "secret")
+        # Token is stored under a per-project scoped key, not the bare name.
+        self.assertEqual(cfg["tokens"][f"{self.pid}::origin"], "secret")
+        self.assertNotIn("origin", cfg["tokens"])
+        r = get_remote(self.pid, "origin")
+        self.assertEqual(r["auth"]["token_ref"], f"global:{self.pid}::origin")
+        self.assertEqual(get_remote_token(r), "secret")
+
+    def test_two_projects_same_remote_name_do_not_collide(self):
+        # Regression: prior to scoping, both projects wrote to
+        # ``tokens.origin`` and the second add clobbered the first.
+        pid_a = "project-a"
+        pid_b = "project-b"
+        ensure_project_dir(pid_a)
+        ensure_project_dir(pid_b)
+        add_remote(pid_a, "origin", _URL_A, token="tokenA")
+        add_remote(pid_b, "origin", _URL_B, token="tokenB")
+
+        self.assertEqual(get_remote_token(get_remote(pid_a, "origin")), "tokenA")
+        self.assertEqual(get_remote_token(get_remote(pid_b, "origin")), "tokenB")
+
+    def test_remove_remote_drops_global_token(self):
+        add_remote(self.pid, "origin", _URL_A, token="secret")
+        remove_remote(self.pid, "origin")
+        cfg = json.loads((Path(self.tmpdir) / "config.json").read_text())
+        self.assertNotIn(f"{self.pid}::origin", cfg.get("tokens", {}))
+
+    def test_legacy_bare_name_token_ref_still_resolves(self):
+        # Older versions wrote ``global:origin`` as the ref. Ensure we
+        # still resolve those for users who haven't re-set their token.
+        cfg_path = Path(self.tmpdir) / "config.json"
+        cfg_path.write_text(json.dumps({"tokens": {"origin": "legacy-token"}}))
+        self.assertEqual(resolve_token("global:origin"), "legacy-token")
 
     def test_add_with_env(self):
         add_remote(self.pid, "origin", _URL_A, token_env="TRACE_TOKEN")

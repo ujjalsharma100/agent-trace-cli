@@ -9,9 +9,16 @@ data directory still uses the anchor-derived local id, so the
 standalone-no-service flow is unaffected.
 
 Tokens are stored separately:
-  - ``global:<name>``  → ``~/.agent-trace/config.json`` under ``tokens.<name>``
+  - ``global:<project_id>::<name>`` → ``~/.agent-trace/config.json`` under
+    ``tokens.<project_id>::<name>``. Scoping by ``project_id`` keeps two
+    projects that both call a remote ``origin`` from clobbering each
+    other's token.
   - ``env:<VAR>``      → ``os.environ[VAR]`` at runtime (never persisted)
   - ``keychain:<name>``→ OS keychain (scaffold only — not yet implemented)
+
+Legacy bare-name refs (``global:<name>``) written by older versions still
+resolve — ``resolve_token`` treats whatever follows ``global:`` as a flat
+key into ``tokens``.
 
 No external dependencies — stdlib only.
 """
@@ -117,20 +124,32 @@ def _save_remotes(project_id: str, remotes: dict[str, Any]) -> None:
 # Token resolution
 # -------------------------------------------------------------------
 
+def _token_key(project_id: str, name: str) -> str:
+    """Per-project key for global token storage.
+
+    ``::`` separates the project_id from the remote name. project_ids are
+    either opaque ``at-<hex>`` anchors or path-derived slugs — neither
+    contains ``::`` — so the join is unambiguous.
+    """
+    return f"{project_id}::{name}"
+
+
 def resolve_token(token_ref: str) -> str | None:
     """Resolve a token reference to an actual token value.
 
     Supported schemes:
-      ``global:<name>``  — reads ``tokens.<name>`` from global config
+      ``global:<key>``   — reads ``tokens.<key>`` from global config.
+                           Modern refs use ``<project_id>::<name>``;
+                           legacy bare-name keys still work.
       ``env:<VAR>``      — reads environment variable
       ``keychain:<name>``— (stub) returns None
       raw string         — returned as-is (direct token)
     """
     if token_ref.startswith("global:"):
-        name = token_ref[7:]
+        key = token_ref[7:]
         from .config import get_global_config
         tokens = get_global_config().get("tokens", {})
-        return tokens.get(name)
+        return tokens.get(key)
 
     if token_ref.startswith("env:"):
         var = token_ref[4:]
@@ -142,13 +161,29 @@ def resolve_token(token_ref: str) -> str | None:
     return token_ref
 
 
-def _store_global_token(name: str, token: str) -> None:
-    """Store a token under ``tokens.<name>`` in the global config."""
+def _store_global_token(project_id: str, name: str, token: str) -> str:
+    """Store a token under a per-project key. Returns the storage key so
+    the caller can write the matching ``token_ref``.
+    """
     from .config import get_global_config, save_global_config
+    key = _token_key(project_id, name)
     cfg = get_global_config()
     tokens = cfg.setdefault("tokens", {})
-    tokens[name] = token
+    tokens[key] = token
     save_global_config(cfg)
+    return key
+
+
+def _delete_global_token(project_id: str, name: str) -> None:
+    """Remove the per-project token entry from global config, if present."""
+    from .config import get_global_config, save_global_config
+    key = _token_key(project_id, name)
+    cfg = get_global_config()
+    tokens = cfg.get("tokens") or {}
+    if key in tokens:
+        del tokens[key]
+        cfg["tokens"] = tokens
+        save_global_config(cfg)
 
 
 def _mask_token(token: str | None) -> str:
@@ -186,8 +221,8 @@ def add_remote(
 
     auth: dict[str, str] | None = None
     if token:
-        _store_global_token(name, token)
-        auth = {"type": "bearer", "token_ref": f"global:{name}"}
+        key = _store_global_token(project_id, name, token)
+        auth = {"type": "bearer", "token_ref": f"global:{key}"}
     elif token_env:
         auth = {"type": "bearer", "token_ref": f"env:{token_env}"}
     elif token_keychain:
@@ -227,12 +262,17 @@ def list_remotes(project_id: str) -> list[dict[str, Any]]:
 
 
 def remove_remote(project_id: str, name: str) -> bool:
-    """Remove a named remote.  Returns True if it existed."""
+    """Remove a named remote.  Returns True if it existed.
+
+    Also drops the per-project token entry from the global config so a
+    deleted remote doesn't leave its secret behind.
+    """
     remotes = _load_remotes(project_id)
     if name not in remotes:
         return False
     del remotes[name]
     _save_remotes(project_id, remotes)
+    _delete_global_token(project_id, name)
     return True
 
 
@@ -266,8 +306,8 @@ def set_remote_token(
         raise ValueError(f"Remote '{name}' does not exist.")
 
     if token:
-        _store_global_token(name, token)
-        remotes[name]["auth"] = {"type": "bearer", "token_ref": f"global:{name}"}
+        key = _store_global_token(project_id, name, token)
+        remotes[name]["auth"] = {"type": "bearer", "token_ref": f"global:{key}"}
     elif token_env:
         remotes[name]["auth"] = {"type": "bearer", "token_ref": f"env:{token_env}"}
     else:
@@ -277,13 +317,32 @@ def set_remote_token(
 
 
 def rename_remote(project_id: str, old_name: str, new_name: str) -> None:
-    """Rename a remote."""
+    """Rename a remote.
+
+    If the remote's token lives in the global config under the per-project
+    scoped key, migrate it to match the new name and rewrite ``token_ref``.
+    """
     remotes = _load_remotes(project_id)
     if old_name not in remotes:
         raise ValueError(f"Remote '{old_name}' does not exist.")
     if new_name in remotes:
         raise ValueError(f"Remote '{new_name}' already exists.")
-    remotes[new_name] = remotes.pop(old_name)
+
+    entry = remotes.pop(old_name)
+    auth = entry.get("auth") or {}
+    old_ref = auth.get("token_ref", "")
+    old_key = _token_key(project_id, old_name)
+    if old_ref == f"global:{old_key}":
+        from .config import get_global_config, save_global_config
+        cfg = get_global_config()
+        tokens = cfg.setdefault("tokens", {})
+        if old_key in tokens:
+            new_key = _token_key(project_id, new_name)
+            tokens[new_key] = tokens.pop(old_key)
+            save_global_config(cfg)
+            entry["auth"] = {**auth, "token_ref": f"global:{new_key}"}
+
+    remotes[new_name] = entry
     _save_remotes(project_id, remotes)
 
 
