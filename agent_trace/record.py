@@ -97,6 +97,30 @@ def project_dir_from_hook(data: dict) -> str:
     return os.getcwd()
 
 
+def snapshot_transcript_on_session_end(data: dict) -> None:
+    """Snapshot the live transcript bytes into the per-project cache.
+
+    Runs on every session-end / agent-stop event independent of summary
+    config. ``PostToolUse`` snapshots only ever capture transcript state up
+    to a tool call; this is the only event that captures the conversation
+    tail after the agent's final response. Never raises.
+    """
+    try:
+        from .conversations import snapshot_transcript_to_cache
+        from .storage import resolve_project_id
+
+        cwd = project_dir_for_summary_hook(data)
+        pid = resolve_project_id(cwd, create=False)
+        if not pid:
+            return
+        transcript_path = transcript_path_from_hook(data)
+        if not transcript_path:
+            return
+        snapshot_transcript_to_cache(pid, transcript_path)
+    except Exception:
+        pass
+
+
 def project_dir_for_summary_hook(data: dict) -> str:
     """Git root for summary config and storage: prefer session's primary touched repo.
 
@@ -340,6 +364,9 @@ def record_from_stdin():
             summary_owner.pre_summary_hook(data)
         except Exception:
             pass
+        # Capture the transcript tail into the cache before summary runs,
+        # so it lands even when summaries are disabled.
+        snapshot_transcript_on_session_end(data)
         try:
             from .summary import run_session_summary_hook
 

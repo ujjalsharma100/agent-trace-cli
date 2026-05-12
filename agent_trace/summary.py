@@ -28,7 +28,6 @@ from .conversations import (
     compute_conversation_id,
     latest_sha_for_conversation,
     read_blob_from_cache,
-    snapshot_transcript_to_cache,
 )
 from .storage import (
     ensure_project_dir,
@@ -379,19 +378,16 @@ def _summarize_id(
 def run_session_summary_hook(data: dict[str, Any]) -> None:
     """Called from ``record`` on stop / agent-response / Cursor ``sessionEnd``; never raises.
 
-    Resolves the live transcript path, snapshots its current bytes into the
-    project content-addressed cache, then pipes those bytes to the configured
-    summary command. The result is stored keyed by ``conversation_id``.
+    Reads the latest cached transcript bytes (the session-end dispatch in
+    ``record`` snapshots the transcript before calling us) and, if
+    ``summary.enabled``, pipes them to the configured summary command.
+    The result is stored keyed by ``conversation_id``.
     """
     try:
         from .config import get_project_config
         from .record import project_dir_for_summary_hook, transcript_path_from_hook
 
         cwd = project_dir_for_summary_hook(data)
-        session_id = str(
-            data.get("conversation_id") or data.get("session_id") or "",
-        ).strip() or None
-
         cfg = get_project_config(project_dir=cwd)
         if not cfg:
             return
@@ -403,6 +399,10 @@ def run_session_summary_hook(data: dict[str, Any]) -> None:
             return
         timeout = int(sm.get("timeout_seconds", 30))
 
+        session_id = str(
+            data.get("conversation_id") or data.get("session_id") or "",
+        ).strip() or None
+
         pid = resolve_project_id(cwd, create=False)
         if not pid:
             return
@@ -411,21 +411,11 @@ def run_session_summary_hook(data: dict[str, Any]) -> None:
         if not transcript_path:
             return
 
-        # Snapshot the current transcript state into the cache so the
-        # summary command (and any future readers) see a stable blob.
-        snap = snapshot_transcript_to_cache(pid, transcript_path)
-        if snap is None:
-            return
-        sha, _size = snap
-        data_bytes = read_blob_from_cache(pid, sha)
-        if data_bytes is None:
-            return
-        try:
-            text = data_bytes.decode("utf-8", errors="replace")
-        except Exception:
+        cid = compute_conversation_id(transcript_path)
+        text = _read_transcript_from_cache(pid, cid)
+        if not text:
             return
 
-        cid = compute_conversation_id(transcript_path)
         summary = generate_summary_text(text, command, timeout_seconds=timeout)
         if summary:
             append_summary(pid, cid, summary, session_id=session_id)
