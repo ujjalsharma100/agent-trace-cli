@@ -477,14 +477,142 @@ def show_remote(project_id: str, name: str) -> dict[str, Any] | None:
 
 
 # -------------------------------------------------------------------
+# Network: token introspection (whoami) + scope guards
+# -------------------------------------------------------------------
+
+class TokenScopeError(Exception):
+    """A token's resolved scope doesn't match the URL it's being used against.
+
+    Carries the structured ``code`` so CLI handlers (project create, remote
+    add, push/pull, doctor) can render a uniform message and the user can
+    grep for a stable identifier.
+
+    Codes:
+      - ``org_slug_mismatch``     — token org differs from URL ``<org_slug>``.
+      - ``project_scope_mismatch`` — project-scoped token used with a URL
+        whose ``<project_slug>`` is a different project.
+      - ``whoami_unsupported``    — the service is too old to expose
+        ``GET /api/v1/auth/whoami``; the caller decides whether to soft-fail.
+      - ``whoami_unauthorized``   — token rejected (401).
+      - ``whoami_failed``         — any other reason whoami didn't answer.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+class WhoamiUnsupportedError(TokenScopeError):
+    """Service did not implement ``GET /api/v1/auth/whoami`` (404)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "whoami_unsupported",
+            "Remote service does not implement GET /api/v1/auth/whoami "
+            "(upgrade the service to enable strict org/project scope checks).",
+        )
+
+
+def whoami(base_url: str, token: str, *, timeout: int = 15) -> dict[str, Any]:
+    """Fetch the resolved scope of ``token`` from ``base_url``.
+
+    Returns a dict with ``org_id``, ``org_slug``, ``project_id_scope``,
+    ``scopes``. Raises ``WhoamiUnsupportedError`` for 404 (older service)
+    and ``TokenScopeError`` for any other failure (401, 5xx, network).
+    """
+    import json as _json
+    import urllib.error as _ue
+    import urllib.request as _ur
+
+    req = _ur.Request(
+        f"{base_url.rstrip('/')}/api/v1/auth/whoami",
+        method="GET",
+    )
+    req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with _ur.urlopen(req, timeout=timeout) as resp:
+            return _json.loads(resp.read().decode())
+    except _ue.HTTPError as e:
+        if e.code == 404:
+            raise WhoamiUnsupportedError() from None
+        if e.code == 401:
+            raise TokenScopeError(
+                "whoami_unauthorized",
+                "Token rejected by remote service (401). The token may be "
+                "invalid, revoked, or not minted by this service.",
+            ) from None
+        raise TokenScopeError(
+            "whoami_failed",
+            f"GET /api/v1/auth/whoami returned HTTP {e.code}.",
+        ) from None
+    except (_ue.URLError, OSError, TimeoutError) as e:
+        raise TokenScopeError(
+            "whoami_failed",
+            f"Could not reach {base_url}/api/v1/auth/whoami: {e}",
+        ) from None
+
+
+def assert_token_matches_url(
+    base_url: str,
+    token: str,
+    *,
+    expected_org_slug: str,
+    expected_project_slug: str | None = None,
+    allow_unsupported: bool = True,
+) -> dict[str, Any]:
+    """Verify the token's scope matches the URL the user typed.
+
+    - ``expected_org_slug`` MUST equal the slug of the token's org.
+    - When the token is project-scoped (``project_id_scope`` set), and
+      ``expected_project_slug`` is provided, they must be equal.
+
+    Returns the whoami payload on success. Raises ``TokenScopeError`` on
+    mismatch. If the remote service is too old to support ``whoami`` and
+    ``allow_unsupported`` is True, returns the unsupported error in the
+    payload (caller decides to warn vs. fail).
+    """
+    try:
+        info = whoami(base_url, token)
+    except WhoamiUnsupportedError:
+        if allow_unsupported:
+            return {"_unsupported": True}
+        raise
+
+    actual_org = info.get("org_slug")
+    if actual_org and actual_org != expected_org_slug:
+        raise TokenScopeError(
+            "org_slug_mismatch",
+            f"Token belongs to org {actual_org!r} but the URL targets "
+            f"org {expected_org_slug!r}. Use a token for {expected_org_slug!r} "
+            f"or change the URL's org segment to {actual_org!r}.",
+        )
+
+    project_scope = info.get("project_id_scope")
+    if (
+        project_scope
+        and expected_project_slug
+        and project_scope != expected_project_slug
+    ):
+        raise TokenScopeError(
+            "project_scope_mismatch",
+            f"Token is scoped to project {project_scope!r} but the URL targets "
+            f"project {expected_project_slug!r}. Use an org-scoped token, a "
+            f"token scoped to {expected_project_slug!r}, or change the URL.",
+        )
+
+    return info
+
+
+# -------------------------------------------------------------------
 # Network: project registration
 # -------------------------------------------------------------------
 
 class ProjectRegistrationError(Exception):
     """``register_project_via_remote`` raised; carries the HTTP status."""
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, code: str | None = None) -> None:
         self.status = status
+        self.code = code
         super().__init__(message)
 
 
@@ -492,6 +620,7 @@ def register_project_via_remote(
     base_url: str,
     project_slug: str,
     *,
+    org_slug: str | None = None,
     token: str | None = None,
     admin_secret: str | None = None,
     name: str | None = None,
@@ -502,12 +631,19 @@ def register_project_via_remote(
 
     Auth: pass ``token`` for an org-scoped Bearer (must carry
     ``projects:write``), or ``admin_secret`` for the X-Admin-Secret path.
+
+    ``org_slug`` is sent in the body so the server cross-checks it against the
+    caller's org. The CLI always derives this from the URL's first path
+    segment so a URL like ``https://svc/foo-org/myproj`` cannot end up writing
+    rows under a *different* org just because the token happened to be valid.
     """
     import json as _json
     import urllib.error as _ue
     import urllib.request as _ur
 
     body: dict[str, Any] = {"project_id": project_slug}
+    if org_slug is not None:
+        body["org_slug"] = org_slug
     if name is not None:
         body["name"] = name
     if description is not None:
@@ -534,4 +670,4 @@ def register_project_via_remote(
         except _json.JSONDecodeError:
             payload = {"raw": raw}
         msg = payload.get("error") or f"HTTP {e.code}"
-        raise ProjectRegistrationError(e.code, msg) from None
+        raise ProjectRegistrationError(e.code, msg, payload.get("code")) from None

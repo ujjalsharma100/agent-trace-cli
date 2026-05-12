@@ -34,7 +34,10 @@ from .conversations import (
     write_blob_to_cache,
 )
 from .remote import (
+    TokenScopeError,
+    assert_token_matches_url,
     get_remote_base_url,
+    get_remote_org_slug,
     get_remote_project_slug,
     get_remote_token,
     get_remote_url,
@@ -293,6 +296,7 @@ def push(
     rname, rconf = resolve_remote(project_id, remote_name)
     base_url = get_remote_base_url(rconf).rstrip("/")
     wire_project_id = get_remote_project_slug(rconf)
+    wire_org_slug = get_remote_org_slug(rconf)
     token = get_remote_token(rconf)
 
     if not base_url:
@@ -304,6 +308,21 @@ def push(
             "Run `agent-trace remote set-url` to fix it."
         )
         return result
+
+    # Pre-flight scope check. The server already gates on the token's org,
+    # so a mismatched URL would silently push to the *token's* org rather
+    # than the org the user typed. We catch that here so the failure mode
+    # is loud and explicit instead of "data went somewhere else".
+    if token and wire_org_slug:
+        try:
+            assert_token_matches_url(
+                base_url, token,
+                expected_org_slug=wire_org_slug,
+                expected_project_slug=wire_project_id,
+            )
+        except TokenScopeError as e:
+            result.errors.append(f"scope check ({e.code}): {e}")
+            return result
 
     attributed_ids = compute_attributed_trace_ids(project_id) if not full else None
 
@@ -798,6 +817,7 @@ def pull(
     rname, rconf = resolve_remote(project_id, remote_name)
     base_url = get_remote_base_url(rconf).rstrip("/")
     wire_project_id = get_remote_project_slug(rconf)
+    wire_org_slug = get_remote_org_slug(rconf)
     token = get_remote_token(rconf)
 
     if not base_url:
@@ -808,6 +828,20 @@ def pull(
             "Remote URL is missing the project path (<scheme>://<host>/<org>/<project>)."
         )
         return result
+
+    # Same pre-flight as ``push``: refuse to pull if the bound URL's org
+    # disagrees with the token's actual org. Avoids "I pulled from /foo-org
+    # but rows came from /bar-org" surprises.
+    if token and wire_org_slug:
+        try:
+            assert_token_matches_url(
+                base_url, token,
+                expected_org_slug=wire_org_slug,
+                expected_project_slug=wire_project_id,
+            )
+        except TokenScopeError as e:
+            result.errors.append(f"scope check ({e.code}): {e}")
+            return result
 
     sync_state = _load_sync_state(project_id)
     rs = _get_remote_state(sync_state, rname)

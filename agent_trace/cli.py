@@ -90,7 +90,10 @@ from .rewrite import rewrite_ledgers
 from .remote import (
     ProjectRegistrationError,
     RemoteUrlError,
+    TokenScopeError,
+    WhoamiUnsupportedError,
     add_remote as remote_add,
+    assert_token_matches_url,
     get_default_remote,
     list_remotes as remote_list,
     parse_remote_url,
@@ -101,6 +104,7 @@ from .remote import (
     set_remote_token,
     set_remote_url,
     show_remote as remote_show,
+    whoami as remote_whoami,
 )
 from .sync import pull as sync_pull, push as sync_push, status as sync_status
 from .telemetry import (
@@ -438,10 +442,14 @@ def _doctor_diagnose(cwd: str) -> tuple[list[str], list[str], list[str], DoctorF
     if pid:
         from .remote import (
             RemoteUrlError,
+            TokenScopeError,
+            WhoamiUnsupportedError,
+            assert_token_matches_url,
             get_remote as _doctor_get_remote,
             get_remote_base_url,
             get_remote_org_slug,
             get_remote_project_slug,
+            get_remote_token,
             parse_remote_url,
         )
 
@@ -471,6 +479,51 @@ def _doctor_diagnose(cwd: str) -> tuple[list[str], list[str], list[str], DoctorF
                 ok.append(f"Remote '{name}' responds at {base_url} (org={org}, project={proj}) ({detail})")
             else:
                 warn.append(f"Remote '{name}' not reachable at {base_url} ({detail})")
+                continue
+
+            # Token / org / project scope check. Skip silently if no token
+            # or if the URL didn't carry the expected slugs (the malformed
+            # URL branch above already reported it). On a working scope we
+            # add a positive line so the user can see the binding is sound.
+            token = get_remote_token(conf)
+            if not token:
+                warn.append(f"Remote '{name}' has no auth token configured (scope check skipped)")
+                continue
+            url_org = get_remote_org_slug(conf)
+            url_project = get_remote_project_slug(conf)
+            if not url_org or not url_project:
+                continue
+            try:
+                info = assert_token_matches_url(
+                    base_url, token,
+                    expected_org_slug=url_org,
+                    expected_project_slug=url_project,
+                    allow_unsupported=True,
+                )
+            except TokenScopeError as e:
+                err.append(
+                    f"Remote '{name}' token/scope mismatch ({e.code}): {e} "
+                    f"Run `agent-trace remote set-token {name} ...` with a token "
+                    f"for org '{url_org}', or `agent-trace remote set-url {name} ...` "
+                    f"to point at the org the token belongs to."
+                )
+                continue
+            if info.get("_unsupported"):
+                warn.append(
+                    f"Remote '{name}' service does not implement /auth/whoami "
+                    "(upgrade the service to enable strict scope checks)"
+                )
+            else:
+                token_org = info.get("org_slug") or "?"
+                token_proj_scope = info.get("project_id_scope")
+                scope_desc = (
+                    f"project-scoped to '{token_proj_scope}'"
+                    if token_proj_scope else "org-scoped"
+                )
+                ok.append(
+                    f"Remote '{name}' token matches URL "
+                    f"(token org='{token_org}', {scope_desc})"
+                )
 
     summ = (cfg or {}).get("summary") if cfg else None
     if isinstance(summ, dict) and summ.get("enabled"):
@@ -1433,7 +1486,7 @@ def cmd_project(args):
 def _cmd_project_create(args):
     url = args.url
     try:
-        base_url, _, project_slug = parse_remote_url(url)
+        base_url, org_slug, project_slug = parse_remote_url(url)
     except RemoteUrlError as e:
         print(f"agent-trace project create: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1452,9 +1505,26 @@ def _cmd_project_create(args):
         )
         sys.exit(1)
 
+    # Pre-flight scope check: refuse to create the project if the URL's
+    # ``<org_slug>`` doesn't match the token's actual org. Without this,
+    # the server would (silently) create the row under the token's org and
+    # the local remote would record the wrong org slug — drift the user
+    # only notices when traces vanish from "their" org.
+    if token_value:
+        try:
+            assert_token_matches_url(
+                base_url, token_value,
+                expected_org_slug=org_slug,
+                expected_project_slug=project_slug,
+            )
+        except TokenScopeError as e:
+            print(f"agent-trace project create: {e}", file=sys.stderr)
+            sys.exit(1)
+
     try:
         proj = register_project_via_remote(
             base_url, project_slug,
+            org_slug=org_slug,
             token=token_value, admin_secret=admin_secret,
             name=getattr(args, "name", None),
             description=getattr(args, "description", None),
@@ -1489,17 +1559,33 @@ def cmd_remote(args):
         token_value = getattr(args, "token", None)
         token_env = getattr(args, "token_env", None)
 
-        if getattr(args, "create", False):
+        # Parse + scope-check up front, regardless of --create. We refuse to
+        # bind a remote whose URL points at one org while the token belongs
+        # to another — local config and server state would silently diverge.
+        try:
+            base_url, url_org_slug, url_project_slug = parse_remote_url(url)
+        except RemoteUrlError as e:
+            print(f"agent-trace remote add: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        resolved_token = token_value
+        if resolved_token is None and token_env:
+            resolved_token = os.environ.get(token_env)
+
+        if resolved_token:
             try:
-                base_url, _, project_slug = parse_remote_url(url)
-            except RemoteUrlError as e:
+                assert_token_matches_url(
+                    base_url, resolved_token,
+                    expected_org_slug=url_org_slug,
+                    expected_project_slug=url_project_slug,
+                )
+            except TokenScopeError as e:
                 print(f"agent-trace remote add: {e}", file=sys.stderr)
                 sys.exit(1)
-            registration_token = token_value
-            if registration_token is None and token_env:
-                registration_token = os.environ.get(token_env)
+
+        if getattr(args, "create", False):
             admin_secret = os.environ.get("AGENT_TRACE_ADMIN_SECRET")
-            if not registration_token and not admin_secret:
+            if not resolved_token and not admin_secret:
                 print(
                     "agent-trace remote add --create: a token is required to register the "
                     "project. Pass --token, --token-env, or set AGENT_TRACE_ADMIN_SECRET.",
@@ -1508,13 +1594,14 @@ def cmd_remote(args):
                 sys.exit(1)
             try:
                 proj = register_project_via_remote(
-                    base_url, project_slug,
-                    token=registration_token, admin_secret=admin_secret,
+                    base_url, url_project_slug,
+                    org_slug=url_org_slug,
+                    token=resolved_token, admin_secret=admin_secret,
                 )
                 print(f"Registered project '{proj['project_id']}' on {base_url}")
             except ProjectRegistrationError as e:
                 if e.status == 409:
-                    print(f"Project '{project_slug}' already exists; binding the remote anyway.")
+                    print(f"Project '{url_project_slug}' already exists; binding the remote anyway.")
                 else:
                     print(f"agent-trace remote add --create: {e}", file=sys.stderr)
                     sys.exit(1)
@@ -1555,6 +1642,31 @@ def cmd_remote(args):
 
     elif action == "set-url":
         pid = _resolve_pid_for_remote()
+        # Validate the new URL's slugs against whatever token the remote
+        # already holds. Same rationale as `remote add`: a URL change must
+        # not leave the local remote pointing at one org while the token
+        # belongs to another.
+        try:
+            base_url, url_org_slug, url_project_slug = parse_remote_url(args.url)
+        except RemoteUrlError as e:
+            print(f"agent-trace remote set-url: {e}", file=sys.stderr)
+            sys.exit(1)
+        from .remote import get_remote as _get_remote, get_remote_token as _get_token
+        existing = _get_remote(pid, args.name)
+        if existing is None:
+            print(f"agent-trace remote set-url: Remote '{args.name}' does not exist.", file=sys.stderr)
+            sys.exit(1)
+        token_value = _get_token(existing)
+        if token_value:
+            try:
+                assert_token_matches_url(
+                    base_url, token_value,
+                    expected_org_slug=url_org_slug,
+                    expected_project_slug=url_project_slug,
+                )
+            except TokenScopeError as e:
+                print(f"agent-trace remote set-url: {e}", file=sys.stderr)
+                sys.exit(1)
         try:
             set_remote_url(pid, args.name, args.url)
             print(f"Remote '{args.name}' URL updated.")
@@ -1564,11 +1676,42 @@ def cmd_remote(args):
 
     elif action == "set-token":
         pid = _resolve_pid_for_remote()
+        # Validate the new token against the remote's current URL before we
+        # persist it, so the user catches an org/project mismatch up front
+        # rather than at the next sync.
+        from .remote import (
+            get_remote as _get_remote,
+            get_remote_base_url as _get_base,
+            get_remote_org_slug as _get_org,
+            get_remote_project_slug as _get_proj,
+        )
+        existing = _get_remote(pid, args.name)
+        if existing is None:
+            print(f"agent-trace remote set-token: Remote '{args.name}' does not exist.", file=sys.stderr)
+            sys.exit(1)
+        new_token = getattr(args, "token", None)
+        new_token_env = getattr(args, "token_env", None)
+        resolved_new_token = new_token
+        if resolved_new_token is None and new_token_env:
+            resolved_new_token = os.environ.get(new_token_env)
+        base_url = _get_base(existing)
+        url_org_slug = _get_org(existing)
+        url_project_slug = _get_proj(existing)
+        if resolved_new_token and base_url and url_org_slug:
+            try:
+                assert_token_matches_url(
+                    base_url, resolved_new_token,
+                    expected_org_slug=url_org_slug,
+                    expected_project_slug=url_project_slug,
+                )
+            except TokenScopeError as e:
+                print(f"agent-trace remote set-token: {e}", file=sys.stderr)
+                sys.exit(1)
         try:
             set_remote_token(
                 pid, args.name,
-                token=getattr(args, "token", None),
-                token_env=getattr(args, "token_env", None),
+                token=new_token,
+                token_env=new_token_env,
             )
             print(f"Remote '{args.name}' token updated.")
         except ValueError as e:

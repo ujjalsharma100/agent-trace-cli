@@ -233,7 +233,10 @@ class TestPushDryRun(unittest.TestCase):
         lp.write_text(
             json.dumps({"commit_sha": "abc", "trace_ids": ["t1"], "created_at": "2026-01-01"}) + "\n"
         )
-        result = push(self.pid, dry_run=True)
+        # ``assert_token_matches_url`` runs a real /auth/whoami call against
+        # the configured remote — bypass it for these offline tests.
+        with patch("agent_trace.sync.assert_token_matches_url", return_value={}):
+            result = push(self.pid, dry_run=True)
         self.assertTrue(result.dry_run)
         self.assertEqual(result.traces_pushed, 1)
         self.assertEqual(result.traces_held_back, 1)
@@ -245,7 +248,8 @@ class TestPushDryRun(unittest.TestCase):
             json.dumps({"id": "t1", "timestamp": "2026-01-01"}) + "\n"
             + json.dumps({"id": "t2", "timestamp": "2026-01-02"}) + "\n"
         )
-        result = push(self.pid, full=True, dry_run=True)
+        with patch("agent_trace.sync.assert_token_matches_url", return_value={}):
+            result = push(self.pid, full=True, dry_run=True)
         self.assertEqual(result.traces_pushed, 2)
         self.assertEqual(result.traces_held_back, 0)
 
@@ -266,7 +270,8 @@ class TestPushDryRun(unittest.TestCase):
         rs["synced"]["trace_ids"] = ["t1"]
         _save_sync_state(self.pid, state)
 
-        result = push(self.pid, dry_run=True)
+        with patch("agent_trace.sync.assert_token_matches_url", return_value={}):
+            result = push(self.pid, dry_run=True)
         self.assertEqual(result.traces_pushed, 1)  # only t2
 
 
@@ -292,7 +297,8 @@ class TestPushRecordsManifest(unittest.TestCase):
             json.dumps({"commit_sha": "abc", "trace_ids": ["t1"], "created_at": "2026-01-01"}) + "\n"
         )
 
-        with patch("agent_trace.sync._http_post") as mock_post:
+        with patch("agent_trace.sync._http_post") as mock_post, \
+             patch("agent_trace.sync.assert_token_matches_url", return_value={}):
             mock_post.return_value = {"ok": True, "count": 1}
             r1 = push(self.pid)
             self.assertEqual(r1.traces_pushed, 1)
@@ -337,7 +343,8 @@ class TestPullPaginatesAndManifests(unittest.TestCase):
             {"items": [], "max_timestamp": None},
         ]
 
-        with patch("agent_trace.sync._http_get") as mock_get:
+        with patch("agent_trace.sync._http_get") as mock_get, \
+             patch("agent_trace.sync.assert_token_matches_url", return_value={}):
             mock_get.side_effect = responses
             result = pull(self.pid)
 
@@ -348,6 +355,56 @@ class TestPullPaginatesAndManifests(unittest.TestCase):
         self.assertIn("t-tail", rs["synced"]["trace_ids"])
         self.assertIn("t0", rs["synced"]["trace_ids"])
         self.assertEqual(rs["cursor"]["traces"], "2026-05-01T00:00:00+00:00")
+
+
+class TestSyncScopeGuard(unittest.TestCase):
+    """Push and pull must abort when the bound URL's org disagrees with the
+    token's actual org. Without this check the data would silently land in
+    the token's org while the user thought it was going to the URL's org."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._env_patch = patch.dict(os.environ, {"AGENT_TRACE_HOME": self.tmpdir})
+        self._env_patch.start()
+        self.pid = "test-project"
+        ensure_project_dir(self.pid)
+        # URL says ``acme/myrepo``...
+        add_remote(
+            self.pid, "origin",
+            "https://traces.example.com/acme/myrepo", token="t-from-other-org",
+        )
+
+    def tearDown(self):
+        self._env_patch.stop()
+
+    def test_push_aborts_on_org_slug_mismatch(self):
+        from agent_trace.remote import TokenScopeError
+        # ...but the token actually belongs to ``evil``.
+        def fake_assert(*a, **kw):
+            raise TokenScopeError(
+                "org_slug_mismatch",
+                "Token belongs to org 'evil' but URL targets 'acme'.",
+            )
+        with patch("agent_trace.sync.assert_token_matches_url", side_effect=fake_assert), \
+             patch("agent_trace.sync._http_post") as mock_post:
+            result = push(self.pid, full=True)
+        # Push must not have made any HTTP calls.
+        mock_post.assert_not_called()
+        self.assertTrue(any("org_slug_mismatch" in e for e in result.errors))
+        self.assertEqual(result.traces_pushed, 0)
+
+    def test_pull_aborts_on_org_slug_mismatch(self):
+        from agent_trace.remote import TokenScopeError
+        def fake_assert(*a, **kw):
+            raise TokenScopeError(
+                "org_slug_mismatch",
+                "Token belongs to org 'evil' but URL targets 'acme'.",
+            )
+        with patch("agent_trace.sync.assert_token_matches_url", side_effect=fake_assert), \
+             patch("agent_trace.sync._http_get") as mock_get:
+            result = pull(self.pid)
+        mock_get.assert_not_called()
+        self.assertTrue(any("org_slug_mismatch" in e for e in result.errors))
 
 
 class TestHttpStrippedFromHooks(unittest.TestCase):

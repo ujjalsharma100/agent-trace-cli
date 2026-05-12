@@ -334,5 +334,152 @@ class TestRemoteTokenInRemote(unittest.TestCase):
         self.assertEqual(tok, "new")
 
 
+class TestWhoamiAndScopeAssertion(unittest.TestCase):
+    """Mock-driven tests for ``whoami`` + ``assert_token_matches_url``.
+
+    These exercise the CLI-side guardrails added to catch ``token from one
+    org used with a URL pointing at another org`` without standing up a real
+    HTTP service. We monkeypatch ``urllib.request.urlopen`` inside
+    ``agent_trace.remote`` so each test fully controls the wire response.
+    """
+
+    def setUp(self) -> None:
+        self.base = "http://svc.example.com"
+        self.token = "at_secret"
+
+    def _patched_urlopen(self, *, status: int = 200, body: dict | None = None):
+        """Return a context manager that ``urlopen`` can pretend to be."""
+        import io
+        import json as _json
+        from contextlib import contextmanager
+        from urllib.error import HTTPError
+
+        if status >= 400:
+            err_body = _json.dumps(body or {}).encode()
+            err = HTTPError(self.base, status, "boom", {}, io.BytesIO(err_body))
+
+            @contextmanager
+            def opener(_req, *_a, **_kw):
+                raise err
+                yield  # pragma: no cover
+            return opener
+
+        payload = _json.dumps(body or {}).encode()
+
+        @contextmanager
+        def opener(_req, *_a, **_kw):
+            class _Resp:
+                def read(self_inner):
+                    return payload
+            yield _Resp()
+        return opener
+
+    def test_whoami_happy_path(self):
+        from agent_trace import remote as remote_mod
+        body = {
+            "org_id": "00000000-0000-0000-0000-000000000001",
+            "org_slug": "acme",
+            "project_id_scope": None,
+            "scopes": ["read", "write"],
+        }
+        with patch("urllib.request.urlopen", side_effect=self._patched_urlopen(body=body)):
+            info = remote_mod.whoami(self.base, self.token)
+        self.assertEqual(info["org_slug"], "acme")
+        self.assertIsNone(info["project_id_scope"])
+
+    def test_whoami_404_raises_unsupported(self):
+        from agent_trace import remote as remote_mod
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=self._patched_urlopen(status=404, body={"error": "not found"}),
+        ):
+            with self.assertRaises(remote_mod.WhoamiUnsupportedError):
+                remote_mod.whoami(self.base, self.token)
+
+    def test_whoami_401_raises_token_scope_error(self):
+        from agent_trace import remote as remote_mod
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=self._patched_urlopen(status=401, body={"error": "bad token"}),
+        ):
+            with self.assertRaises(remote_mod.TokenScopeError) as cm:
+                remote_mod.whoami(self.base, self.token)
+        self.assertEqual(cm.exception.code, "whoami_unauthorized")
+
+    def test_assert_org_slug_matches(self):
+        from agent_trace import remote as remote_mod
+        body = {"org_slug": "acme", "project_id_scope": None, "scopes": []}
+        with patch("urllib.request.urlopen", side_effect=self._patched_urlopen(body=body)):
+            info = remote_mod.assert_token_matches_url(
+                self.base, self.token,
+                expected_org_slug="acme",
+                expected_project_slug="myrepo",
+            )
+        self.assertEqual(info["org_slug"], "acme")
+
+    def test_assert_org_slug_mismatch(self):
+        """Token from `acme` used with URL whose org segment is `evil` must fail."""
+        from agent_trace import remote as remote_mod
+        body = {"org_slug": "acme", "project_id_scope": None, "scopes": []}
+        with patch("urllib.request.urlopen", side_effect=self._patched_urlopen(body=body)):
+            with self.assertRaises(remote_mod.TokenScopeError) as cm:
+                remote_mod.assert_token_matches_url(
+                    self.base, self.token,
+                    expected_org_slug="evil",
+                )
+        self.assertEqual(cm.exception.code, "org_slug_mismatch")
+
+    def test_assert_project_scope_mismatch(self):
+        """Project-scoped token used against a URL targeting a different project must fail."""
+        from agent_trace import remote as remote_mod
+        body = {"org_slug": "acme", "project_id_scope": "myrepo", "scopes": []}
+        with patch("urllib.request.urlopen", side_effect=self._patched_urlopen(body=body)):
+            with self.assertRaises(remote_mod.TokenScopeError) as cm:
+                remote_mod.assert_token_matches_url(
+                    self.base, self.token,
+                    expected_org_slug="acme",
+                    expected_project_slug="other-repo",
+                )
+        self.assertEqual(cm.exception.code, "project_scope_mismatch")
+
+    def test_assert_project_scope_matches(self):
+        from agent_trace import remote as remote_mod
+        body = {"org_slug": "acme", "project_id_scope": "myrepo", "scopes": []}
+        with patch("urllib.request.urlopen", side_effect=self._patched_urlopen(body=body)):
+            info = remote_mod.assert_token_matches_url(
+                self.base, self.token,
+                expected_org_slug="acme",
+                expected_project_slug="myrepo",
+            )
+        self.assertEqual(info["project_id_scope"], "myrepo")
+
+    def test_assert_unsupported_soft_fails(self):
+        """Older services without /auth/whoami return _unsupported instead of raising."""
+        from agent_trace import remote as remote_mod
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=self._patched_urlopen(status=404, body={}),
+        ):
+            info = remote_mod.assert_token_matches_url(
+                self.base, self.token,
+                expected_org_slug="acme",
+                allow_unsupported=True,
+            )
+        self.assertTrue(info.get("_unsupported"))
+
+    def test_assert_unsupported_strict_raises(self):
+        from agent_trace import remote as remote_mod
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=self._patched_urlopen(status=404, body={}),
+        ):
+            with self.assertRaises(remote_mod.WhoamiUnsupportedError):
+                remote_mod.assert_token_matches_url(
+                    self.base, self.token,
+                    expected_org_slug="acme",
+                    allow_unsupported=False,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
