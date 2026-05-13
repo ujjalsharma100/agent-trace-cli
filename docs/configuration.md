@@ -49,7 +49,7 @@ Sets a single field. **Boolean** values accept human-friendly tokens (all case-i
 | **`summary.command`** | project | string | Executable + args: **stdin** = raw transcript text, **stdout** = summary text. Must be non-empty. Setting this also forces **`summary.enabled`** true in the implementation. |
 | **`summary.timeout-seconds`** | project | int | Positive integer timeout for summarizer subprocess. |
 | **`remote.default`** | project | string | Name of the default **`agent-trace remote`** entry used when `--remote` is omitted on sync commands. |
-| **`global.auth-token`** | global | string | Stores **`auth_token`** in global config (same logical value as `set globaluser`). |
+| **`global.auth-token`** | global | string | **Legacy.** Stores `auth_token` in global config (same value `set globaluser` writes). Not consulted by `push` / `pull` / `sync` in M0 — bind tokens per remote with `remote add --token` / `remote set-token` instead. See [push/pull/sync — Authentication](reference/push-pull-sync.md#authentication). |
 | **`global.capture-detached-edits`** | global | bool | Advanced: capture edits outside a normal git worktree layout when enabled in global config. |
 
 Examples:

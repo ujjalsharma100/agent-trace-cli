@@ -57,14 +57,17 @@ If only one remote is configured it is the default automatically. If multiple ar
 
 ## Authentication
 
-Tokens are stored separately from the remote URL:
+Tokens are bound **per remote**. The URL and the secret are stored apart, so `remotes.json` can be inspected freely:
 
-- **`--token <value>`** — written to `~/.agent-trace/config.json` under `tokens.<remote-name>`. The remote stores a reference (`global:<name>`), never the raw value.
-- **`--token-env <VAR>`** — never persisted; resolved from the environment at runtime.
-- **`AGENT_TRACE_TOKEN`** — global override (highest priority for some operations; see [Environment variables](../environment-variables.md)).
-- **`global.auth-token`** / `set globaluser` — global default.
+- **`--token <value>`** — raw secret. Written to `~/.agent-trace/config.json` under `tokens.<project_id>::<remote_name>` (mode `0o600`). `remotes.json` stores only a reference (`global:<project_id>::<remote_name>`), never the raw value.
+- **`--token-env <VAR>`** — only the variable name is persisted. `os.environ[VAR]` is read at every push/pull.
+- **`keychain:<name>`** — scaffold only in M0; not yet wired up.
 
-`remote show` prints URL components (host / org / project) and masks the token.
+There is no `AGENT_TRACE_TOKEN` / `set globaluser` override that displaces the per-remote binding. The sync code path resolves the token strictly through the remote's `token_ref`. The legacy global `auth_token` slot survives for backward compatibility but does not feed into push/pull/sync. See [push/pull/sync — Authentication](../reference/push-pull-sync.md#authentication) for the full resolution table.
+
+Before every push (and during `doctor`, `remote add`, and `project create`), the CLI calls `GET /api/v1/auth/whoami` on the service and refuses to proceed when the token's resolved org or project scope doesn't match the URL — the "data went somewhere else" failure mode is caught up front.
+
+`remote show <name>` prints URL components (host / org / project) and a masked token preview.
 
 ---
 

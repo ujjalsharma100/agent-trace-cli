@@ -49,9 +49,34 @@ agent-trace doctor
 
 **Checks**
 
-- Prefer setting **`AGENT_TRACE_TOKEN`** for CI, or `agent-trace set globaluser …` for interactive dev machines.
-- `remote show <name>` to confirm URL and that a token ref is present.
-- Corporate TLS inspection / custom CA issues are outside agent-trace’s stdlib HTTP client assumptions — you may need a proxy or different network path.
+- `agent-trace remote show <name>` — confirm URL parses and a `token_ref` (`global:…` or `env:…`) is present.
+- `agent-trace doctor` — surfaces the resolved scope (`token org='acme', org-scoped`). A missing `Remote '<name>' token matches URL` line means the binding is unhealthy.
+- `401 Unauthorized` — token rejected. Re-bind with `agent-trace remote set-token <name> --token "$NEW_TOKEN"` (or `--token-env`). Tokens persist on the server; the CLI just holds the secret.
+- `403 / 404 project_not_found` — the URL's `<project_slug>` was never registered on the server, or your token isn't scoped for it. Run `agent-trace project create <url>` (with an org-scoped token carrying `projects:write`, or `AGENT_TRACE_ADMIN_SECRET`).
+- `scope check (org_slug_mismatch)` / `(project_scope_mismatch)` — the token's org/project does not match the URL. Either fix the URL with `remote set-url` or rotate to a token from the right scope.
+
+`AGENT_TRACE_TOKEN` and `set globaluser` do **not** affect push/pull in M0 — only the per-remote token binding does. See [push/pull/sync — Authentication](reference/push-pull-sync.md#authentication).
+
+Corporate TLS inspection / custom CA issues are outside agent-trace's stdlib HTTP client assumptions — you may need a proxy or different network path.
+
+---
+
+## Remote URL rejected with "missing the project path"
+
+agent-trace requires the **slug grammar** on every remote URL:
+
+```
+<scheme>://<host>[:port]/<org_slug>/<project_slug>
+```
+
+Bare-host URLs (`https://traces.acme.com`) and over-deep paths (`https://traces.acme.com/acme/myrepo/extra`) are rejected up front. Re-add with the full path, then register the project if it doesn't exist yet:
+
+```bash
+agent-trace remote add origin https://traces.acme.com/acme/myrepo \
+    --token "$AT_TOKEN" --create
+```
+
+See [Project identity](concepts/project-identity.md) and [project create](reference/projects-create.md).
 
 ---
 

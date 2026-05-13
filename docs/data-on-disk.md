@@ -8,7 +8,7 @@ This reference enumerates **meaningful paths** under **`AGENT_TRACE_HOME`** (def
 
 | Path | Purpose |
 |------|---------|
-| **`config.json`** | Global configuration (`auth_token`, optional `capture_detached_edits`, …). |
+| **`config.json`** | Global configuration. Holds **per-remote tokens** under `tokens.<project_id>::<remote_name>` (mode `0o600`), the legacy `auth_token` slot, `capture_detached_edits`, telemetry prefs. |
 | **`projects.json`** | Registry of known projects / metadata used by `projects` and adoption flows. |
 | **`bin/agent-trace`** | Launcher script created by `install.sh`. |
 | **`bin/at`** | Short alias launcher. |
@@ -25,13 +25,16 @@ This reference enumerates **meaningful paths** under **`AGENT_TRACE_HOME`** (def
 | File | Purpose |
 |------|---------|
 | **`project-config.json`** | `notes`, `summary`, `remote` defaults — edited via `config` / `init` / `reset`. |
+| **`remotes.json`** | Named HTTP remotes for this project: URL, derived `org_slug` / `project_slug` / `base_url`, and an `auth.token_ref` (`global:…` / `env:…` / `keychain:…`). Mode `0o600`. Written by `agent-trace remote add/set-url/set-token/rename/remove`. |
 | **`traces.jsonl`** | Append-only trace records from hooks (`record`). |
 | **`commit-links.jsonl`** | Associations between git commits and trace / session data. |
 | **`ledgers.jsonl`** | Deterministic per-commit attribution ledgers. |
 | **`session-state.json`** | Cursor for active session / staging window (implementation detail). |
 | **`session-summaries.jsonl`** | Latest summaries per `conversation_url`. |
-| **`sync-state.json`** | Push/pull cursors when using HTTP remotes. |
+| **`sync-state.json`** | Per-remote content-id manifests (`synced.trace_ids`, `synced.ledger_shas`, `synced.blob_shas`, …) and paging cursors. Source of truth for "is this pushed?" — losing it forces a re-scan but never drops data. |
 | **`attribution-state.json`** | Attribution-window cursor (last commit timestamp seen). |
+| **`conversations/<sha[:2]>/<content_sha256>`** | Content-addressed transcript blob cache. Same bytes on every machine that has synced; large transcripts (> 256 KiB) shuttle through `POST /api/v1/blobs` / `GET /api/v1/blobs/<sha>`. |
+| **`conversations/_index.json`** | `conversation_id → latest content_sha256` index so `blame` / `context` / viewer always resolve to the freshest snapshot. |
 
 The **`project_id`** directory name is a sanitized form of the id string (slashes/colons flattened for safety).
 

@@ -59,11 +59,24 @@ agent-trace reset
 ## `doctor` {#doctor}
 
 ```text
-agent-trace doctor
+agent-trace doctor [--fix] [--dry-run] [--yes]
 ```
 
 **Purpose:** Validate **hooks**, **configuration files**, **storage paths**, **remotes**, and **optional external tools** (such as whatever your summary preset requires). Prints actionable guidance.
 
-**Arguments:** none.
+**Options:**
 
-**When to run:** After install, after pulling teammate hook changes, or when `blame`/`context` behave unexpectedly.
+| Flag | Effect |
+|------|--------|
+| `--fix` | Apply auto-fixes for safe-to-repair issues (re-create missing hook stubs, restore `refs/notes/agent-trace` refspec, etc.). Skips network-level problems like unreachable remotes. |
+| `--dry-run` | Print what `--fix` would do, without writing anything. |
+| `--yes` | Run `--fix` non-interactively (skip per-fix confirmation). |
+
+**Remote checks:** For every configured remote, `doctor` parses the URL, probes the service health endpoint, and calls `GET /api/v1/auth/whoami` to verify the bound token's org / project scope matches the URL. The output includes one of:
+
+- `OK Remote 'origin' responds at https://… (org=acme, project=myrepo) (…)`.
+- `OK Remote 'origin' token matches URL (token org='acme', org-scoped)`.
+- `XX Remote 'origin' token/scope mismatch (org_slug_mismatch): …` — fix with `remote set-token` or `remote set-url`.
+- `!!  Remote 'origin' service does not implement /auth/whoami` — server is too old; upgrade or accept the soft failure.
+
+**When to run:** After install, after pulling teammate hook changes, after rotating tokens, or when `blame`/`context`/`push` behave unexpectedly.

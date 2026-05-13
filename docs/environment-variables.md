@@ -25,9 +25,24 @@ Overrides the root directory for:
 
 ## `AGENT_TRACE_TOKEN`
 
-If set to a non-empty string, this token is used for **HTTP remote authentication** in preference to the token stored in global config (`auth_token` from `set globaluser` / `global.auth-token`).
+**Legacy.** Predates per-remote token storage. In M0, `push` / `pull` / `sync` resolve the bearer token from the bound remote's `token_ref` (`global:<key>` / `env:<VAR>`), not from this variable.
 
-Resolution order (auth): **`AGENT_TRACE_TOKEN` env → global config file**.
+It remains read-able by the legacy `get_auth_token()` helper for backward compatibility, but nothing in the current sync code path consults it. New configurations should bind tokens with `agent-trace remote add --token` or `--token-env`.
+
+See [push/pull/sync — Authentication](reference/push-pull-sync.md#authentication) for the resolution model used today.
+
+---
+
+## `AGENT_TRACE_ADMIN_SECRET`
+
+Used **only** by project-administration commands when no bearer token is supplied:
+
+- `agent-trace project create <url>` (no `--token` / `--token-env`)
+- `agent-trace remote add <name> <url> --create` (no `--token` / `--token-env`)
+
+When set, the CLI sends `X-Admin-Secret: $AGENT_TRACE_ADMIN_SECRET` on `POST /api/v1/projects`. The value must match the service's `ADMIN_SECRET`. Project rows then land in the service's well-known **default org** (`00000000-0000-0000-0000-000000000001`) unless the body specifies otherwise.
+
+Never consulted by `push` / `pull` / `sync` — those always need an org-scoped or project-scoped bearer token.
 
 ---
 

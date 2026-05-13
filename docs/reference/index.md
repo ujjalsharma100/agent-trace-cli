@@ -39,6 +39,7 @@ There is no global `--verbose` flag today; individual commands print human-reada
 | **[sync](push-pull-sync.md#sync)** | Push then pull. |
 | **[projects](projects-adopt.md#projects)** | List registry rows or `projects show <id>`. |
 | **[adopt](projects-adopt.md#adopt)** | Register repo, print `project_id`. |
+| **[project create](projects-create.md)** | Register a project on a remote service (`POST /api/v1/projects`). |
 | **[notes](notes.md)** | Git notes on `refs/notes/agent-trace`. |
 | **[summary](summary.md)** | Pluggable transcript summarization. |
 

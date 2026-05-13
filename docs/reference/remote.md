@@ -15,28 +15,33 @@ agent-trace remote <ACTION> ...
 | Term | Meaning |
 |------|---------|
 | **`name`** | Short handle (`origin`, `team`, …). |
-| **`url`** | Base HTTP URL of the datastore service. |
-| **Token** | Provided via **`--token`**, **`--token-env VAR`**, or later `set-token`; persisted by reference where applicable. |
+| **`url`** | Full service URL including the project path: `<scheme>://<host>[:port]/<org_slug>/<project_slug>`. Bare-host URLs are rejected. |
+| **Token** | Provided via **`--token`** (stored in `~/.agent-trace/config.json` under `tokens.<project_id>::<name>`, referenced as `global:<key>`) or **`--token-env VAR`** (referenced as `env:VAR`, never persisted). |
+
+The URL grammar is enforced both client- and server-side. The path segments become the wire `org_slug` and `project_slug`; the slug must exist on the server before push/pull will accept traffic for it. See [Project identity](../concepts/project-identity.md).
 
 ---
 
-## `remote add`
+## `remote add` {#remote-add}
 
 ```text
-agent-trace remote add <name> <url> [--token STR] [--token-env VAR]
+agent-trace remote add <name> <url> [--token STR | --token-env VAR] [--create]
 ```
 
 | Positional | Description |
 |------------|-------------|
 | **`name`** | Remote identifier. |
-| **`url`** | Service root URL. |
+| **`url`** | Full URL with `<org_slug>/<project_slug>` path. |
 
 | Option | Description |
 |--------|-------------|
-| **`--token`** | Inline token string (discouraged in shared terminals). |
-| **`--token-env`** | Read token from named environment variable at add time. |
+| **`--token`** | Inline token string (discouraged in shared terminals). Persisted in global config under a per-project key. |
+| **`--token-env`** | Read token from the named environment variable at every push/pull (never persisted). |
+| **`--create`** | Also register the project on the server (`POST /api/v1/projects`) before storing the remote. Requires `--token` / `--token-env` with `projects:write` scope, or `AGENT_TRACE_ADMIN_SECRET`. A `409 already exists` from the server is treated as a soft success — the remote is still bound. |
 
-**Errors:** Duplicate name / invalid URL / missing auth → stderr + exit **1** per implementation.
+**Pre-flight scope check:** When a token is provided, `remote add` calls `GET /api/v1/auth/whoami` on the URL's host and refuses to bind a remote whose URL points at one org while the token belongs to another. This catches the most common slug-mistype before any data moves.
+
+**Errors:** Duplicate name / invalid URL / missing auth / scope mismatch → stderr + exit **1**.
 
 ---
 
@@ -72,13 +77,13 @@ Updates only the URL for an existing remote.
 
 ---
 
-## `remote set-token`
+## `remote set-token` {#remote-set-token}
 
 ```text
-agent-trace remote set-token <name> [--token STR] [--token-env VAR]
+agent-trace remote set-token <name> [--token STR | --token-env VAR]
 ```
 
-Refresh credentials. At least one of **`--token`** or **`--token-env`** should be supplied (see `--help` for validation rules on your version).
+Refresh credentials. **Exactly one** of `--token` / `--token-env` must be supplied; passing neither exits non-zero with `Provide --token or --token-env.`
 
 ---
 
