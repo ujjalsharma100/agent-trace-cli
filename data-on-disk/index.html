@@ -1460,7 +1460,7 @@
 <tbody>
 <tr>
 <td><strong><code>config.json</code></strong></td>
-<td>Global configuration (<code>auth_token</code>, optional <code>capture_detached_edits</code>, …).</td>
+<td>Global configuration. Holds <strong>per-remote tokens</strong> under <code>tokens.&lt;project_id&gt;::&lt;remote_name&gt;</code> (mode <code>0o600</code>), the legacy <code>auth_token</code> slot, <code>capture_detached_edits</code>, telemetry prefs.</td>
 </tr>
 <tr>
 <td><strong><code>projects.json</code></strong></td>
@@ -1511,6 +1511,10 @@
 <td><code>notes</code>, <code>summary</code>, <code>remote</code> defaults — edited via <code>config</code> / <code>init</code> / <code>reset</code>.</td>
 </tr>
 <tr>
+<td><strong><code>remotes.json</code></strong></td>
+<td>Named HTTP remotes for this project: URL, derived <code>org_slug</code> / <code>project_slug</code> / <code>base_url</code>, and an <code>auth.token_ref</code> (<code>global:…</code> / <code>env:…</code> / <code>keychain:…</code>). Mode <code>0o600</code>. Written by <code>agent-trace remote add/set-url/set-token/rename/remove</code>.</td>
+</tr>
+<tr>
 <td><strong><code>traces.jsonl</code></strong></td>
 <td>Append-only trace records from hooks (<code>record</code>).</td>
 </tr>
@@ -1532,11 +1536,19 @@
 </tr>
 <tr>
 <td><strong><code>sync-state.json</code></strong></td>
-<td>Push/pull cursors when using HTTP remotes.</td>
+<td>Per-remote content-id manifests (<code>synced.trace_ids</code>, <code>synced.ledger_shas</code>, <code>synced.blob_shas</code>, …) and paging cursors. Source of truth for "is this pushed?" — losing it forces a re-scan but never drops data.</td>
 </tr>
 <tr>
 <td><strong><code>attribution-state.json</code></strong></td>
 <td>Attribution-window cursor (last commit timestamp seen).</td>
+</tr>
+<tr>
+<td><strong><code>conversations/&lt;sha[:2]&gt;/&lt;content_sha256&gt;</code></strong></td>
+<td>Content-addressed transcript blob cache. Same bytes on every machine that has synced; large transcripts (&gt; 256 KiB) shuttle through <code>POST /api/v1/blobs</code> / <code>GET /api/v1/blobs/&lt;sha&gt;</code>.</td>
+</tr>
+<tr>
+<td><strong><code>conversations/_index.json</code></strong></td>
+<td><code>conversation_id → latest content_sha256</code> index so <code>blame</code> / <code>context</code> / viewer always resolve to the freshest snapshot.</td>
 </tr>
 </tbody>
 </table>

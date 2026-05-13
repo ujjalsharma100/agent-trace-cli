@@ -1174,10 +1174,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#remote-add" class="md-nav__link">
+  <a href="#remote-add-remote-add" class="md-nav__link">
     <span class="md-ellipsis">
       
-        remote add
+        remote add {#remote-add}
       
     </span>
   </a>
@@ -1218,10 +1218,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#remote-set-token" class="md-nav__link">
+  <a href="#remote-set-token-remote-set-token" class="md-nav__link">
     <span class="md-ellipsis">
       
-        remote set-token
+        remote set-token {#remote-set-token}
       
     </span>
   </a>
@@ -1438,10 +1438,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#remote-add" class="md-nav__link">
+  <a href="#remote-add-remote-add" class="md-nav__link">
     <span class="md-ellipsis">
       
-        remote add
+        remote add {#remote-add}
       
     </span>
   </a>
@@ -1482,10 +1482,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#remote-set-token" class="md-nav__link">
+  <a href="#remote-set-token-remote-set-token" class="md-nav__link">
     <span class="md-ellipsis">
       
-        remote set-token
+        remote set-token {#remote-set-token}
       
     </span>
   </a>
@@ -1577,17 +1577,18 @@
 </tr>
 <tr>
 <td><strong><code>url</code></strong></td>
-<td>Base HTTP URL of the datastore service.</td>
+<td>Full service URL including the project path: <code>&lt;scheme&gt;://&lt;host&gt;[:port]/&lt;org_slug&gt;/&lt;project_slug&gt;</code>. Bare-host URLs are rejected.</td>
 </tr>
 <tr>
 <td><strong>Token</strong></td>
-<td>Provided via <strong><code>--token</code></strong>, <strong><code>--token-env VAR</code></strong>, or later <code>set-token</code>; persisted by reference where applicable.</td>
+<td>Provided via <strong><code>--token</code></strong> (stored in <code>~/.agent-trace/config.json</code> under <code>tokens.&lt;project_id&gt;::&lt;name&gt;</code>, referenced as <code>global:&lt;key&gt;</code>) or <strong><code>--token-env VAR</code></strong> (referenced as <code>env:VAR</code>, never persisted).</td>
 </tr>
 </tbody>
 </table>
+<p>The URL grammar is enforced both client- and server-side. The path segments become the wire <code>org_slug</code> and <code>project_slug</code>; the slug must exist on the server before push/pull will accept traffic for it. See <a href="../../concepts/project-identity/">Project identity</a>.</p>
 <hr />
-<h2 id="remote-add"><code>remote add</code><a class="headerlink" href="#remote-add" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code>agent-trace remote add &lt;name&gt; &lt;url&gt; [--token STR] [--token-env VAR]
+<h2 id="remote-add-remote-add"><code>remote add</code> {#remote-add}<a class="headerlink" href="#remote-add-remote-add" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code>agent-trace remote add &lt;name&gt; &lt;url&gt; [--token STR | --token-env VAR] [--create]
 </code></pre></div>
 <table>
 <thead>
@@ -1603,7 +1604,7 @@
 </tr>
 <tr>
 <td><strong><code>url</code></strong></td>
-<td>Service root URL.</td>
+<td>Full URL with <code>&lt;org_slug&gt;/&lt;project_slug&gt;</code> path.</td>
 </tr>
 </tbody>
 </table>
@@ -1617,15 +1618,20 @@
 <tbody>
 <tr>
 <td><strong><code>--token</code></strong></td>
-<td>Inline token string (discouraged in shared terminals).</td>
+<td>Inline token string (discouraged in shared terminals). Persisted in global config under a per-project key.</td>
 </tr>
 <tr>
 <td><strong><code>--token-env</code></strong></td>
-<td>Read token from named environment variable at add time.</td>
+<td>Read token from the named environment variable at every push/pull (never persisted).</td>
+</tr>
+<tr>
+<td><strong><code>--create</code></strong></td>
+<td>Also register the project on the server (<code>POST /api/v1/projects</code>) before storing the remote. Requires <code>--token</code> / <code>--token-env</code> with <code>projects:write</code> scope, or <code>AGENT_TRACE_ADMIN_SECRET</code>. A <code>409 already exists</code> from the server is treated as a soft success — the remote is still bound.</td>
 </tr>
 </tbody>
 </table>
-<p><strong>Errors:</strong> Duplicate name / invalid URL / missing auth → stderr + exit <strong>1</strong> per implementation.</p>
+<p><strong>Pre-flight scope check:</strong> When a token is provided, <code>remote add</code> calls <code>GET /api/v1/auth/whoami</code> on the URL's host and refuses to bind a remote whose URL points at one org while the token belongs to another. This catches the most common slug-mistype before any data moves.</p>
+<p><strong>Errors:</strong> Duplicate name / invalid URL / missing auth / scope mismatch → stderr + exit <strong>1</strong>.</p>
 <hr />
 <h2 id="remote-list"><code>remote list</code><a class="headerlink" href="#remote-list" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>agent-trace remote list
@@ -1643,10 +1649,10 @@
 </code></pre></div>
 <p>Updates only the URL for an existing remote.</p>
 <hr />
-<h2 id="remote-set-token"><code>remote set-token</code><a class="headerlink" href="#remote-set-token" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code>agent-trace remote set-token &lt;name&gt; [--token STR] [--token-env VAR]
+<h2 id="remote-set-token-remote-set-token"><code>remote set-token</code> {#remote-set-token}<a class="headerlink" href="#remote-set-token-remote-set-token" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code>agent-trace remote set-token &lt;name&gt; [--token STR | --token-env VAR]
 </code></pre></div>
-<p>Refresh credentials. At least one of <strong><code>--token</code></strong> or <strong><code>--token-env</code></strong> should be supplied (see <code>--help</code> for validation rules on your version).</p>
+<p>Refresh credentials. <strong>Exactly one</strong> of <code>--token</code> / <code>--token-env</code> must be supplied; passing neither exits non-zero with <code>Provide --token or --token-env.</code></p>
 <hr />
 <h2 id="remote-remove"><code>remote remove</code><a class="headerlink" href="#remote-remove" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>agent-trace remote remove &lt;name&gt;

@@ -894,6 +894,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#-telemetry-onoffstatus" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        --telemetry on|off|status
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#no-subcommand" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1372,6 +1383,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#-telemetry-onoffstatus" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        --telemetry on|off|status
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#no-subcommand" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1433,6 +1455,14 @@
 </code></pre></div>
 <p><strong>Stdio:</strong> stdout only. <strong>Exit code:</strong> <code>0</code>.</p>
 <hr />
+<h2 id="-telemetry-onoffstatus"><code>--telemetry on|off|status</code><a class="headerlink" href="#-telemetry-onoffstatus" title="Permanent link">&para;</a></h2>
+<p>Controls <strong>opt-in anonymous usage telemetry</strong>. Must be used <strong>without</strong> a subcommand on the same invocation (combining with a command is an error).</p>
+<div class="highlight"><pre><span></span><code>agent-trace<span class="w"> </span>--telemetry<span class="w"> </span>on
+agent-trace<span class="w"> </span>--telemetry<span class="w"> </span>off
+agent-trace<span class="w"> </span>--telemetry<span class="w"> </span>status
+</code></pre></div>
+<p>Default is <strong>off</strong>. <strong><code>AGENT_TRACE_TELEMETRY</code></strong> can override the saved preference — see <a href="../../concepts/telemetry/">Telemetry</a>.</p>
+<hr />
 <h2 id="no-subcommand">No subcommand<a class="headerlink" href="#no-subcommand" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>agent-trace
 </code></pre></div>
@@ -1451,6 +1481,7 @@ agent-trace<span class="w"> </span>notes<span class="w"> </span>attach<span clas
 <li>Config file path override (use <code>AGENT_TRACE_HOME</code> instead)</li>
 <li>Non-interactive mode for <strong>all</strong> commands (<code>config reset</code> has partial <code>--yes</code> support only)</li>
 </ul>
+<p>Telemetry uses <strong><code>--telemetry</code></strong> rather than a separate debug-style flag — see above.</p>
 <p>If you need those behaviors for packaging, open a feature request on the repository tracker.</p>
 
 

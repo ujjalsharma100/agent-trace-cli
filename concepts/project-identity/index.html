@@ -512,13 +512,52 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#how-project_id-is-resolved" class="md-nav__link">
+  <a href="#local-id-the-anchor" class="md-nav__link">
     <span class="md-ellipsis">
       
-        How project_id is resolved
+        Local id (the anchor)
       
     </span>
   </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#remote-slug-the-canonical-id" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Remote slug (the canonical id)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Remote slug (the canonical id)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#registering-a-project" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Registering a project
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-explicit-registration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why explicit registration
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -1383,13 +1422,52 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#how-project_id-is-resolved" class="md-nav__link">
+  <a href="#local-id-the-anchor" class="md-nav__link">
     <span class="md-ellipsis">
       
-        How project_id is resolved
+        Local id (the anchor)
       
     </span>
   </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#remote-slug-the-canonical-id" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Remote slug (the canonical id)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Remote slug (the canonical id)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#registering-a-project" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Registering a project
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-explicit-registration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why explicit registration
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -1447,7 +1525,29 @@
 
 
 <h1 id="concepts-project-identity-storage">Concepts — Project identity &amp; storage<a class="headerlink" href="#concepts-project-identity-storage" title="Permanent link">&para;</a></h1>
-<p>Every trace file, ledger row, and config file lives under <strong><code>AGENT_TRACE_HOME</code></strong> (default <strong><code>~/.agent-trace/</code></strong>), inside <strong><code>projects/&lt;project_id&gt;/</code></strong>. Understanding <strong><code>project_id</code></strong> resolution is essential when you have worktrees, renamed directories, or multiple repos in one editor session.</p>
+<p>agent-trace has <strong>two</strong> notions of identity, and you only need to think about both at the same time when you bind a remote.</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Where it lives</th>
+<th>What it identifies</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Local id</strong></td>
+<td><code>&lt;git-common-dir&gt;/agent-trace-id</code> (an opaque uuid like <code>at-</code> + 32 hex)</td>
+<td>The on-disk data directory under <code>&lt;AGENT_TRACE_HOME&gt;/projects/&lt;id&gt;/</code>. Used by every local command (<code>record</code>, <code>blame</code>, <code>context</code>, <code>summary</code>).</td>
+</tr>
+<tr>
+<td><strong>Remote slug</strong></td>
+<td>The remote URL: <code>&lt;scheme&gt;://&lt;host&gt;/&lt;org_slug&gt;/&lt;project_slug&gt;</code></td>
+<td>The server-side bucket. Used as the wire <code>project_id</code> on every push/pull call. Mirrors GitHub's <code>org/repo</code> model.</td>
+</tr>
+</tbody>
+</table>
+<p>The two layers are deliberately decoupled. <strong>Standalone</strong> users (no service) only ever see the local id — they install the CLI, run <code>init</code>, and <code>blame</code>/<code>context</code> work without anyone registering anything. <strong>Team</strong> users put the remote URL on their checkouts; the slug in the URL becomes the wire identity, and Bob's <code>pull</code> sees Alice's pushed work because they're using the same <code>&lt;org&gt;/&lt;project&gt;</code> slug.</p>
 <hr />
 <h2 id="agent_trace_home">AGENT_TRACE_HOME<a class="headerlink" href="#agent_trace_home" title="Permanent link">&para;</a></h2>
 <table>
@@ -1460,30 +1560,56 @@
 <tbody>
 <tr>
 <td><code>&lt;home&gt;/config.json</code></td>
-<td><strong>Global</strong> settings: auth token, optional flags.</td>
+<td><strong>Global</strong> settings: tokens (per-remote), opt-in flags.</td>
 </tr>
 <tr>
 <td><code>&lt;home&gt;/projects.json</code></td>
 <td><strong>Registry</strong> metadata (optional enrichment; see <code>projects</code> / <code>adopt</code>).</td>
 </tr>
 <tr>
-<td><code>&lt;home&gt;/projects/&lt;project_id&gt;/</code></td>
-<td><strong>All per-project</strong> JSONL, <code>project-config.json</code>, sync cursors, etc.</td>
+<td><code>&lt;home&gt;/projects/&lt;local_id&gt;/</code></td>
+<td><strong>All per-project</strong> JSONL, <code>project-config.json</code>, <code>remotes.json</code>, sync cursors.</td>
 </tr>
 </tbody>
 </table>
-<p>Override the root with the <strong><code>AGENT_TRACE_HOME</code></strong> environment variable (used heavily in tests; also valid for power users who want a separate disk).</p>
+<p>Override the root with <code>AGENT_TRACE_HOME</code> (heavily used in tests; also useful if you want a separate disk). The path layout uses the <strong>local id</strong> — even after you bind a remote with a slug, the on-disk dir keeps its uuid name (renaming it would break running tools and any other working tree pointed at the same anchor).</p>
 <hr />
-<h2 id="how-project_id-is-resolved">How <code>project_id</code> is resolved<a class="headerlink" href="#how-project_id-is-resolved" title="Permanent link">&para;</a></h2>
-<p>When you run a command inside a git working tree, resolution follows this order (simplified from <code>storage.resolve_project_id</code>):</p>
+<h2 id="local-id-the-anchor">Local id (the anchor)<a class="headerlink" href="#local-id-the-anchor" title="Permanent link">&para;</a></h2>
+<p>Resolution order inside a git working tree (<code>storage.resolve_project_id</code>):</p>
 <ol>
-<li><strong>Anchor file</strong> — <strong><code>&lt;git-common-dir&gt;/agent-trace-id</code></strong>, a single line containing the opaque id (for example <code>at-</code> followed by 32 hex characters).  </li>
-<li><strong>Created</strong> on <code>init</code> (or whenever <code>resolve_project_id(..., create=True)</code> runs without an existing anchor).  </li>
-<li><strong>Shared</strong> across linked <strong>git worktrees</strong> because all worktrees share the same <code>git-common-dir</code>.</li>
-<li><strong>Path-derived fallback</strong> — If there is <strong>no anchor</strong> yet (repository never initialized with agent-trace), the tool falls back to a sanitized form of the <strong>realpath</strong> of the repo root (legacy-style <code>-Users-you-src-foo</code>). This lets <code>status</code> / <code>blame</code> resolve to <em>some</em> directory even before <code>init</code>.</li>
+<li><strong>Anchor file</strong> — <code>&lt;git-common-dir&gt;/agent-trace-id</code>, a single line containing <code>at-&lt;32 hex&gt;</code>.</li>
+<li><strong>Created</strong> on <code>init</code> (or whenever <code>resolve_project_id(..., create=True)</code> runs without an existing anchor).</li>
+<li><strong>Shared</strong> across linked <strong>git worktrees</strong> because they share <code>git-common-dir</code>.</li>
+<li><strong>Path-derived fallback</strong> — If there is no anchor yet (un-init'd repo), the tool falls back to a sanitized form of the realpath of the repo root (legacy <code>-Users-you-src-foo</code>). This lets <code>status</code>/<code>blame</code> resolve to <em>some</em> directory before <code>init</code>.</li>
 <li><strong>Non-git paths</strong> — Outside a git repo, a path-derived id is still produced for detached-edit and test scenarios.</li>
 </ol>
-<p><strong>Important:</strong> A <strong>fresh clone</strong> of a repository gets a <strong>new anchor</strong> when initialized; teammates rely on <strong>git notes</strong> (and/or <strong>remote sync</strong>) to share attribution context, not on matching local directory paths.</p>
+<p>A fresh clone gets a <strong>new</strong> local anchor. That is fine — the local anchor never travels with the repo, and it is <strong>not</strong> what teammates share. Team sharing happens at the remote-slug layer, not the anchor layer.</p>
+<hr />
+<h2 id="remote-slug-the-canonical-id">Remote slug (the canonical id)<a class="headerlink" href="#remote-slug-the-canonical-id" title="Permanent link">&para;</a></h2>
+<p>When you run</p>
+<div class="highlight"><pre><span></span><code>agent-trace remote add origin https://traces.acme.com/acme/myrepo
+</code></pre></div>
+<p>the CLI parses the URL into <code>(base_url, org_slug, project_slug) = (https://traces.acme.com, acme, myrepo)</code> and stores all four fields in <code>remotes.json</code>. From that point on:</p>
+<ul>
+<li><strong>push</strong> and <strong>pull</strong> send <code>project_id=myrepo</code> on the wire.</li>
+<li>The server stores rows under <code>(org_id=resolve('acme'), project_id='myrepo')</code>. This is the existing <code>(org_id, project_id)</code> UNIQUE composite key — slugs are unique within an org, just like GitHub repos within an org.</li>
+<li>Two checkouts that bind the same URL push/pull from the same bucket. That is the whole point.</li>
+</ul>
+<p>Slug shape (CHECK-enforced server-side, mirrored in the client):</p>
+<div class="highlight"><pre><span></span><code>^[a-z0-9][a-z0-9._-]{0,63}$
+</code></pre></div>
+<p>Lowercase only. Must start with <code>[a-z0-9]</code>. Up to 64 chars. <code>Acme</code>, <code>-bad</code>, paths with extra segments — all rejected with a clear error.</p>
+<h3 id="registering-a-project">Registering a project<a class="headerlink" href="#registering-a-project" title="Permanent link">&para;</a></h3>
+<p>Projects are explicit on the server. Before pushing, register the slug:</p>
+<div class="highlight"><pre><span></span><code>agent-trace project create https://traces.acme.com/acme/myrepo --token &lt;ORG_TOKEN&gt;
+</code></pre></div>
+<p>Or in one step alongside <code>remote add</code>:</p>
+<div class="highlight"><pre><span></span><code>agent-trace remote add origin https://traces.acme.com/acme/myrepo \
+    --token &quot;$AT_TOKEN&quot; --create
+</code></pre></div>
+<p>See <a href="../../reference/projects-create/">reference/projects-create</a>. The <code>--create</code> path requires either a token with the <code>projects:write</code> scope or <code>AGENT_TRACE_ADMIN_SECRET</code> set in the environment (admin secret matches the service's <code>ADMIN_SECRET</code>).</p>
+<h3 id="why-explicit-registration">Why explicit registration<a class="headerlink" href="#why-explicit-registration" title="Permanent link">&para;</a></h3>
+<p>The service rejects pushes to unregistered slugs with <code>404 project_not_found</code>. This mirrors GitHub: you create the repo, then push. It also stops anyone with an org-scoped token from squatting random slugs by sending traffic at them — registration carries an explicit <code>projects:write</code> gate that project-scoped tokens cannot pass.</p>
 <hr />
 <h2 id="adopt-vs-init">adopt vs init<a class="headerlink" href="#adopt-vs-init" title="Permanent link">&para;</a></h2>
 <table>
@@ -1495,29 +1621,33 @@
 </thead>
 <tbody>
 <tr>
-<td><strong><code>agent-trace adopt [path]</code></strong></td>
-<td>Registers metadata and prints the <strong>stable</strong> <code>project_id</code> for a git root <strong>without</strong> performing full project setup (no interactive/git hook story). Useful for scripting and registry visibility.</td>
+<td><code>agent-trace adopt [path]</code></td>
+<td>Registers metadata and prints the local <code>project_id</code>. Useful for scripting and registry visibility.</td>
 </tr>
 <tr>
-<td><strong><code>agent-trace init</code></strong></td>
+<td><code>agent-trace init</code></td>
 <td>Full project setup: config, hooks as applicable, git hooks, notes refspec wiring, anchor creation.</td>
+</tr>
+<tr>
+<td><code>agent-trace project create &lt;url&gt;</code></td>
+<td>Creates the <strong>server-side</strong> project under the URL's slug. Independent of the local anchor; talk to the service from any repo.</td>
 </tr>
 </tbody>
 </table>
 <p>See the <a href="../../reference/projects-adopt/">projects &amp; adopt</a> reference.</p>
 <hr />
 <h2 id="multi-repo-working-directories">Multi-repo working directories<a class="headerlink" href="#multi-repo-working-directories" title="Permanent link">&para;</a></h2>
-<p>Some editor layouts open a parent folder that contains multiple git roots. Commands that need a repo context accept <strong><code>--project</code></strong> (or equivalent) with either:</p>
+<p>Some editor layouts open a parent folder containing multiple git roots. Commands that need a repo context accept <code>--project</code> (or equivalent) with either:</p>
 <ul>
-<li>A path to the <strong>git repository root</strong>, or  </li>
-<li>A <strong><code>project_id</code></strong> string registered in the workspace (disambiguation depends on the command; see each reference page).</li>
+<li>A path to the <strong>git repository root</strong>, or</li>
+<li>A <code>project_id</code> string registered in the workspace.</li>
 </ul>
-<p>When in doubt, pass <strong><code>--project /absolute/path/to/repo</code></strong>.</p>
+<p>When in doubt, pass <code>--project /absolute/path/to/repo</code>.</p>
 <hr />
 <h2 id="related-configuration">Related configuration<a class="headerlink" href="#related-configuration" title="Permanent link">&para;</a></h2>
 <ul>
-<li><strong><code>remote.default</code></strong> — which named remote <code>push</code> / <code>pull</code> / <code>sync</code> prefer when you omit <code>--remote</code>.  </li>
-<li>Per-project config is stored as JSON alongside data files — see <a href="../../configuration/">Configuration</a>.</li>
+<li><code>remote.default</code> — which named remote <code>push</code>/<code>pull</code>/<code>sync</code> prefer when you omit <code>--remote</code>.</li>
+<li>Per-project config (<code>project-config.json</code>) and per-project <code>remotes.json</code> are stored alongside data files. See <a href="../../configuration/">Configuration</a>.</li>
 </ul>
 
 

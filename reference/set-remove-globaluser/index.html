@@ -1157,10 +1157,21 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#resolution-order-reminder" class="md-nav__link">
+  <a href="#migrating-off-globaluser" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Resolution order (reminder)
+        Migrating off globaluser
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#related" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Related
       
     </span>
   </a>
@@ -1372,10 +1383,21 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#resolution-order-reminder" class="md-nav__link">
+  <a href="#migrating-off-globaluser" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Resolution order (reminder)
+        Migrating off globaluser
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#related" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Related
       
     </span>
   </a>
@@ -1403,7 +1425,10 @@
 
 
 <h1 id="commands-set-globaluser-remove-globaluser">Commands: <code>set globaluser</code>, <code>remove globaluser</code><a class="headerlink" href="#commands-set-globaluser-remove-globaluser" title="Permanent link">&para;</a></h1>
-<p>These are thin <strong>global auth token</strong> helpers stored in <strong><code>$AGENT_TRACE_HOME/config.json</code></strong> under the key <strong><code>auth_token</code></strong>. They predate / parallel <strong><code>config set global.auth-token</code></strong> but remain for ergonomic compatibility.</p>
+<blockquote>
+<p><strong>Legacy.</strong> These commands predate the per-remote token model. They write/clear <code>auth_token</code> in <code>$AGENT_TRACE_HOME/config.json</code> — a slot that the M0 sync code path <strong>no longer consults</strong> for HTTP authentication. They are retained for backward compatibility with very old configs.</p>
+<p><strong>For new setups, bind tokens per remote with <a href="../remote/#remote-add"><code>agent-trace remote add --token</code></a> / <a href="../remote/#remote-set-token"><code>remote set-token</code></a>.</strong> See <a href="../push-pull-sync/#authentication">push/pull/sync — Authentication</a> for the resolution model used today.</p>
+</blockquote>
 <hr />
 <h2 id="set-globaluser"><code>set globaluser</code><a class="headerlink" href="#set-globaluser" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>agent-trace set globaluser &lt;token&gt;
@@ -1418,27 +1443,37 @@
 <tbody>
 <tr>
 <td><strong><code>token</code></strong></td>
-<td>Bearer-like secret used for HTTP remote authentication when <strong><code>AGENT_TRACE_TOKEN</code></strong> is unset.</td>
+<td>Bearer-like secret written to <code>$AGENT_TRACE_HOME/config.json</code> under <code>auth_token</code>.</td>
 </tr>
 </tbody>
 </table>
+<p><strong>Effect today:</strong> Writes the value to disk. Nothing in <code>push</code> / <code>pull</code> / <code>sync</code> / <code>doctor</code> reads it. The <code>agent-trace remote add --token</code> / <code>--token-env</code> path is the only one that wires a token into HTTP requests.</p>
 <p><strong>Side effects:</strong> Creates parent dirs if needed; writes JSON; attempts restrictive file permissions where supported.</p>
-<p><strong>Security:</strong> The token appears in <strong>shell history</strong> unless you suppress history — prefer <strong><code>config set global.auth-token …</code></strong> from a here-doc or secret manager in sensitive environments.</p>
+<p><strong>Security:</strong> The token appears in <strong>shell history</strong> unless you suppress history — prefer <code>agent-trace remote add</code> from a here-doc or secret manager.</p>
 <p><strong>Exit:</strong> <code>0</code>.</p>
 <hr />
 <h2 id="remove-globaluser"><code>remove globaluser</code><a class="headerlink" href="#remove-globaluser" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>agent-trace remove globaluser
 </code></pre></div>
-<p><strong>Purpose:</strong> Delete <strong><code>auth_token</code></strong> from global config if present.</p>
+<p><strong>Purpose:</strong> Delete <code>auth_token</code> from global config if present.</p>
 <p><strong>Stdout:</strong> Confirms removal or states that no token was configured.</p>
 <p><strong>Exit:</strong> <code>0</code>.</p>
 <hr />
-<h2 id="resolution-order-reminder">Resolution order (reminder)<a class="headerlink" href="#resolution-order-reminder" title="Permanent link">&para;</a></h2>
-<ol>
-<li><strong><code>AGENT_TRACE_TOKEN</code></strong> environment variable  </li>
-<li>Global config <strong><code>auth_token</code></strong></li>
-</ol>
-<p>See <a href="../../environment-variables/">Environment variables</a>.</p>
+<h2 id="migrating-off-globaluser">Migrating off <code>globaluser</code><a class="headerlink" href="#migrating-off-globaluser" title="Permanent link">&para;</a></h2>
+<p>If you previously relied on <code>set globaluser</code> for push/pull, recreate the binding on each remote:</p>
+<div class="highlight"><pre><span></span><code>agent-trace<span class="w"> </span>remote<span class="w"> </span>set-token<span class="w"> </span>origin<span class="w"> </span>--token<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$AT_TOKEN</span><span class="s2">&quot;</span>
+<span class="c1"># or, for CI:</span>
+agent-trace<span class="w"> </span>remote<span class="w"> </span>set-token<span class="w"> </span>ci<span class="w"> </span>--token-env<span class="w"> </span>AT_TOKEN
+</code></pre></div>
+<p>Then <code>agent-trace remove globaluser</code> to drop the unused global value.</p>
+<p><code>agent-trace doctor</code> will report <code>Remote 'origin' token matches URL</code> once the per-remote binding is in place — that line is the authoritative signal that auth resolves correctly.</p>
+<hr />
+<h2 id="related">Related<a class="headerlink" href="#related" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../remote/"><code>agent-trace remote</code></a> — modern per-remote token model.</li>
+<li><a href="../push-pull-sync/#authentication">push/pull/sync — Authentication</a> — token-resolution semantics.</li>
+<li><a href="../../environment-variables/">Environment variables</a>.</li>
+</ul>
 
 
 

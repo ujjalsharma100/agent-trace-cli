@@ -801,6 +801,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#remote-url-rejected-with-missing-the-project-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Remote URL rejected with "missing the project path"
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#viewer-does-not-open-or-port-in-use" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1449,6 +1460,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#remote-url-rejected-with-missing-the-project-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Remote URL rejected with "missing the project path"
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#viewer-does-not-open-or-port-in-use" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1550,10 +1572,24 @@ agent-trace<span class="w"> </span>doctor
 <h2 id="remote-push-pull-fails-with-auth-errors">Remote <code>push</code> / <code>pull</code> fails with auth errors<a class="headerlink" href="#remote-push-pull-fails-with-auth-errors" title="Permanent link">&para;</a></h2>
 <p><strong>Checks</strong></p>
 <ul>
-<li>Prefer setting <strong><code>AGENT_TRACE_TOKEN</code></strong> for CI, or <code>agent-trace set globaluser …</code> for interactive dev machines.</li>
-<li><code>remote show &lt;name&gt;</code> to confirm URL and that a token ref is present.</li>
-<li>Corporate TLS inspection / custom CA issues are outside agent-trace’s stdlib HTTP client assumptions — you may need a proxy or different network path.</li>
+<li><code>agent-trace remote show &lt;name&gt;</code> — confirm URL parses and a <code>token_ref</code> (<code>global:…</code> or <code>env:…</code>) is present.</li>
+<li><code>agent-trace doctor</code> — surfaces the resolved scope (<code>token org='acme', org-scoped</code>). A missing <code>Remote '&lt;name&gt;' token matches URL</code> line means the binding is unhealthy.</li>
+<li><code>401 Unauthorized</code> — token rejected. Re-bind with <code>agent-trace remote set-token &lt;name&gt; --token "$NEW_TOKEN"</code> (or <code>--token-env</code>). Tokens persist on the server; the CLI just holds the secret.</li>
+<li><code>403 / 404 project_not_found</code> — the URL's <code>&lt;project_slug&gt;</code> was never registered on the server, or your token isn't scoped for it. Run <code>agent-trace project create &lt;url&gt;</code> (with an org-scoped token carrying <code>projects:write</code>, or <code>AGENT_TRACE_ADMIN_SECRET</code>).</li>
+<li><code>scope check (org_slug_mismatch)</code> / <code>(project_scope_mismatch)</code> — the token's org/project does not match the URL. Either fix the URL with <code>remote set-url</code> or rotate to a token from the right scope.</li>
 </ul>
+<p><code>AGENT_TRACE_TOKEN</code> and <code>set globaluser</code> do <strong>not</strong> affect push/pull in M0 — only the per-remote token binding does. See <a href="../reference/push-pull-sync/#authentication">push/pull/sync — Authentication</a>.</p>
+<p>Corporate TLS inspection / custom CA issues are outside agent-trace's stdlib HTTP client assumptions — you may need a proxy or different network path.</p>
+<hr />
+<h2 id="remote-url-rejected-with-missing-the-project-path">Remote URL rejected with "missing the project path"<a class="headerlink" href="#remote-url-rejected-with-missing-the-project-path" title="Permanent link">&para;</a></h2>
+<p>agent-trace requires the <strong>slug grammar</strong> on every remote URL:</p>
+<div class="highlight"><pre><span></span><code>&lt;scheme&gt;://&lt;host&gt;[:port]/&lt;org_slug&gt;/&lt;project_slug&gt;
+</code></pre></div>
+<p>Bare-host URLs (<code>https://traces.acme.com</code>) and over-deep paths (<code>https://traces.acme.com/acme/myrepo/extra</code>) are rejected up front. Re-add with the full path, then register the project if it doesn't exist yet:</p>
+<div class="highlight"><pre><span></span><code>agent-trace<span class="w"> </span>remote<span class="w"> </span>add<span class="w"> </span>origin<span class="w"> </span>https://traces.acme.com/acme/myrepo<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--token<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$AT_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span>--create
+</code></pre></div>
+<p>See <a href="../concepts/project-identity/">Project identity</a> and <a href="../reference/projects-create/">project create</a>.</p>
 <hr />
 <h2 id="viewer-does-not-open-or-port-in-use">Viewer does not open or port in use<a class="headerlink" href="#viewer-does-not-open-or-port-in-use" title="Permanent link">&para;</a></h2>
 <ul>

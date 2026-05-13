@@ -765,6 +765,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#telemetry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Telemetry
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#related-commands" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1517,6 +1528,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#telemetry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Telemetry
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#related-commands" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1680,7 +1702,7 @@
 <td><strong><code>global.auth-token</code></strong></td>
 <td>global</td>
 <td>string</td>
-<td>Stores <strong><code>auth_token</code></strong> in global config (same logical value as <code>set globaluser</code>).</td>
+<td><strong>Legacy.</strong> Stores <code>auth_token</code> in global config (same value <code>set globaluser</code> writes). Not consulted by <code>push</code> / <code>pull</code> / <code>sync</code> in M0 — bind tokens per remote with <code>remote add --token</code> / <code>remote set-token</code> instead. See <a href="../reference/push-pull-sync/#authentication">push/pull/sync — Authentication</a>.</td>
 </tr>
 <tr>
 <td><strong><code>global.capture-detached-edits</code></strong></td>
@@ -1742,6 +1764,10 @@ agent-trace<span class="w"> </span>config<span class="w"> </span><span class="nb
 <hr />
 <h2 id="json-key-names-vs-cli-field-names">JSON key names vs CLI field names<a class="headerlink" href="#json-key-names-vs-cli-field-names" title="Permanent link">&para;</a></h2>
 <p>CLI uses <strong>dotted keys with hyphens</strong> (for example <code>notes.include-ledger</code>). On disk, project config uses <strong>snake_case</strong> nested objects (for example <code>"include_ledger"</code> under <code>"notes"</code>). The <code>config set</code> command performs the mapping — you should <strong>not</strong> need to hand-edit for normal operation.</p>
+<hr />
+<h2 id="telemetry">Telemetry<a class="headerlink" href="#telemetry" title="Permanent link">&para;</a></h2>
+<p>Anonymous CLI usage telemetry is <strong>opt-in</strong> (default <strong>off</strong>). Use <strong><code>agent-trace --telemetry on|off|status</code></strong>; preferences live in <strong><code>$AGENT_TRACE_HOME/config.json</code></strong> under a <strong><code>telemetry</code></strong> object (<code>enabled</code>, <code>install_id</code>). Override at runtime with <strong><code>AGENT_TRACE_TELEMETRY</code></strong> — see <a href="../environment-variables/">Environment variables</a>.</p>
+<p><strong>Endpoint decision (M0):</strong> there is no production collector yet. The CLI ships with a <strong>placeholder</strong> POST URL so early adopters can enable the preference without upgrading later; failed sends are ignored. See <a href="../concepts/telemetry/">Telemetry concept</a> for payload fields and semantics.</p>
 <hr />
 <h2 id="related-commands">Related commands<a class="headerlink" href="#related-commands" title="Permanent link">&para;</a></h2>
 <ul>

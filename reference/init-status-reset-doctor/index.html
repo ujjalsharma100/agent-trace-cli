@@ -1458,11 +1458,40 @@
 <p><strong>Contrast:</strong> <code>agent-trace config reset …</code> resets <strong>individual fields</strong> or groups with narrower scope.</p>
 <hr />
 <h2 id="doctor-doctor"><code>doctor</code> {#doctor}<a class="headerlink" href="#doctor-doctor" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code>agent-trace doctor
+<div class="highlight"><pre><span></span><code>agent-trace doctor [--fix] [--dry-run] [--yes]
 </code></pre></div>
 <p><strong>Purpose:</strong> Validate <strong>hooks</strong>, <strong>configuration files</strong>, <strong>storage paths</strong>, <strong>remotes</strong>, and <strong>optional external tools</strong> (such as whatever your summary preset requires). Prints actionable guidance.</p>
-<p><strong>Arguments:</strong> none.</p>
-<p><strong>When to run:</strong> After install, after pulling teammate hook changes, or when <code>blame</code>/<code>context</code> behave unexpectedly.</p>
+<p><strong>Options:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--fix</code></td>
+<td>Apply auto-fixes for safe-to-repair issues (re-create missing hook stubs, restore <code>refs/notes/agent-trace</code> refspec, etc.). Skips network-level problems like unreachable remotes.</td>
+</tr>
+<tr>
+<td><code>--dry-run</code></td>
+<td>Print what <code>--fix</code> would do, without writing anything.</td>
+</tr>
+<tr>
+<td><code>--yes</code></td>
+<td>Run <code>--fix</code> non-interactively (skip per-fix confirmation).</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Remote checks:</strong> For every configured remote, <code>doctor</code> parses the URL, probes the service health endpoint, and calls <code>GET /api/v1/auth/whoami</code> to verify the bound token's org / project scope matches the URL. The output includes one of:</p>
+<ul>
+<li><code>OK Remote 'origin' responds at https://… (org=acme, project=myrepo) (…)</code>.</li>
+<li><code>OK Remote 'origin' token matches URL (token org='acme', org-scoped)</code>.</li>
+<li><code>XX Remote 'origin' token/scope mismatch (org_slug_mismatch): …</code> — fix with <code>remote set-token</code> or <code>remote set-url</code>.</li>
+<li><code>!!  Remote 'origin' service does not implement /auth/whoami</code> — server is too old; upgrade or accept the soft failure.</li>
+</ul>
+<p><strong>When to run:</strong> After install, after pulling teammate hook changes, after rotating tokens, or when <code>blame</code>/<code>context</code>/<code>push</code> behave unexpectedly.</p>
 
 
 

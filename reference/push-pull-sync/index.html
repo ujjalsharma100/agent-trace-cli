@@ -1224,10 +1224,71 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#auth-reminder" class="md-nav__link">
+  <a href="#pre-flight-scope-check" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Auth reminder
+        Pre-flight scope check
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#authentication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Authentication
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Authentication">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#token-reference-schemes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Token reference schemes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#precedence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Precedence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Examples
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#chunked-conversation-upload" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Chunked conversation upload
       
     </span>
   </a>
@@ -1239,6 +1300,17 @@
     <span class="md-ellipsis">
       
         Operational visibility
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#related" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Related
       
     </span>
   </a>
@@ -1405,10 +1477,71 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#auth-reminder" class="md-nav__link">
+  <a href="#pre-flight-scope-check" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Auth reminder
+        Pre-flight scope check
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#authentication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Authentication
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Authentication">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#token-reference-schemes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Token reference schemes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#precedence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Precedence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Examples
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#chunked-conversation-upload" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Chunked conversation upload
       
     </span>
   </a>
@@ -1420,6 +1553,17 @@
     <span class="md-ellipsis">
       
         Operational visibility
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#related" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Related
       
     </span>
   </a>
@@ -1448,7 +1592,16 @@
 
 <h1 id="commands-push-pull-sync">Commands: <code>push</code>, <code>pull</code>, <code>sync</code><a class="headerlink" href="#commands-push-pull-sync" title="Permanent link">&para;</a></h1>
 <p>Explicit <strong>HTTP synchronization</strong> between local JSONL-backed storage and a configured <strong>remote</strong> service. Nothing runs automatically on save or commit.</p>
-<p><strong>Prerequisite:</strong> Initialized project + at least one <strong><code>remote add</code></strong> (except dry-run listing cases).</p>
+<p><strong>Prerequisites:</strong></p>
+<ol>
+<li>An <strong>initialized</strong> project (<code>agent-trace init</code>).</li>
+<li>At least one <strong>registered remote</strong> (<code>agent-trace remote add &lt;name&gt; &lt;url&gt; ...</code>).</li>
+<li>The project slug embedded in the remote URL must exist on the server — register it once with <code>agent-trace project create &lt;url&gt;</code> or <code>remote add --create</code>. See <a href="../projects-create/">project create</a> and the <a href="../../concepts/project-identity/">project identity</a> concept.</li>
+</ol>
+<p>URLs follow the <strong>slug grammar</strong> enforced both client- and server-side:</p>
+<div class="highlight"><pre><span></span><code>&lt;scheme&gt;://&lt;host&gt;[:port]/&lt;org_slug&gt;/&lt;project_slug&gt;
+</code></pre></div>
+<p>Bare-host URLs (e.g. <code>https://traces.acme.com</code>) are rejected with a clear error and a pointer at the grammar. <code>org_slug</code> and <code>project_slug</code> each match <code>^[a-z0-9][a-z0-9._-]{0,63}$</code>.</p>
 <hr />
 <h2 id="push-push"><code>push</code> {#push}<a class="headerlink" href="#push-push" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>agent-trace push [OPTIONS]
@@ -1466,26 +1619,26 @@
 <tr>
 <td><strong><code>--remote</code></strong></td>
 <td>string</td>
-<td>auto / default remote</td>
-<td>Which named remote to target.</td>
+<td>default remote</td>
+<td>Which named remote to target. Falls back to <code>remote.default</code> or, when only one remote exists, that remote.</td>
 </tr>
 <tr>
 <td><strong><code>--full</code></strong></td>
 <td>flag</td>
 <td>off</td>
-<td>Include traces <strong>without</strong> ledger attribution, not just attributed subset.</td>
+<td>Include traces <strong>without</strong> ledger attribution. Plain <code>push</code> skips unattributed traces; <code>--full</code> ships everything.</td>
 </tr>
 <tr>
 <td><strong><code>--only</code></strong></td>
 <td>choice</td>
 <td>all</td>
-<td>Restrict to one artifact family: <code>traces</code>, <code>ledgers</code>, or <code>commit-links</code>.</td>
+<td>Restrict to one artifact family: <code>traces</code>, <code>ledgers</code>, or <code>commit-links</code>. Conversations and summaries follow trace pushes implicitly.</td>
 </tr>
 <tr>
 <td><strong><code>--since</code></strong></td>
 <td>string</td>
 <td>none</td>
-<td>Push subset newer than timestamp / commit-ish token (string passed to implementation — treat as opaque filter per version docs).</td>
+<td>ISO-8601 timestamp lower bound on item timestamps. Useful for one-off backfills, independent of the synced-manifest cursor.</td>
 </tr>
 <tr>
 <td><strong><code>--dry-run</code></strong></td>
@@ -1501,7 +1654,16 @@ agent-trace<span class="w"> </span>push<span class="w"> </span>--remote<span cla
 agent-trace<span class="w"> </span>push<span class="w"> </span>--full
 agent-trace<span class="w"> </span>push<span class="w"> </span>--only<span class="w"> </span>ledgers<span class="w"> </span>--dry-run
 </code></pre></div>
-<p><strong>Exit:</strong> <code>0</code> on success; non-zero on auth / network / validation failures.</p>
+<p><strong>What gets pushed (in order, idempotent):</strong></p>
+<ol>
+<li><strong>Traces</strong> — bulk POST to <code>/api/v1/sync/traces</code>, batched at 500 items per request.</li>
+<li><strong>Ledgers</strong> — <code>/api/v1/sync/ledgers</code>.</li>
+<li><strong>Commit links</strong> — <code>/api/v1/sync/commit-links</code>.</li>
+<li><strong>Conversations</strong> — content-addressed blobs (see below) plus pointer rows on <code>/api/v1/sync/conversations</code>.</li>
+<li><strong>Summaries</strong> — <code>/api/v1/sync/summaries</code> (silently skipped if the server is too old to expose the endpoint).</li>
+</ol>
+<p>Idempotency is enforced by a per-remote manifest in <code>sync-state.json</code> (<code>synced.trace_ids</code>, <code>synced.ledger_shas</code>, …). Re-running <code>push</code> against a clean state pushes zero items.</p>
+<p><strong>Exit:</strong> <code>0</code> on success. Non-zero on auth, network, scope, or validation failures.</p>
 <hr />
 <h2 id="pull-pull"><code>pull</code> {#pull}<a class="headerlink" href="#pull-pull" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>agent-trace pull [OPTIONS]
@@ -1519,14 +1681,14 @@ agent-trace<span class="w"> </span>push<span class="w"> </span>--only<span class
 <tr>
 <td><strong><code>--remote</code></strong></td>
 <td>string</td>
-<td>auto / default</td>
+<td>default</td>
 <td>Remote to read from.</td>
 </tr>
 <tr>
 <td><strong><code>--since</code></strong></td>
 <td>string</td>
-<td>none</td>
-<td>Incremental pull filter (timestamp-oriented in typical deployments).</td>
+<td>manifest cursor</td>
+<td>Override the per-resource cursor stored in <code>sync-state.json</code>.</td>
 </tr>
 <tr>
 <td><strong><code>--dry-run</code></strong></td>
@@ -1539,11 +1701,12 @@ agent-trace<span class="w"> </span>push<span class="w"> </span>--only<span class
 <div class="highlight"><pre><span></span><code>agent-trace<span class="w"> </span>pull
 agent-trace<span class="w"> </span>pull<span class="w"> </span>--since<span class="w"> </span><span class="m">2026</span>-01-01T00:00:00Z
 </code></pre></div>
+<p>Pull paginates each resource (server cap 1000 items per page, client requests 500) and dedupes by content id against the local store. Receiving the same row twice is a no-op.</p>
 <hr />
 <h2 id="sync-sync"><code>sync</code> {#sync}<a class="headerlink" href="#sync-sync" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>agent-trace sync [--remote NAME]
 </code></pre></div>
-<p><strong>Purpose:</strong> <strong><code>push</code></strong> then <strong><code>pull</code></strong> in one invocation for everyday “meet in the middle” workflows.</p>
+<p><strong>Purpose:</strong> <code>push</code> then <code>pull</code> in one invocation for everyday meet-in-the-middle workflows.</p>
 <table>
 <thead>
 <tr>
@@ -1555,18 +1718,107 @@ agent-trace<span class="w"> </span>pull<span class="w"> </span>--since<span clas
 <tbody>
 <tr>
 <td><strong><code>--remote</code></strong></td>
-<td>auto</td>
+<td>default</td>
 <td>Target remote override.</td>
 </tr>
 </tbody>
 </table>
-<p>Does <strong>not</strong> currently expose every <code>push</code>/<code>pull</code> flag — if you need <code>--full</code> or <code>--only</code>, run <strong><code>push</code></strong> explicitly.</p>
+<p><code>sync</code> does <strong>not</strong> expose every <code>push</code>/<code>pull</code> flag. If you need <code>--full</code> or <code>--only</code>, run <code>push</code> explicitly.</p>
 <hr />
-<h2 id="auth-reminder">Auth reminder<a class="headerlink" href="#auth-reminder" title="Permanent link">&para;</a></h2>
-<p>Resolve tokens via <strong><code>AGENT_TRACE_TOKEN</code></strong> first, else global config / remote-specific refs. See <a href="../../environment-variables/">Environment variables</a>.</p>
+<h2 id="pre-flight-scope-check">Pre-flight scope check<a class="headerlink" href="#pre-flight-scope-check" title="Permanent link">&para;</a></h2>
+<p>Before any push (and during <code>doctor</code>, <code>remote add</code>, and <code>project create</code>) the CLI calls <strong><code>GET /api/v1/auth/whoami</code></strong> on the remote and refuses to proceed when the token's resolved scope doesn't match the URL:</p>
+<ul>
+<li><code>org_slug_mismatch</code> — the token belongs to a different org than the URL's <code>&lt;org_slug&gt;</code>.</li>
+<li><code>project_scope_mismatch</code> — a project-scoped token used against a URL that points at a different project slug.</li>
+<li><code>whoami_unsupported</code> — the server is too old to expose <code>/auth/whoami</code>; the CLI prints a warning and continues.</li>
+</ul>
+<p>This stops the "data went somewhere else" failure mode: typing the wrong slug surfaces immediately rather than silently writing under the token's org.</p>
+<hr />
+<h2 id="authentication">Authentication<a class="headerlink" href="#authentication" title="Permanent link">&para;</a></h2>
+<p>Tokens are bound <strong>per remote</strong>. The <code>remote add</code> flow stores a <code>token_ref</code> in <code>remotes.json</code> next to the URL; the actual secret lives outside the project directory.</p>
+<h3 id="token-reference-schemes">Token reference schemes<a class="headerlink" href="#token-reference-schemes" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th><code>token_ref</code> form</th>
+<th>Storage</th>
+<th>Resolution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>global:&lt;project_id&gt;::&lt;remote_name&gt;</code></td>
+<td><code>~/.agent-trace/config.json</code> under <code>tokens.&lt;key&gt;</code> (mode <code>0o600</code>)</td>
+<td><code>--token &lt;STR&gt;</code> on <code>remote add</code> / <code>remote set-token</code> writes the raw value here.</td>
+</tr>
+<tr>
+<td><code>env:&lt;VAR&gt;</code></td>
+<td>not persisted</td>
+<td><code>--token-env VAR</code> records only the variable name. <code>os.environ[VAR]</code> is read at every push/pull.</td>
+</tr>
+<tr>
+<td><code>keychain:&lt;name&gt;</code></td>
+<td>OS keychain</td>
+<td>Scaffold only — not wired up in M0.</td>
+</tr>
+<tr>
+<td><code>(no auth)</code></td>
+<td>n/a</td>
+<td>Remote has no <code>auth</code> block. Push will fail at the server.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="precedence">Precedence<a class="headerlink" href="#precedence" title="Permanent link">&para;</a></h3>
+<p>There is <strong>no environment override</strong> that displaces the per-remote <code>token_ref</code>. Push, pull, sync, doctor, project-create, and remote-add all read the token they were configured with. Specifically:</p>
+<ul>
+<li><code>AGENT_TRACE_TOKEN</code> is <strong>not</strong> consulted by <code>push</code> / <code>pull</code> / <code>sync</code> in M0. It survives as a legacy fallback for older <code>set globaluser</code>-driven scripts; new code should never depend on it for HTTP auth.</li>
+<li><code>AGENT_TRACE_ADMIN_SECRET</code> is consulted only by <code>project create</code> and <code>remote add --create</code> — never by sync.</li>
+<li><code>set globaluser &lt;token&gt;</code> / <code>global.auth-token</code> write to a global slot that the sync code path no longer reads. They remain for backward compatibility with very old configs. Migrate by reissuing the token to the matching remote with <code>agent-trace remote set-token &lt;name&gt; --token …</code>.</li>
+</ul>
+<h3 id="examples">Examples<a class="headerlink" href="#examples" title="Permanent link">&para;</a></h3>
+<p>Bind a remote with a raw token (stored in global config under a per-project key):</p>
+<div class="highlight"><pre><span></span><code>agent-trace<span class="w"> </span>remote<span class="w"> </span>add<span class="w"> </span>origin<span class="w"> </span>https://traces.acme.com/acme/myrepo<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--token<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$AT_TOKEN</span><span class="s2">&quot;</span>
+</code></pre></div>
+<p>Bind without persisting the raw value (CI-friendly):</p>
+<div class="highlight"><pre><span></span><code>agent-trace<span class="w"> </span>remote<span class="w"> </span>add<span class="w"> </span>ci<span class="w"> </span>https://traces.acme.com/acme/myrepo<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--token-env<span class="w"> </span>AT_TOKEN
+</code></pre></div>
+<p>Rotate a token without losing the URL:</p>
+<div class="highlight"><pre><span></span><code>agent-trace<span class="w"> </span>remote<span class="w"> </span>set-token<span class="w"> </span>origin<span class="w"> </span>--token<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NEW_AT_TOKEN</span><span class="s2">&quot;</span>
+</code></pre></div>
+<p>Inspect (token is masked):</p>
+<div class="highlight"><pre><span></span><code>agent-trace<span class="w"> </span>remote<span class="w"> </span>show<span class="w"> </span>origin
+</code></pre></div>
+<hr />
+<h2 id="chunked-conversation-upload">Chunked conversation upload<a class="headerlink" href="#chunked-conversation-upload" title="Permanent link">&para;</a></h2>
+<p>Transcripts above <strong>256 KiB</strong> automatically go through a content-addressed blob path so the same content uploads once even when many traces reference it.</p>
+<p>The push leg, for each conversation pointer:</p>
+<ol>
+<li>Computes the SHA-256 of the on-disk transcript and checks the local cache (<code>projects/&lt;id&gt;/conversations/&lt;sha[:2]&gt;/&lt;sha&gt;</code>).</li>
+<li>Calls <strong><code>HEAD /api/v1/blobs/&lt;sha&gt;</code></strong> to see if the server already has the bytes.</li>
+<li>If not, streams the bytes to <strong><code>POST /api/v1/blobs</code></strong> (subject to the service's <code>BLOB_MAX_BYTES</code>, default 10 MiB).</li>
+<li>Sends the conversation pointer row (<code>conversation_id</code>, <code>content_sha256</code>, <code>size</code>) via <code>/api/v1/sync/conversations</code> — no inline body.</li>
+</ol>
+<p>Small transcripts (below the 256 KiB threshold) ship inline on the conversations sync route and skip the blob endpoints.</p>
+<p>If the server does not implement <code>/api/v1/blobs</code> (older deployment), the CLI falls back to inline upload on the conversations route. The fallback is logged via push errors so the operator can decide to upgrade the service.</p>
+<p>Pull mirrors the same path: small content arrives inline; large content arrives as a sha pointer and the CLI fetches the bytes from <code>GET /api/v1/blobs/&lt;sha&gt;</code> into the local cache. After pull, content reads (<code>agent-trace context</code>) yield byte-identical transcripts on both machines.</p>
 <hr />
 <h2 id="operational-visibility">Operational visibility<a class="headerlink" href="#operational-visibility" title="Permanent link">&para;</a></h2>
-<p><code>agent-trace status</code> surfaces whether unpushed data exists (high-level). Use <strong><code>--dry-run</code></strong> on <code>push</code> for a preflight without side effects.</p>
+<ul>
+<li><code>agent-trace status</code> — surfaces whether unpushed data exists (high-level counts).</li>
+<li><code>agent-trace doctor</code> — confirms every remote URL parses, the server is reachable, and the bound token's whoami matches the URL's <code>&lt;org&gt;/&lt;project&gt;</code> slugs.</li>
+<li><code>agent-trace push --dry-run</code> — preflight without side effects.</li>
+</ul>
+<hr />
+<h2 id="related">Related<a class="headerlink" href="#related" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../remote/">remote</a> — managing named remotes.</li>
+<li><a href="../projects-create/">project create</a> — server-side registration.</li>
+<li><a href="../../concepts/remotes-and-sync/">Remotes &amp; sync concept</a>.</li>
+<li><a href="../../concepts/project-identity/">Project identity</a> — local anchor vs. wire slug.</li>
+<li><a href="../../environment-variables/">Environment variables</a>.</li>
+</ul>
 
 
 

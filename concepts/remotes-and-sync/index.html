@@ -596,6 +596,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#project-registration-is-explicit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Project registration is explicit
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#default-remote-selection" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -622,6 +633,17 @@
     <span class="md-ellipsis">
       
         What gets synchronized
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#two-checkouts-one-project" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two checkouts, one project
       
     </span>
   </a>
@@ -1383,6 +1405,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#project-registration-is-explicit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Project registration is explicit
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#default-remote-selection" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1409,6 +1442,17 @@
     <span class="md-ellipsis">
       
         What gets synchronized
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#two-checkouts-one-project" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two checkouts, one project
       
     </span>
   </a>
@@ -1447,7 +1491,13 @@
 
 
 <h1 id="concepts-remotes-sync">Concepts — Remotes &amp; sync<a class="headerlink" href="#concepts-remotes-sync" title="Permanent link">&para;</a></h1>
-<p>Named <strong>remotes</strong> behave similarly to <strong><code>git remote</code></strong>: each has a <strong>name</strong>, <strong>URL</strong>, and optional <strong>authentication</strong>. They exist so teams can <strong><code>push</code></strong> and <strong><code>pull</code></strong> JSONL-backed artifacts to a shared HTTP service <strong>when they choose to</strong>.</p>
+<p>A <strong>remote</strong> is a named pointer to an <code>agent-trace-service</code> deployment plus the <code>&lt;org&gt;/&lt;project&gt;</code> slug that identifies your team's bucket within it. The model is deliberately git-shaped:</p>
+<div class="highlight"><pre><span></span><code>agent-trace remote add origin https://traces.acme.com/acme/myrepo --token $AT_TOKEN
+</code></pre></div>
+<p>The URL grammar is <strong>fixed</strong>:</p>
+<div class="highlight"><pre><span></span><code>&lt;scheme&gt;://&lt;host&gt;[:port]/&lt;org_slug&gt;/&lt;project_slug&gt;
+</code></pre></div>
+<p>Bare-host URLs (e.g. <code>https://traces.acme.com</code>) are rejected. The path is what makes the URL self-describing — anyone reading the config can see exactly which org and project the remote points at, without consulting external docs.</p>
 <hr />
 <h2 id="nothing-is-automatic">Nothing is automatic<a class="headerlink" href="#nothing-is-automatic" title="Permanent link">&para;</a></h2>
 <p>Unlike some sync clients, agent-trace <strong>does not</strong> upload traces on every save or commit. You run:</p>
@@ -1458,22 +1508,43 @@
 </ul>
 <p>This keeps local work private by default and makes air-gapped or compliance-heavy workflows straightforward.</p>
 <hr />
+<h2 id="project-registration-is-explicit">Project registration is explicit<a class="headerlink" href="#project-registration-is-explicit" title="Permanent link">&para;</a></h2>
+<p>Before the first push, the project must exist on the server:</p>
+<div class="highlight"><pre><span></span><code>agent-trace project create https://traces.acme.com/acme/myrepo --token &quot;$AT_TOKEN&quot;
+</code></pre></div>
+<p>Or fold it into <code>remote add</code>:</p>
+<div class="highlight"><pre><span></span><code>agent-trace remote add origin https://traces.acme.com/acme/myrepo \
+    --token &quot;$AT_TOKEN&quot; --create
+</code></pre></div>
+<p>The service returns <code>404 project_not_found</code> if you try to sync against an unregistered slug. See the <a href="../../reference/projects-create/">projects-create reference</a> for token scope details.</p>
+<hr />
 <h2 id="default-remote-selection">Default remote selection<a class="headerlink" href="#default-remote-selection" title="Permanent link">&para;</a></h2>
-<p>Each project stores a <strong><code>remote.default</code></strong> name in <code>project-config.json</code>. Commands that accept <strong><code>--remote</code></strong> fall back to that default when you omit the flag (and may apply additional “auto” behavior documented on <a href="../../reference/push-pull-sync/">push/pull/sync</a>).</p>
+<p>Each project stores a <code>remote.default</code> name in <code>project-config.json</code>. Commands that accept <code>--remote</code> fall back to that default when you omit the flag (and may apply additional "auto" behavior documented on <a href="../../reference/push-pull-sync/">push/pull/sync</a>).</p>
+<p>If only one remote is configured it is the default automatically. If multiple are configured and none is set explicit-default, the CLI prefers <code>origin</code>.</p>
 <hr />
 <h2 id="authentication">Authentication<a class="headerlink" href="#authentication" title="Permanent link">&para;</a></h2>
-<p>Tokens can be supplied when adding or updating a remote (<code>--token</code>, <code>--token-env</code>). Resolution also honors:</p>
+<p>Tokens are bound <strong>per remote</strong>. The URL and the secret are stored apart, so <code>remotes.json</code> can be inspected freely:</p>
 <ul>
-<li><strong><code>AGENT_TRACE_TOKEN</code></strong> environment variable (highest priority for some operations — see <a href="../../environment-variables/">Environment variables</a>).</li>
-<li><strong><code>global.auth-token</code></strong> / <code>set globaluser</code> in <code>~/.agent-trace/config.json</code>.</li>
+<li><strong><code>--token &lt;value&gt;</code></strong> — raw secret. Written to <code>~/.agent-trace/config.json</code> under <code>tokens.&lt;project_id&gt;::&lt;remote_name&gt;</code> (mode <code>0o600</code>). <code>remotes.json</code> stores only a reference (<code>global:&lt;project_id&gt;::&lt;remote_name&gt;</code>), never the raw value.</li>
+<li><strong><code>--token-env &lt;VAR&gt;</code></strong> — only the variable name is persisted. <code>os.environ[VAR]</code> is read at every push/pull.</li>
+<li><strong><code>keychain:&lt;name&gt;</code></strong> — scaffold only in M0; not yet wired up.</li>
 </ul>
-<p><code>remote show</code> prints URLs with tokens <strong>masked</strong>.</p>
+<p>There is no <code>AGENT_TRACE_TOKEN</code> / <code>set globaluser</code> override that displaces the per-remote binding. The sync code path resolves the token strictly through the remote's <code>token_ref</code>. The legacy global <code>auth_token</code> slot survives for backward compatibility but does not feed into push/pull/sync. See <a href="../../reference/push-pull-sync/#authentication">push/pull/sync — Authentication</a> for the full resolution table.</p>
+<p>Before every push (and during <code>doctor</code>, <code>remote add</code>, and <code>project create</code>), the CLI calls <code>GET /api/v1/auth/whoami</code> on the service and refuses to proceed when the token's resolved org or project scope doesn't match the URL — the "data went somewhere else" failure mode is caught up front.</p>
+<p><code>remote show &lt;name&gt;</code> prints URL components (host / org / project) and a masked token preview.</p>
 <hr />
 <h2 id="what-gets-synchronized">What gets synchronized<a class="headerlink" href="#what-gets-synchronized" title="Permanent link">&para;</a></h2>
-<p>High-level artifact families include <strong>traces</strong>, <strong>ledgers</strong>, <strong>commit-links</strong>, and related conversation payloads depending on flags (for example <strong><code>push --full</code></strong> includes unattributed traces where <strong><code>push</code></strong> alone may not). Exact semantics live in the <a href="../../reference/push-pull-sync/">push/pull/sync reference</a> and in <code>sync.py</code> source.</p>
+<p>High-level artifact families: <strong>traces</strong>, <strong>ledgers</strong>, <strong>commit-links</strong>, <strong>conversations</strong>. <code>push --full</code> includes unattributed traces (those not yet referenced by any ledger); plain <code>push</code> skips them. Conversations are content-addressed via SHA-256, so the same transcript shared across multiple traces uploads once. Exact wire semantics live in <a href="../../reference/push-pull-sync/">push/pull/sync</a> and <code>sync.py</code> source.</p>
+<hr />
+<h2 id="two-checkouts-one-project">Two checkouts, one project<a class="headerlink" href="#two-checkouts-one-project" title="Permanent link">&para;</a></h2>
+<p>The whole point of the URL-as-canonical-id model: Alice and Bob both run</p>
+<div class="highlight"><pre><span></span><code>agent-trace remote add origin https://traces.acme.com/acme/myrepo --token $AT_TOKEN
+</code></pre></div>
+<p>on different machines. Their <strong>local</strong> project ids differ (each has its own anchor uuid in <code>.git/agent-trace-id</code>), but the wire <code>project_id</code> is the same <code>myrepo</code> slug. Alice pushes; Bob pulls; Bob's <code>agent-trace blame</code> and <code>agent-trace context</code> resolve Alice's lines because the trace bodies and ledger references are now in his local data dir.</p>
+<p>If their tokens belong to different orgs, isolation holds — each org has its own <code>myrepo</code>.</p>
 <hr />
 <h2 id="operational-tip">Operational tip<a class="headerlink" href="#operational-tip" title="Permanent link">&para;</a></h2>
-<p>Use <strong><code>agent-trace status</code></strong> and <strong><code>doctor</code></strong> to see whether remotes are configured, whether auth resolves, and whether there is <strong>unpushed</strong> local data waiting for an explicit <code>push</code>.</p>
+<p>Use <code>agent-trace status</code> and <code>doctor</code> to see whether remotes are configured, whether their URLs parse, whether auth resolves, and whether there is <strong>unpushed</strong> local data waiting for an explicit <code>push</code>.</p>
 
 
 
