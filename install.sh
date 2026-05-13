@@ -7,6 +7,9 @@ set -euo pipefail
 # Usage (curl from GitHub):
 #   curl -fsSL https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/install.sh | bash
 #
+# Install tree from another branch (default is main):
+#   AGENT_TRACE_INSTALL_BRANCH=my-branch curl -fsSL https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/install.sh | bash
+#
 # Usage (local — from repo checkout):
 #   ./install.sh
 #
