@@ -4,6 +4,8 @@ A command-line tool for tracing AI-generated code changes across coding agents l
 
 This implementation follows the [Agent Trace](https://agent-trace.dev/) specification and the **redesign** described in the umbrella workspace: deterministic-only attribution, local-first storage, **git-like** `push` / `pull` / `sync`, **git notes** (`refs/notes/agent-trace`) for sharing metadata with the repo, and an optional HTTP remote as a **pure datastore** (no server-side blame).
 
+When your host gives a trace **remote URL** and a **Bearer token**, add the remote with **`agent-trace remote add <name> <url> --token`** or **`--token-env`**. URLs may use a gateway path prefix such as **`/at/<org>/<project>`** before **`/api/v1/...`** sync routes.
+
 **How it behaves:**
 
 - **Local-first** — Hooks write JSONL under `AGENT_TRACE_HOME` (default `~/.agent-trace/`). Nothing is written into the repo. The `project_id` is derived from the repo's absolute path (Claude-Code convention: `/Users/jane/myrepo` → `-Users-jane-myrepo`), so data lives at `~/.agent-trace/projects/<project_id>/`.

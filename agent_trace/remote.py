@@ -66,10 +66,25 @@ def parse_remote_url(url: str) -> tuple[str, str, str]:
 
     path = parsed.path.strip("/")
     parts = [p for p in path.split("/") if p]
+    if len(parts) == 3 and parts[0].lower() == "at":
+        org_slug, project_slug = parts[1], parts[2]
+        if not _SLUG_RE.match(org_slug):
+            raise RemoteUrlError(
+                f"Org slug {org_slug!r} must match {_SLUG_RE.pattern}."
+            )
+        if not _SLUG_RE.match(project_slug):
+            raise RemoteUrlError(
+                f"Project slug {project_slug!r} must match {_SLUG_RE.pattern}."
+            )
+        base_path = f"/at/{org_slug}/{project_slug}"
+        base = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, base_path.rstrip("/"), "", ""))
+        return base, org_slug, project_slug
+
     if len(parts) != 2:
         raise RemoteUrlError(
             "Remote URL must include the project path. "
-            f"Expected ``<scheme>://<host>/<org_slug>/<project_slug>``; got {url!r}. "
+            f"Expected ``<scheme>://<host>/<org_slug>/<project_slug>`` "
+            f"or ``<scheme>://<host>/at/<org_slug>/<project_slug>`` (gateway path); got {url!r}. "
             "Run `agent-trace project create <url>` if you need to register the slug first."
         )
 
@@ -400,10 +415,11 @@ def get_remote_url(remote_conf: dict[str, Any]) -> str:
 
 
 def get_remote_base_url(remote_conf: dict[str, Any]) -> str:
-    """Service base URL (``<scheme>://<host>``) — used for API calls.
+    """Service base URL for sync API calls.
 
-    Falls back to re-parsing ``url`` for older remotes written before the
-    derived fields existed.
+    For gateway-style remotes (``…/at/<org>/<project>`` on the API host), this is the full
+    prefix including ``/at/…`` so requests become ``{base}/api/v1/sync/…``. For standalone
+    services it is ``<scheme>://<host>`` only.
     """
     base = remote_conf.get("base_url")
     if base:
@@ -416,6 +432,19 @@ def get_remote_base_url(remote_conf: dict[str, Any]) -> str:
         return base
     except RemoteUrlError:
         return url
+
+
+def get_remote_health_probe_base_url(remote_conf: dict[str, Any]) -> str:
+    """Host root for ``/health`` checks (doctor). ``/at/…`` remotes probe the API host only."""
+
+    full = get_remote_base_url(remote_conf).rstrip("/")
+    if not full:
+        return ""
+    parsed = urllib.parse.urlsplit(full)
+    parts = [p for p in (parsed.path or "").strip("/").split("/") if p]
+    if len(parts) >= 1 and parts[0].lower() == "at":
+        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    return full
 
 
 def get_remote_project_slug(remote_conf: dict[str, Any]) -> str | None:

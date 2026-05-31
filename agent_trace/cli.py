@@ -447,6 +447,7 @@ def _doctor_diagnose(cwd: str) -> tuple[list[str], list[str], list[str], DoctorF
             assert_token_matches_url,
             get_remote as _doctor_get_remote,
             get_remote_base_url,
+            get_remote_health_probe_base_url,
             get_remote_org_slug,
             get_remote_project_slug,
             get_remote_token,
@@ -467,18 +468,20 @@ def _doctor_diagnose(cwd: str) -> tuple[list[str], list[str], list[str], DoctorF
             except RemoteUrlError as e:
                 err.append(
                     f"Remote '{name}' URL is malformed: {e}. "
-                    f"Run `agent-trace remote set-url {name} <scheme>://<host>/<org>/<project>`."
+                    f"Run `agent-trace remote set-url {name} <scheme>://<host>/at/<org>/<project>` "
+                    f"or ``<scheme>://<host>/<org>/<project>``."
                 )
                 continue
             conf = _doctor_get_remote(pid, name) or {}
-            base_url = get_remote_base_url(conf)
+            health_base = get_remote_health_probe_base_url(conf)
+            sync_base = get_remote_base_url(conf)
             org = get_remote_org_slug(conf) or "?"
             proj = get_remote_project_slug(conf) or "?"
-            alive, detail = _probe_remote_health(base_url)
+            alive, detail = _probe_remote_health(health_base)
             if alive:
-                ok.append(f"Remote '{name}' responds at {base_url} (org={org}, project={proj}) ({detail})")
+                ok.append(f"Remote '{name}' responds at {health_base} (org={org}, project={proj}) ({detail})")
             else:
-                warn.append(f"Remote '{name}' not reachable at {base_url} ({detail})")
+                warn.append(f"Remote '{name}' not reachable at {health_base} ({detail})")
                 continue
 
             # Token / org / project scope check. Skip silently if no token
@@ -495,7 +498,7 @@ def _doctor_diagnose(cwd: str) -> tuple[list[str], list[str], list[str], DoctorF
                 continue
             try:
                 info = assert_token_matches_url(
-                    base_url, token,
+                    sync_base, token,
                     expected_org_slug=url_org,
                     expected_project_slug=url_project,
                     allow_unsupported=True,
@@ -2264,6 +2267,7 @@ def main():
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     sub.add_parser("init", help="Initialize agent-trace for the current project")
+
     doc_p = sub.add_parser("doctor", help="Check hooks, config, remotes, and optional tools")
     doc_p.add_argument(
         "--fix",

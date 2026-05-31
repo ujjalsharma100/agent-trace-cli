@@ -304,7 +304,8 @@ def push(
         return result
     if not wire_project_id:
         result.errors.append(
-            "Remote URL is missing the project path (<scheme>://<host>/<org>/<project>). "
+            "Remote URL is missing the project path. "
+            "Expected ``<scheme>://<host>/<org>/<project>`` or ``<scheme>://<host>/at/<org>/<project>`` (gateway path). "
             "Run `agent-trace remote set-url` to fix it."
         )
         return result
