@@ -230,7 +230,7 @@ agent-trace context src/utils/parser.ts --lines 10-50 --query "why was this appr
 | `--json` | | Output as JSON (for machine / subagent consumption) |
 | `--query` | `-q` | Pass a query through to the output (for subagent instruction forwarding) |
 
-The JSON output includes per-segment fields: `start_line`, `end_line`, `attribution` (`ai`/`mixed`/`human`), `model_id`, `tool`, `trace_id`, `confidence`, `conversation_url`, `conversation_size`, and `preview`. When `--full` is set, `conversation_content` is also included.
+The JSON output includes per-segment fields such as: `start_line`, `end_line`, `attribution` (`ai` / `no_attribution`), `model_id`, `tool`, `trace_id`, `confidence`, `conversation_id`, `conversation_size`, `preview`, optional `summary` (when session summaries are recorded), and optional `query` when `--query` is set. When `--full` is set, `conversation_content` is also included.
 
 Conversation content is resolved from local `file://` paths recorded alongside the trace.
 

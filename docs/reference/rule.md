@@ -73,7 +73,7 @@ Same **`--tool` / `-t`** requirement as `add`. Idempotent messaging if the file 
 
 | `rule_name` | Intent |
 |-------------|--------|
-| **`context-for-agents`** | Teaches agents to call `agent-trace context` with `--json`, interpret `conversation_size`, and delegate large `--full` reads to subagents. |
+| **`context-for-agents`** | Teaches agents to call `agent-trace context` with `--json`, use optional `summary` / `preview` when enough, interpret `conversation_size`, and delegate large `--full` reads to subagents when needed. |
 
 Additional rules may appear in future releases — always run **`rule list`** on your installed version.
 

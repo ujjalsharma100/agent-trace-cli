@@ -80,13 +80,17 @@ This project uses agent-trace to embed conversation context into code. When you 
 agent-trace context <file> --lines START-END --json
 ```
 
-This returns attribution segments with metadata for each line range: whether it was AI or human authored, which model/tool wrote it, and crucially the `conversation_size` (character count, line count, turn count) and a short `preview` of the conversation.
+This returns attribution segments with metadata for each line range: whether it was AI or human authored, which model/tool wrote it, and (when the transcript is cached locally) `conversation_size` (character count, line count, turn count) plus a short `preview` of the transcript start.
 
-If there are no AI-attributed segments, or the preview gives you enough context, stop here.
+**Session summaries:** Some projects also store a per-conversation `summary` string (from agent-trace's session-end summary pipeline). When `summary` is present it replaces `preview` and is meant as a compact stand-in for the full transcript. If `summary` (or `preview`) is enough for your task, stop here — you do **not** need `--full` or a separate summarization subagent for that segment.
 
-## Step 2: Decide how to load the full conversation
+If there are no AI-attributed segments, or the available `summary` / `preview` is enough, stop here.
 
-Look at `conversation_size` for each AI-attributed segment:
+## Step 2: When you still need the full transcript
+
+Use this only when Step 1 did not give enough detail (no usable `summary`/`preview`, or you must verify exact wording in the raw conversation).
+
+Look at `conversation_size` for each AI-attributed segment that still needs deeper inspection:
 
 - **Small transcript (< 3000 characters):** Load it directly in your context. Run:
   ```
@@ -102,6 +106,7 @@ Look at `conversation_size` for each AI-attributed segment:
     ```
   - Instruct the subagent to read the full `conversation_content` and return a focused summary. Tell the subagent what you need to know — e.g. "summarize the rationale for this implementation", "what constraints were discussed", "why was this approach chosen over alternatives".
   - Use the subagent's returned summary in your reasoning.
+  - Optional: pass `--query "…"` on the same command so your question is echoed in JSON (`query` field) for the subagent.
 
 ## When to use this
 
@@ -109,6 +114,10 @@ Look at `conversation_size` for each AI-attributed segment:
 - When you encounter code whose purpose or design isn't clear from the code itself
 - When the user asks about why code was written a certain way
 - You do NOT need to fetch context for every file you read — use judgment
+
+## More detail
+
+Run `agent-trace context --help` or `agent-trace help` for flags, paths, and options beyond this workflow.
 """
 
 _CONTEXT_FOR_AGENTS_CURSOR = """\

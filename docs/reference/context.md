@@ -39,7 +39,7 @@ agent-trace context <file> [OPTIONS]
 
 ## JSON fields (representative)
 
-When **`--json`**, expect per-segment objects including (non-exhaustive): `start_line`, `end_line`, `attribution` (`ai` / `mixed` / `human`), `model_id`, `tool`, `trace_id`, `confidence`, `conversation_url`, `conversation_size`, `preview`. With **`--full`**, also `conversation_content`.
+When **`--json`**, expect per-segment objects including (non-exhaustive): `start_line`, `end_line`, `attribution` (`ai` / `no_attribution`), `model_id`, `tool`, `trace_id`, `confidence`, `conversation_id`, `conversation_size`, `preview`, optional `summary` (session summary text when configured), optional echoed `query` when **`--query`** is set. With **`--full`**, also `conversation_content`.
 
 Exact keys should be treated as **versioned** — snapshot a sample from your installed build when writing strict parsers.
 
