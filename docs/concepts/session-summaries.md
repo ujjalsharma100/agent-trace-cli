@@ -2,6 +2,8 @@
 
 Some teams want a **short prose summary** of each assistant conversation stored next to traces, without shipping entire transcripts in every git note. agent-trace supports a **pluggable summarizer**: a shell command that reads the **raw transcript on stdin** and writes the **summary on stdout**.
 
+New **`agent-trace init`** turns summarization **on** by default using the built-in **ollama-summary** preset (override with **`agent-trace summary use …`** or **`config set`**). You can disable it anytime with **`agent-trace summary disable`**.
+
 ---
 
 ## Storage model

@@ -233,9 +233,9 @@ def project_notes_flags(project_dir: str) -> tuple[bool, bool, bool]:
 
 
 def all_session_conversations_enabled(project_dir: str) -> bool:
-    """Whether to embed ``all_session_conversations`` in notes (default: off)."""
+    """Whether to embed ``all_session_conversations`` in notes (default: on)."""
     nc = _notes_config(project_dir)
-    return bool(nc.get("all_session_conversations", False))
+    return bool(nc.get("all_session_conversations", True))
 
 
 def _load_local_traces_raw(project_dir: str) -> list[dict[str, Any]]:
@@ -295,7 +295,7 @@ def attach_note_after_ledger(project_dir: str, ledger: dict[str, Any]) -> bool:
         include_ledger = bool(nc.get("include_ledger", False))
         include_summary = bool(nc.get("include_summary", False))
         include_prompts = bool(nc.get("include_prompts", False))
-        include_asc = bool(nc.get("all_session_conversations", False))
+        include_asc = bool(nc.get("all_session_conversations", True))
         from .summary import all_session_conversations_for_ledger, merge_note_summaries
 
         static_s = nc.get("summaries") if isinstance(nc.get("summaries"), dict) else None
@@ -341,7 +341,7 @@ def rebuild_notes_for_range(
     iasc = (
         include_all_session_conversations
         if include_all_session_conversations is not None
-        else bool(nc.get("all_session_conversations", False))
+        else bool(nc.get("all_session_conversations", True))
     )
     from .summary import all_session_conversations_for_ledger, merge_note_summaries
 
@@ -407,7 +407,7 @@ def backfill_notes(
     iasc = (
         include_all_session_conversations
         if include_all_session_conversations is not None
-        else bool(nc.get("all_session_conversations", False))
+        else bool(nc.get("all_session_conversations", True))
     )
     from .summary import all_session_conversations_for_ledger, merge_note_summaries
 

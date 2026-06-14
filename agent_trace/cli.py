@@ -53,6 +53,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from typing import Any
 
 from .config import (
     get_global_config,
@@ -214,13 +215,19 @@ def cmd_init(_args):
         print("Create at least one commit, then run 'agent-trace init' again.", file=sys.stderr)
         sys.exit(1)
 
+    from .summary_presets import build_preset_command
+
     project_config: dict = {
         "notes": {
             "enabled": True,
             "include_ledger": False,
             "include_summary": True,
             "include_prompts": True,
-            "all_session_conversations": False,
+            "all_session_conversations": True,
+        },
+        "summary": {
+            "enabled": True,
+            "command": build_preset_command("ollama-summary"),
         },
     }
     save_project_config(project_config)
@@ -234,7 +241,8 @@ def cmd_init(_args):
     print(f"  Data dir:     {get_project_config_path(pid).parent if pid else '?'}")
 
     # Git notes — defaults on; per-line ledger off unless configured
-    print("  Git notes:    enabled (summary + prompts; per-line ledger off by default)")
+    print("  Git notes:    enabled (summary + prompts + all-session conversations; per-line ledger off)")
+    print("  Summaries:    enabled (built-in ollama-summary preset; needs `ollama` on PATH when hooks run)")
 
     notes_remote = "origin"
     notes_refspec_ok = False
@@ -796,7 +804,7 @@ def cmd_reset(_args):
         )
         new_notes["all_session_conversations"] = _confirm(
             "Include all session conversations in notes (staging window, not only attributed lines)?",
-            default=bool(notes_cfg.get("all_session_conversations", False)),
+            default=bool(notes_cfg.get("all_session_conversations", True)),
         )
 
     new_config = dict(config)
@@ -832,7 +840,7 @@ _DEFAULT_NOTES_CONFIG = {
     "include_ledger": False,
     "include_summary": True,
     "include_prompts": True,
-    "all_session_conversations": False,
+    "all_session_conversations": True,
 }
 
 _CONFIG_FIELDS = {
@@ -955,28 +963,220 @@ def _full_config_snapshot() -> dict:
     return snapshot
 
 
+def _snake_to_kebab(name: str) -> str:
+    return str(name).replace("_", "-")
+
+
+def _ordered_mapping_items(mapping: dict, preferred_order: list[str]) -> list[tuple[str, Any]]:
+    """Stable order: preferred keys first (when present), then remaining keys sorted."""
+    seen: set[str] = set()
+    out: list[tuple[str, Any]] = []
+    for key in preferred_order:
+        if key in mapping:
+            out.append((key, mapping[key]))
+            seen.add(key)
+    for key in sorted(mapping.keys()):
+        if key not in seen:
+            out.append((key, mapping[key]))
+    return out
+
+
+def _format_human_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "(none)"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        if "\n" in value:
+            single = " ".join(value.split())
+            if len(single) > 100:
+                return single[:97] + "..."
+            return single
+        if len(value) > 120:
+            return value[:117] + "..."
+        return value
+    return json.dumps(value, sort_keys=True)
+
+
+def _flatten_mapping_fields(prefix: str, data: dict) -> list[tuple[str, str]]:
+    """Turn nested dicts into dotted kebab paths (for display, not always settable)."""
+    rows: list[tuple[str, str]] = []
+
+    def walk(pfx: str, obj: Any) -> None:
+        if not isinstance(obj, dict):
+            rows.append((pfx, _format_human_value(obj)))
+            return
+        for key, val in sorted(obj.items()):
+            segment = _snake_to_kebab(key)
+            path = f"{pfx}.{segment}" if pfx else segment
+            if isinstance(val, dict):
+                walk(path, val)
+            else:
+                rows.append((path, _format_human_value(val)))
+
+    walk(prefix, data)
+    return rows
+
+
+def _project_config_set_field_rows(cfg: dict) -> list[tuple[str, str]]:
+    """Rows for project keys that map to ``agent-trace config set`` field names."""
+    rows: list[tuple[str, str]] = []
+    notes_order = [
+        "enabled",
+        "include_ledger",
+        "include_summary",
+        "include_prompts",
+        "all_session_conversations",
+    ]
+    summary_order = ["enabled", "command", "timeout_seconds"]
+    remote_order = ["default"]
+
+    notes = cfg.get("notes")
+    if isinstance(notes, dict):
+        for key, val in _ordered_mapping_items(notes, notes_order):
+            rows.append((f"notes.{_snake_to_kebab(key)}", _format_human_value(val)))
+
+    summary = cfg.get("summary")
+    if isinstance(summary, dict):
+        for key, val in _ordered_mapping_items(summary, summary_order):
+            rows.append((f"summary.{_snake_to_kebab(key)}", _format_human_value(val)))
+
+    remote = cfg.get("remote")
+    if isinstance(remote, dict):
+        for key, val in _ordered_mapping_items(remote, remote_order):
+            rows.append((f"remote.{_snake_to_kebab(key)}", _format_human_value(val)))
+
+    handled = {"notes", "summary", "remote"}
+    for top in sorted(cfg.keys()):
+        if top in handled:
+            continue
+        val = cfg[top]
+        top_kebab = _snake_to_kebab(top)
+        if isinstance(val, dict):
+            for sk, sv in sorted(val.items()):
+                rows.append((f"{top_kebab}.{_snake_to_kebab(sk)}", _format_human_value(sv)))
+        else:
+            rows.append((top_kebab, _format_human_value(val)))
+    return rows
+
+
+def _global_config_field_rows(gcfg: dict) -> list[tuple[str, str]]:
+    """Rows for global config; names aligned with ``config set`` where applicable."""
+    rows: list[tuple[str, str]] = []
+    top_order = ["auth_token", "capture_detached_edits", "tokens", "telemetry"]
+
+    def append_other() -> None:
+        placed = set(top_order)
+        for key in sorted(gcfg.keys()):
+            if key in placed:
+                continue
+            val = gcfg[key]
+            lk = _snake_to_kebab(key)
+            if isinstance(val, dict):
+                rows.extend(_flatten_mapping_fields(f"global.{lk}", val))
+            else:
+                rows.append((f"global.{lk}", _format_human_value(val)))
+
+    for key in top_order:
+        if key not in gcfg:
+            continue
+        val = gcfg[key]
+        if key == "auth_token":
+            rows.append(("global.auth-token", _format_human_value(val)))
+        elif key == "capture_detached_edits":
+            rows.append(("global.capture-detached-edits", _format_human_value(val)))
+        elif key == "tokens" and isinstance(val, dict):
+            for tname, tval in sorted(val.items()):
+                rows.append((f"global.tokens.{tname}", _format_human_value(tval)))
+        elif key == "telemetry" and isinstance(val, dict):
+            rows.extend(_flatten_mapping_fields("global.telemetry", val))
+        else:
+            rows.append((f"global.{_snake_to_kebab(key)}", _format_human_value(val)))
+
+    append_other()
+    return rows
+
+
+def _print_aligned_field_rows(rows: list[tuple[str, str]], *, indent: str = "    ") -> None:
+    if not rows:
+        print(f"{indent}(none)")
+        return
+    width = max(len(name) for name, _ in rows)
+    for name, val in rows:
+        pad = " " * (width - len(name) + 2)
+        print(f"{indent}{name}{pad}{val}")
+
+
+def _print_remotes_human(remotes: dict) -> None:
+    if not remotes:
+        print("    (none)")
+        return
+    indent = "    "
+    for rname in sorted(remotes.keys()):
+        entry = remotes[rname]
+        print(f'{indent}[{rname}]')
+        if not isinstance(entry, dict):
+            print(f"{indent}  (invalid entry: {_format_human_value(entry)})")
+            continue
+        sub = _flatten_mapping_fields("", entry)
+        if not sub:
+            print(f"{indent}  (empty)")
+            continue
+        inner_indent = indent + "  "
+        width = max(len(n) for n, _ in sub)
+        for field, val in sub:
+            pad = " " * (width - len(field) + 2)
+            print(f"{inner_indent}{field}{pad}{val}")
+
+
+def _print_hooks_human(hooks: dict) -> None:
+    if not hooks:
+        print("    (none)")
+        return
+    indent = "    "
+    git_info = hooks.get("git")
+    if isinstance(git_info, dict):
+        print(f"{indent}git")
+        pairs = [
+            ("post-commit hook", _format_human_value(git_info.get("post_commit"))),
+            ("post-rewrite hook", _format_human_value(git_info.get("post_rewrite"))),
+        ]
+        width = max(len(p[0]) for p in pairs)
+        for label, val in pairs:
+            pad = " " * (width - len(label) + 2)
+            print(f"{indent}  {label}{pad}{val}")
+    for adapter in sorted(k for k in hooks.keys() if k != "git"):
+        info = hooks[adapter]
+        if not isinstance(info, dict):
+            print(f"{indent}{adapter}  {_format_human_value(info)}")
+            continue
+        g = info.get("global")
+        p = info.get("project")
+        print(
+            f"{indent}{adapter}  "
+            f"global={_format_human_value(g)}  project={_format_human_value(p)}",
+        )
+
+
 def _print_config_snapshot(snapshot: dict) -> None:
     print("agent-trace config\n")
     project = snapshot.get("project")
     if project:
         print(f"  Project:  {project['id']}")
         print(f"  Data dir: {project['data_dir']}")
-        print("\n  Project config:")
-        print(_indent_json(project.get("config") or {}))
-        print("\n  Remotes:")
-        print(_indent_json(project.get("remotes") or {}))
+        print("\n  Project settings (field names match: agent-trace config set / config reset):\n")
+        _print_aligned_field_rows(_project_config_set_field_rows(project.get("config") or {}))
+        print("\n  Remotes (managed with: agent-trace remote ...):\n")
+        _print_remotes_human(project.get("remotes") or {})
     else:
         print("  Project:  not initialized")
 
-    print("\n  Global config:")
-    print(_indent_json(snapshot.get("global", {}).get("config") or {}))
-    print("\n  Hooks:")
-    print(_indent_json(snapshot.get("hooks") or {}))
-
-
-def _indent_json(value: dict) -> str:
-    text = json.dumps(value, indent=2, sort_keys=True)
-    return "\n".join(f"    {line}" for line in text.splitlines())
+    print("\n  Global settings:\n")
+    _print_aligned_field_rows(_global_config_field_rows(snapshot.get("global", {}).get("config") or {}))
+    print("\n  Hooks:\n")
+    _print_hooks_human(snapshot.get("hooks") or {})
 
 
 def _cleanup_empty_mapping(config: dict, key: str) -> None:
@@ -1003,8 +1203,8 @@ def _interactive_reset_field(field: str) -> None:
         "notes.include-ledger": False,
         "notes.include-summary": True,
         "notes.include-prompts": True,
-        "notes.all-session-conversations": False,
-        "summary.enabled": False,
+        "notes.all-session-conversations": True,
+        "summary.enabled": True,
         "global.capture-detached-edits": False,
     }
     clear_targets = {
@@ -1022,7 +1222,7 @@ def _interactive_reset_field(field: str) -> None:
             "include_ledger": _prompt_reset_bool("notes.include-ledger", False),
             "include_summary": _prompt_reset_bool("notes.include-summary", True),
             "include_prompts": _prompt_reset_bool("notes.include-prompts", True),
-            "all_session_conversations": _prompt_reset_bool("notes.all-session-conversations", False),
+            "all_session_conversations": _prompt_reset_bool("notes.all-session-conversations", True),
         }
         save_project_config(cfg)
         return
@@ -1106,7 +1306,7 @@ def _reset_config_field(field: str) -> None:
     elif field == "summary":
         cfg.pop("summary", None)
     elif field == "summary.enabled":
-        cfg.setdefault("summary", {})["enabled"] = False
+        cfg.setdefault("summary", {})["enabled"] = True
     elif field == "summary.command":
         if isinstance(cfg.get("summary"), dict):
             cfg["summary"].pop("command", None)
@@ -2290,7 +2490,10 @@ def main():
     sub.add_parser("reset", help="Reset agent-trace configuration")
     sub_config = sub.add_parser("config", help="Show or update persisted configuration")
     config_sub = sub_config.add_subparsers(dest="config_action", metavar="ACTION", required=True)
-    c_show = config_sub.add_parser("show", help="Show full persisted configuration")
+    c_show = config_sub.add_parser(
+        "show",
+        help="Show persisted configuration (settable fields as a list; --json for raw snapshot)",
+    )
     c_show.add_argument("--json", action="store_true", default=False, help="Output as JSON")
     c_set = config_sub.add_parser("set", help="Set one configuration field")
     c_set.add_argument("field", choices=sorted(_CONFIG_FIELDS), help="Config field to update")

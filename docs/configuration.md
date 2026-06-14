@@ -19,13 +19,13 @@ agent-trace splits configuration into **global** (user-wide) and **per-project**
 
 Prints a **redacted** snapshot:
 
-- Project id, data directory, project config, remotes (tokens masked).
-- Global config (sensitive keys redacted).
-- Hook installation status (global vs project for Cursor/Claude; git `post-commit` / `post-rewrite` detection).
+- Project id, data directory, **project settings** as aligned `field value` lines (field names match **`config set`** / **`config reset`**), then remotes (tokens masked).
+- **Global** settings the same way (sensitive keys redacted).
+- **Hooks:** global vs project adapter hooks and git `post-commit` / `post-rewrite` detection.
 
 | Flag | Purpose |
 |------|---------|
-| **`--json`** | Machine-readable JSON of the same snapshot structure. |
+| **`--json`** | Machine-readable JSON of the same snapshot structure (nested objects as stored on disk). |
 
 ---
 
@@ -44,8 +44,8 @@ Sets a single field. **Boolean** values accept human-friendly tokens (all case-i
 | **`notes.include-ledger`** | project | bool | Whether note-building includes **inline ledger** payload (larger notes). Default **false** in shipped defaults. |
 | **`notes.include-summary`** | project | bool | Include **summary** map in notes when building. |
 | **`notes.include-prompts`** | project | bool | Include **prompts** array in notes when building. |
-| **`notes.all-session-conversations`** | project | bool | Include **all_session_conversations** staging window section. |
-| **`summary.enabled`** | project | bool | Whether session-end summarization path is enabled in config. |
+| **`notes.all-session-conversations`** | project | bool | Include **all_session_conversations** staging window section. **On** by default for new `init` and when the key is omitted from `notes` (older configs that explicitly set `false` are unchanged). |
+| **`summary.enabled`** | project | bool | Whether session-end summarization runs. **On** by default for new `init` (with the **ollama-summary** preset and default model **llama3.1:8b**). |
 | **`summary.command`** | project | string | Executable + args: **stdin** = raw transcript text, **stdout** = summary text. Must be non-empty. Setting this also forces **`summary.enabled`** true in the implementation. |
 | **`summary.timeout-seconds`** | project | int | Positive integer timeout for summarizer subprocess. |
 | **`remote.default`** | project | string | Name of the default **`agent-trace remote`** entry used when `--remote` is omitted on sync commands. |

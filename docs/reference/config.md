@@ -20,7 +20,7 @@ agent-trace config show [--json]
 |--------|------|---------|---------|
 | **`--json`** | flag | off | Emit the same snapshot as JSON for scripting. |
 
-**Output:** Pretty-printed, **redacted** snapshot (tokens shown as `(set)` rather than literal secrets).
+**Output:** Default terminal view is **aligned key/value lines** using the same **dotted field names** as `config set` (for example `notes.all-session-conversations`, `summary.command`). Nested structures that are not single `config set` keys (remotes, nested `auth`, optional `global.telemetry.*`) are shown with dotted paths for readability. Tokens are **redacted** (`(set)` / `(anonymous id)`). Use **`--json`** for the full nested snapshot as JSON (scripting, debugging).
 
 **Exit:** `0` on success.
 

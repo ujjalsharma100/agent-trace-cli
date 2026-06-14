@@ -11,7 +11,7 @@ Local JSONL under `AGENT_TRACE_HOME` is powerful on your machine but **does not 
 - **Trace ids** and summary **stats** tied to a commit.
 - Optional **inline ledger** sections (configurable; increases note size).
 - Optional **summary** maps (`conversation_url` → summary text).
-- Optional **prompts** and **all_session_conversations** sections.
+- Optional **prompts** and **all_session_conversations** sections (both included by default on new `agent-trace init` unless you turn them off in project config).
 
 The exact JSON shape is governed by schemas in the repository (see `schemas/git-note.schema.json`).
 

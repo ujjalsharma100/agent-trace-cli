@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import io
+import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -70,6 +73,32 @@ class TestConfigCommand(unittest.TestCase):
         self.assertEqual(snapshot["global"]["config"]["auth_token"], "(set)")
         self.assertEqual(snapshot["global"]["config"]["tokens"]["origin"], "(set)")
 
+    def test_config_show_human_uses_cli_field_names(self) -> None:
+        save_global_config({"auth_token": "secret", "capture_detached_edits": True})
+        args = SimpleNamespace(config_action="show", json=False)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cmd_config(args)
+        out = buf.getvalue()
+        self.assertIn("notes.include-summary", out)
+        self.assertIn("notes.all-session-conversations", out)
+        self.assertIn("summary.timeout-seconds", out)
+        self.assertIn("global.auth-token", out)
+        self.assertIn("global.capture-detached-edits", out)
+        self.assertIn("post-commit hook", out)
+        self.assertNotIn('"notes"', out)
+
+    def test_config_show_json_snapshot_structure(self) -> None:
+        args = SimpleNamespace(config_action="show", json=True)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cmd_config(args)
+        data = json.loads(buf.getvalue())
+        self.assertIn("global", data)
+        self.assertIn("hooks", data)
+        self.assertIsNotNone(data.get("project"))
+        self.assertEqual(data["project"]["config"]["summary"]["command"], "cat")
+
     def test_set_and_reset_project_fields(self) -> None:
         _set_config_field("notes.include-summary", "false")
         _set_config_field("summary.command", "python summarize.py")
@@ -93,7 +122,7 @@ class TestConfigCommand(unittest.TestCase):
                 "include_ledger": False,
                 "include_summary": True,
                 "include_prompts": True,
-                "all_session_conversations": False,
+                "all_session_conversations": True,
             },
         )
 

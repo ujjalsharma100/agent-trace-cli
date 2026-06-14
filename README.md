@@ -92,7 +92,7 @@ Then remove the `# agent-trace` + `export PATH=...` lines from your `~/.zshrc` /
 
 ### `agent-trace init`
 
-Zero-prompt initialization — like `git init`. Writes `project-config.json` for the repo, enables notes with default sections, installs git hooks (`post-commit`, `post-rewrite`) and per-tool hooks (Cursor, Claude Code) when a global hook is not already present, and auto-configures the git notes refspec (`refs/notes/agent-trace`) for `origin` if one exists.
+Zero-prompt initialization — like `git init`. Writes `project-config.json` for the repo, enables notes (including **all-session conversations** by default), turns on **session summaries** with the built-in **ollama-summary** preset (default model **llama3.1:8b**; requires `ollama` on `PATH` when hooks run), installs git hooks (`post-commit`, `post-rewrite`) and per-tool hooks (Cursor, Claude Code) when a global hook is not already present, and auto-configures the git notes refspec (`refs/notes/agent-trace`) for `origin` if one exists.
 
 No prompts, no remote. If you want to share traces with a team, add a remote later with `agent-trace remote add`. Re-run with `agent-trace reset` to reconfigure interactively.
 
@@ -111,7 +111,7 @@ agent-trace status
 
 ### `agent-trace config {show,set,reset}`
 
-Show the full persisted configuration, or update/reset a specific field without going through the full interactive reset flow. Token values are masked in `config show`.
+Show the full persisted configuration (human-readable field list by default, or `--json`), or update/reset a specific field without going through the full interactive reset flow. Token values are masked in `config show`.
 
 ```bash
 agent-trace config show

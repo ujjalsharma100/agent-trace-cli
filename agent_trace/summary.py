@@ -8,10 +8,10 @@ Summary generation reads the latest cached snapshot referenced by traces
 for a given conversation_id and pipes it to a user-configured command.
 The command's stdout is stored keyed by ``conversation_id``.
 
-Opt-in via ``project-config.json`` → ``summary.enabled`` and
-``summary.command``. Storage: ``session-summaries.jsonl`` under the
-project dir, one row per ``(conversation_id, summary)``. Failures never
-raise through hooks.
+When ``project-config.json`` sets ``summary.enabled`` and a non-empty
+``summary.command``, session-end hooks pipe transcript text to that command.
+Storage: ``session-summaries.jsonl`` under the project dir, one row per
+``(conversation_id, summary)``. Failures never raise through hooks.
 """
 
 from __future__ import annotations
