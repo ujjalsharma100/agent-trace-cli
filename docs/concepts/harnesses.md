@@ -11,7 +11,7 @@ support for a new harness is a single file plus one line.
 > **Contributing a harness?** This page is the conceptual reference for the
 > adapter model. For the step-by-step workflow — dev setup, the add-a-harness
 > checklist, fixtures, tests, and the PR process — see
-> [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
+> [`CONTRIBUTING.md`](https://github.com/ujjalsharma100/agent-trace-cli/blob/main/CONTRIBUTING.md) in the repository root.
 
 ## What an adapter owns
 
