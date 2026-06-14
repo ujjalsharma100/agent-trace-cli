@@ -37,7 +37,7 @@ Lists **currently installed** rules in the **current project** (both Cursor and 
 ## `rule add`
 
 ```text
-agent-trace rule add <rule_name> --tool <cursor|claude>
+agent-trace rule add <rule_name> --tool <cursor|claude|codex>
 ```
 
 | Positional | Description |
@@ -46,7 +46,7 @@ agent-trace rule add <rule_name> --tool <cursor|claude>
 
 | Option | Short | Required | Values |
 |--------|-------|----------|--------|
-| **`--tool`** | **`-t`** | **yes** | `cursor`, `claude` |
+| **`--tool`** | **`-t`** | **yes** | `cursor`, `claude`, `codex` |
 
 **Files written:**
 
@@ -54,6 +54,7 @@ agent-trace rule add <rule_name> --tool <cursor|claude>
 |------|------|
 | `cursor` | `.cursor/rules/agent-trace-<rule_name>.mdc` |
 | `claude` | `.claude/rules/agent-trace-<rule_name>.md` |
+| `codex` | `.codex/rules/agent-trace-<rule_name>.md` |
 
 **Exit:** `0` on success; **`1`** if unknown rule name or IO error.
 
@@ -62,7 +63,7 @@ agent-trace rule add <rule_name> --tool <cursor|claude>
 ## `rule remove`
 
 ```text
-agent-trace rule remove <rule_name> --tool <cursor|claude>
+agent-trace rule remove <rule_name> --tool <cursor|claude|codex>
 ```
 
 Same **`--tool` / `-t`** requirement as `add`. Idempotent messaging if the file was not present.

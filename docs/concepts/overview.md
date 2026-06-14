@@ -36,7 +36,7 @@ flowchart LR
 ```
 
 1. **Hooks** invoke **`agent-trace record`** with a JSON payload on stdin. The implementation is designed **not to crash the agent** if something goes wrong.
-2. **`commit-link`** (usually from **`post-commit`**) correlates the new commit with traces in the current session window and **writes the ledger** — the deterministic map from line ranges to AI / human / mixed.
+2. **`commit-link`** (usually from **`post-commit`**) correlates the new commit with traces in the current session window and **writes the ledger** — the deterministic, binary map of which line ranges are AI-attributed versus not.
 3. **`rewrite-ledger`** (from **`post-rewrite`**) remaps ledger rows when commit SHAs change (rebase, amend).
 4. **Git notes** commands optionally attach a JSON blob to commits for teammates who fetch `refs/notes/agent-trace`.
 
@@ -61,7 +61,7 @@ At **`agent-trace blame`** time, the tool consults the **ledger** (and, when pre
 That design choice means:
 
 - Output is **auditable** and stable for a given commit + file + ledger snapshot.
-- Absence of proof surfaces as **UNKNOWN** rather than a misleading guess.
+- Absence of proof surfaces as **No attribution** rather than a misleading guess.
 
 See [Attribution ledger](attribution-ledger.md).
 

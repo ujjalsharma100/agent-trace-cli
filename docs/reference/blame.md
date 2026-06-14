@@ -4,7 +4,7 @@
 agent-trace blame <file> [OPTIONS]
 ```
 
-**Purpose:** Print **line-level AI attribution** for `file` using **ledger-backed deterministic** logic (plus optional inline structures from git notes when applicable). If the introducing commit has **no** usable ledger/note data for a line, the classification is **UNKNOWN** — the tool does **not** invent attribution.
+**Purpose:** Print **line-level AI attribution** for `file` using **ledger-backed deterministic** logic (plus optional inline structures from git notes when applicable). Attribution is **binary**: each line is either **AI** or **No attribution**. If the introducing commit has **no** usable ledger/note data for a line, it is **No attribution** — the tool does **not** invent attribution and never claims a line was human-written.
 
 ---
 
@@ -24,8 +24,8 @@ agent-trace blame <file> [OPTIONS]
 | **`--range`** | **`-r`** | string | none | Restrict to inclusive line range **`START-END`** (example: `10-25`). |
 | **`--project`** | **`-p`** | string | none | Git repo root **path** or registry **`project_id`** when cwd is ambiguous or wrong repo. |
 | **`--json`** | | flag | off | Emit structured JSON instead of human text. |
-| **`--show-no-attribution`** | | flag | off | Include lines classified as **UNKNOWN** / no-attribution in text output; default text view **omits** them for readability. |
-| **`--require-attribution`** | | flag | off | Exit **non-zero** if any selected line would be UNKNOWN — intended for **CI gates**. |
+| **`--show-no-attribution`** | | flag | off | Include lines classified as **No attribution** in text output; default text view **omits** them for readability. |
+| **`--require-attribution`** | | flag | off | Exit **non-zero** if any selected line is **No attribution** — intended for **CI gates**. |
 
 **`--line` vs `--range`:** If both are supplied, behavior follows argparse / implementation order — prefer passing **only one** narrowing flag for clarity.
 
@@ -33,7 +33,7 @@ agent-trace blame <file> [OPTIONS]
 
 ## Output semantics (text mode)
 
-Groups contiguous lines with the same attribution into ranges. Labels reflect ledger truth: **AI**, **HUMAN**, **MIXED**, **UNKNOWN** (wording may vary slightly by version; JSON `kind` is stable-ish — inspect `--json` for parsers).
+Groups contiguous lines with the same attribution into ranges, tagged **`[AI]`** or **`[NO ATTRIBUTION]`**. Attribution is binary — there are no `HUMAN`, `MIXED`, or `UNKNOWN` labels. In `--json`, the corresponding `kind` values are **`AI`** and **`NO_ATTRIBUTION`**.
 
 ---
 

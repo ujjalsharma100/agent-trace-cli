@@ -45,7 +45,7 @@ When you run
 agent-trace remote add origin https://traces.acme.com/acme/myrepo
 ```
 
-the CLI parses the URL into `(base_url, org_slug, project_slug) = (https://traces.acme.com, acme, myrepo)` and stores all four fields in `remotes.json`. From that point on:
+the CLI parses the URL into `(base_url, org_slug, project_slug) = (https://traces.acme.com, acme, myrepo)` and stores all four fields in `remotes.json`. (Deployments served behind a shared API gateway use the `…/at/<org>/<project>` form, e.g. `https://traces.acme.com/at/acme/myrepo`; the org and project slugs are the same, and sync routes are issued under that `/at/…` prefix.) From that point on:
 
 - **push** and **pull** send `project_id=myrepo` on the wire.
 - The server stores rows under `(org_id=resolve('acme'), project_id='myrepo')`. This is the existing `(org_id, project_id)` UNIQUE composite key — slugs are unique within an org, just like GitHub repos within an org.
@@ -57,7 +57,7 @@ Slug shape (CHECK-enforced server-side, mirrored in the client):
 ^[a-z0-9][a-z0-9._-]{0,63}$
 ```
 
-Lowercase only. Must start with `[a-z0-9]`. Up to 64 chars. `Acme`, `-bad`, paths with extra segments — all rejected with a clear error.
+Lowercase only. Must start with `[a-z0-9]`. Up to 64 chars. `Acme`, `-bad`, and over-deep paths (beyond the optional `/at/` gateway prefix) — all rejected with a clear error.
 
 ### Registering a project
 

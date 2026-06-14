@@ -39,4 +39,4 @@ See the exhaustive [notes reference](../reference/notes.md).
 
 ## Interaction with blame
 
-When configured and present, git-note inline structures can participate in attribution resolution alongside local ledgers. If neither source covers a line, blame returns **UNKNOWN**.
+When configured and present, git-note inline structures can participate in attribution resolution alongside local ledgers. If neither source covers a line, blame returns **No attribution**.

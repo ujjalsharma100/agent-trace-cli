@@ -4,13 +4,13 @@ Symptoms-first guidance. When in doubt, run **`agent-trace doctor`** and **`agen
 
 ---
 
-## `blame` shows UNKNOWN for most lines
+## `blame` shows No attribution for most lines
 
 **Likely causes**
 
 1. **No commit yet** after the agent edited — the ledger is produced at **`commit-link`** (post-commit). Commit your work.
 2. **Fresh clone** without local `ledgers.jsonl` — initialize (`init`) and either **pull** synced data or **fetch git notes** depending on your team workflow.
-3. **Line outside ledger coverage** — rare edge cases when content cannot be matched; UNKNOWN is intentional.
+3. **Line outside ledger coverage** — rare edge cases when content cannot be matched; **No attribution** is intentional.
 
 **Mitigations**
 
@@ -55,7 +55,7 @@ agent-trace doctor
 - `403 / 404 project_not_found` — the URL's `<project_slug>` was never registered on the server, or your token isn't scoped for it. Run `agent-trace project create <url>` (with an org-scoped token carrying `projects:write`, or `AGENT_TRACE_ADMIN_SECRET`).
 - `scope check (org_slug_mismatch)` / `(project_scope_mismatch)` — the token's org/project does not match the URL. Either fix the URL with `remote set-url` or rotate to a token from the right scope.
 
-`AGENT_TRACE_TOKEN` and `set globaluser` do **not** affect push/pull in M0 — only the per-remote token binding does. See [push/pull/sync — Authentication](reference/push-pull-sync.md#authentication).
+`AGENT_TRACE_TOKEN` and `set globaluser` do **not** affect push/pull — only the per-remote token binding does. See [push/pull/sync — Authentication](reference/push-pull-sync.md#authentication).
 
 Corporate TLS inspection / custom CA issues are outside agent-trace's stdlib HTTP client assumptions — you may need a proxy or different network path.
 
@@ -63,13 +63,14 @@ Corporate TLS inspection / custom CA issues are outside agent-trace's stdlib HTT
 
 ## Remote URL rejected with "missing the project path"
 
-agent-trace requires the **slug grammar** on every remote URL:
+agent-trace requires the **slug grammar** on every remote URL, in one of two shapes:
 
 ```
-<scheme>://<host>[:port]/<org_slug>/<project_slug>
+<scheme>://<host>[:port]/<org_slug>/<project_slug>          # standalone service
+<scheme>://<host>[:port]/at/<org_slug>/<project_slug>       # behind an /at/ API gateway
 ```
 
-Bare-host URLs (`https://traces.acme.com`) and over-deep paths (`https://traces.acme.com/acme/myrepo/extra`) are rejected up front. Re-add with the full path, then register the project if it doesn't exist yet:
+Bare-host URLs (`https://traces.acme.com`) are rejected up front. `/at/` is the only accepted extra path segment — any other over-deep path (`https://traces.acme.com/acme/myrepo/extra`) is rejected. Re-add with the full path, then register the project if it doesn't exist yet:
 
 ```bash
 agent-trace remote add origin https://traces.acme.com/acme/myrepo \

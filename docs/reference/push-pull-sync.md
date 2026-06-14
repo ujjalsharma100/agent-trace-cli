@@ -8,13 +8,14 @@ Explicit **HTTP synchronization** between local JSONL-backed storage and a confi
 2. At least one **registered remote** (`agent-trace remote add <name> <url> ...`).
 3. The project slug embedded in the remote URL must exist on the server — register it once with `agent-trace project create <url>` or `remote add --create`. See [project create](projects-create.md) and the [project identity](../concepts/project-identity.md) concept.
 
-URLs follow the **slug grammar** enforced both client- and server-side:
+URLs follow the **slug grammar** enforced both client- and server-side, in one of two accepted shapes:
 
 ```
-<scheme>://<host>[:port]/<org_slug>/<project_slug>
+<scheme>://<host>[:port]/<org_slug>/<project_slug>          # standalone service
+<scheme>://<host>[:port]/at/<org_slug>/<project_slug>       # behind an /at/ API gateway
 ```
 
-Bare-host URLs (e.g. `https://traces.acme.com`) are rejected with a clear error and a pointer at the grammar. `org_slug` and `project_slug` each match `^[a-z0-9][a-z0-9._-]{0,63}$`.
+`org_slug` and `project_slug` each match `^[a-z0-9][a-z0-9._-]{0,63}$`. Bare-host URLs (e.g. `https://traces.acme.com`) are rejected with a clear error and a pointer at the grammar; `/at/` is the only accepted extra path segment. With the gateway form, sync routes are issued under `…/at/<org>/<project>/api/v1/…`.
 
 ---
 
@@ -114,14 +115,13 @@ Tokens are bound **per remote**. The `remote add` flow stores a `token_ref` in `
 |------------------|---------|-----------|
 | `global:<project_id>::<remote_name>` | `~/.agent-trace/config.json` under `tokens.<key>` (mode `0o600`) | `--token <STR>` on `remote add` / `remote set-token` writes the raw value here. |
 | `env:<VAR>` | not persisted | `--token-env VAR` records only the variable name. `os.environ[VAR]` is read at every push/pull. |
-| `keychain:<name>` | OS keychain | Scaffold only — not wired up in M0. |
 | `(no auth)` | n/a | Remote has no `auth` block. Push will fail at the server. |
 
 ### Precedence
 
 There is **no environment override** that displaces the per-remote `token_ref`. Push, pull, sync, doctor, project-create, and remote-add all read the token they were configured with. Specifically:
 
-- `AGENT_TRACE_TOKEN` is **not** consulted by `push` / `pull` / `sync` in M0. It survives as a legacy fallback for older `set globaluser`-driven scripts; new code should never depend on it for HTTP auth.
+- `AGENT_TRACE_TOKEN` is **not** consulted by `push` / `pull` / `sync`. It survives as a legacy fallback for older `set globaluser`-driven scripts; new code should never depend on it for HTTP auth.
 - `AGENT_TRACE_ADMIN_SECRET` is consulted only by `project create` and `remote add --create` — never by sync.
 - `set globaluser <token>` / `global.auth-token` write to a global slot that the sync code path no longer reads. They remain for backward compatibility with very old configs. Migrate by reissuing the token to the matching remote with `agent-trace remote set-token <name> --token …`.
 

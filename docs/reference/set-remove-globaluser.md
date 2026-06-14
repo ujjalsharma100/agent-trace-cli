@@ -1,6 +1,6 @@
 # Commands: `set globaluser`, `remove globaluser`
 
-> **Legacy.** These commands predate the per-remote token model. They write/clear `auth_token` in `$AGENT_TRACE_HOME/config.json` — a slot that the M0 sync code path **no longer consults** for HTTP authentication. They are retained for backward compatibility with very old configs.
+> **Legacy.** These commands predate the per-remote token model. They write/clear `auth_token` in `$AGENT_TRACE_HOME/config.json` — a slot that the sync code path **no longer consults** for HTTP authentication. They are retained for backward compatibility with very old configs.
 >
 > **For new setups, bind tokens per remote with [`agent-trace remote add --token`](remote.md#remote-add) / [`remote set-token`](remote.md#remote-set-token).** See [push/pull/sync — Authentication](push-pull-sync.md#authentication) for the resolution model used today.
 

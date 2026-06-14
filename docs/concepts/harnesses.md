@@ -8,6 +8,11 @@ names, rule directories, runtime detection. The CLI, `record`, `doctor`,
 `status` and `rule` surfaces all walk the adapter registry, so adding
 support for a new harness is a single file plus one line.
 
+> **Contributing a harness?** This page is the conceptual reference for the
+> adapter model. For the step-by-step workflow — dev setup, the add-a-harness
+> checklist, fixtures, tests, and the PR process — see
+> [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
+
 ## What an adapter owns
 
 | Concern | Adapter member |

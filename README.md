@@ -1,18 +1,18 @@
 # agent-trace CLI
 
-A command-line tool for tracing AI-generated code changes across coding agents like **Cursor** and **Claude Code**. Includes the **file viewer** for browsing files with git + agent-trace blame in your browser.
+A command-line tool for tracing AI-generated code changes across coding agents like **Cursor**, **Claude Code**, and **Codex CLI**. Includes the **file viewer** for browsing files with git + agent-trace blame in your browser.
 
-This implementation follows the [Agent Trace](https://agent-trace.dev/) specification and the **redesign** described in the umbrella workspace: deterministic-only attribution, local-first storage, **git-like** `push` / `pull` / `sync`, **git notes** (`refs/notes/agent-trace`) for sharing metadata with the repo, and an optional HTTP remote as a **pure datastore** (no server-side blame).
+This implementation follows the [Agent Trace](https://agent-trace.dev/) specification: deterministic-only attribution, local-first storage, **git-like** `push` / `pull` / `sync`, **git notes** (`refs/notes/agent-trace`) for sharing metadata with the repo, and an optional HTTP remote as a **pure datastore** (no server-side blame).
 
 When your host gives a trace **remote URL** and a **Bearer token**, add the remote with **`agent-trace remote add <name> <url> --token`** or **`--token-env`**. URLs may use a gateway path prefix such as **`/at/<org>/<project>`** before **`/api/v1/...`** sync routes.
 
 **How it behaves:**
 
-- **Local-first** — Hooks write JSONL under `AGENT_TRACE_HOME` (default `~/.agent-trace/`). Nothing is written into the repo. The `project_id` is derived from the repo's absolute path (Claude-Code convention: `/Users/jane/myrepo` → `-Users-jane-myrepo`), so data lives at `~/.agent-trace/projects/<project_id>/`.
+- **Local-first** — Hooks write JSONL under `AGENT_TRACE_HOME` (default `~/.agent-trace/`). Nothing is written into your working tree. Each repo gets a stable `project_id` anchored in `.git/agent-trace-id`, so data lives at `~/.agent-trace/projects/<project_id>/` and stays put across renames and worktrees.
 - **Git-like flow** — `agent-trace init` is zero-prompt and sets up everything locally (like `git init`). Add remotes later with `agent-trace remote add` and run **`agent-trace push` / `pull` / `sync`** explicitly when you want to share. Nothing syncs automatically during editing.
 - **Git notes** — `agent-trace notes …` attaches composable JSON to commits under `refs/notes/agent-trace`, so attribution travels with `git fetch` / `git push` once the notes refspec is configured (set up automatically for `origin` during `init`).
 
-Use **`agent-trace blame <file>`** for per-line **AI**, **HUMAN**, **MIXED**, or **UNKNOWN** labels from the ledger (and git note inline ledger when present). There is **no heuristic blame path**: if there is no ledger (and no usable git note), lines are **UNKNOWN**.
+Use **`agent-trace blame <file>`** for per-line attribution from the ledger (and git note inline ledger when present). Attribution is **binary** — each line is **AI** or **No attribution**. There is **no heuristic blame path**: if there is no ledger (and no usable git note), lines are **No attribution**.
 
 **Zero external dependencies** — uses only the Python standard library (requires Python 3.9+).
 
@@ -28,7 +28,7 @@ The **deterministic attribution ledger** is built at **commit time** by the post
 4. **Cross-file matching** — The ledger builder can match hashes across files (e.g. moves/refactors) when appropriate.
 5. **Post-rewrite hook** — After rebase or amend, `agent-trace rewrite-ledger` remaps ledger commit SHAs.
 
-`agent-trace blame` uses the ledger only. Missing ledger → **UNKNOWN** (honest absence of proof, not a guess).
+`agent-trace blame` uses the ledger only. Missing ledger → **No attribution** (honest absence of proof, not a guess).
 
 ---
 
@@ -69,7 +69,7 @@ When released to PyPI: `pip install agent-trace-cli`. Build artifacts locally wi
 5. Installs the **file viewer** to `~/.agent-trace/viewer/` and creates `~/.agent-trace/bin/agent-trace-viewer`
    - If `npm` is available, builds the frontend from source; otherwise uses the pre-built `dist/`
 6. Adds `~/.agent-trace/bin` to your shell PATH (zsh, bash, or fish)
-7. **Offers to set up global hooks** for Cursor and Claude Code (optional, per-tool prompt)
+7. **Offers to set up global hooks** for Cursor, Claude Code, and Codex CLI (optional, per-tool prompt)
 
 After installing, restart your shell (or `source ~/.zshrc`) and verify:
 
@@ -153,6 +153,7 @@ agent-trace hooks setup-global
 # Install for a specific tool only
 agent-trace hooks setup-global --tool cursor
 agent-trace hooks setup-global --tool claude
+agent-trace hooks setup-global --tool codex
 
 # Check current status
 agent-trace hooks status
@@ -164,13 +165,14 @@ agent-trace hooks remove-global --tool claude
 
 | Subcommand | Options | Description |
 |------------|---------|-------------|
-| `setup-global` | `--tool cursor\|claude` | Install global hooks (default: all tools) |
-| `remove-global` | `--tool cursor\|claude` | Remove global hooks (default: all tools) |
+| `setup-global` | `--tool cursor\|claude\|codex` | Install global hooks (default: all tools) |
+| `remove-global` | `--tool cursor\|claude\|codex` | Remove global hooks (default: all tools) |
 | `status` | — | Show whether global hooks are configured |
 
 **Where hooks are written:**
 - Cursor: `~/.cursor/hooks.json`
 - Claude Code: `~/.claude/settings.json`
+- Codex CLI: `~/.codex/config.toml`
 
 ### `agent-trace record`
 
@@ -182,7 +184,7 @@ echo '{"hook_event_name":"sessionStart",...}' | agent-trace record
 
 ### `agent-trace commit-link`
 
-Link the current git commit to the traces that were active in this session. Called automatically by the post-commit hook when you have configured git hooks. Also builds an **attribution ledger** for the commit — a deterministic per-line map of which lines are AI-authored, human-authored, or mixed.
+Link the current git commit to the traces that were active in this session. Called automatically by the post-commit hook when you have configured git hooks. Also builds an **attribution ledger** for the commit — a deterministic, binary per-line map of which lines are AI-attributed versus not.
 
 ```bash
 agent-trace commit-link
@@ -190,7 +192,7 @@ agent-trace commit-link
 
 ### `agent-trace rewrite-ledger`
 
-Remap ledger commit SHAs after `git rebase` or `git commit --amend`. Called automatically by the post-rewrite hook — you don't normally run this manually. Git provides old-SHA/new-SHA pairs on stdin; this command updates `.agent-trace/ledgers.jsonl` accordingly.
+Remap ledger commit SHAs after `git rebase` or `git commit --amend`. Called automatically by the post-rewrite hook — you don't normally run this manually. Git provides old-SHA/new-SHA pairs on stdin; this command updates the project's `ledgers.jsonl` (under `~/.agent-trace/projects/<id>/`) accordingly.
 
 ```bash
 # Called by .git/hooks/post-rewrite — not typically run manually
@@ -238,7 +240,7 @@ Conversation content is resolved from local `file://` paths recorded alongside t
 
 ### `agent-trace rule {add,remove,show,list}`
 
-Manage **prebuilt rules** that teach coding agents (Cursor, Claude Code) how to use agent-trace features. Rules are written as `.mdc` (Cursor) or `.md` (Claude Code) files in the project's rules directory.
+Manage **prebuilt rules** that teach coding agents (Cursor, Claude Code, Codex CLI) how to use agent-trace features. Rules are written as `.mdc` (Cursor) or `.md` (Claude Code, Codex CLI) files in the project's rules directory.
 
 ```bash
 # List available prebuilt rules
@@ -258,8 +260,8 @@ agent-trace rule remove context-for-agents --tool claude
 | Subcommand | Options | Description |
 |------------|---------|-------------|
 | `list` | — | List all available prebuilt rules with descriptions |
-| `add <name>` | `--tool cursor\|claude` | Write the rule file for the given tool |
-| `remove <name>` | `--tool cursor\|claude` | Remove the rule file |
+| `add <name>` | `--tool cursor\|claude\|codex` | Write the rule file for the given tool |
+| `remove <name>` | `--tool cursor\|claude\|codex` | Remove the rule file |
 | `show` | — | Show all active agent-trace rules in the project |
 
 **Available rules:**
@@ -271,34 +273,35 @@ agent-trace rule remove context-for-agents --tool claude
 Rules are written to:
 - Cursor: `.cursor/rules/agent-trace-<name>.mdc`
 - Claude Code: `.claude/rules/agent-trace-<name>.md`
+- Codex CLI: `.codex/rules/agent-trace-<name>.md`
 
 ---
 
 ### `agent-trace blame <file>`
 
-Show **AI attribution** for a file using **deterministic, ledger-only** logic:
+Show **AI attribution** for a file using **deterministic, ledger-only** logic. Attribution is **binary** — each line is **AI** or **No attribution**:
 
-- **Ledger** — For each commit, if `.agent-trace/ledgers.jsonl` contains a ledger (built at commit time from traces and line hashes), lines are labelled **AI**, **HUMAN**, or **MIXED** according to that ledger.
-- **UNKNOWN** — If there is no ledger for the introducing commit, or a line range is not covered by the ledger, the output is **UNKNOWN** (nothing is inferred from heuristics or scoring).
+- **AI** — For each commit, if the project's `ledgers.jsonl` contains a ledger segment (built at commit time from traces and line hashes) matching the line, it is labelled **AI**.
+- **No attribution** — If there is no ledger for the introducing commit, or a line is not covered by an AI segment, the output is **No attribution** (nothing is inferred from heuristics or scoring; the tool never claims a line was human-written).
 
-The command runs `git blame --porcelain`, groups lines by commit, then resolves attribution from the ledger only. Traces in `.agent-trace/traces.jsonl` are used to enrich model and tool metadata when a `trace_id` is present in the ledger.
+The command runs `git blame --porcelain`, groups lines by commit, then resolves attribution from the ledger only. Traces in the project's `traces.jsonl` are used to enrich model and tool metadata when a `trace_id` is present in the ledger.
 
 ```bash
 agent-trace blame src/utils/parser.ts
 agent-trace blame src/utils/parser.ts --line 42
 agent-trace blame src/utils/parser.ts --range 10-100
 agent-trace blame src/utils/parser.ts --json
-agent-trace blame src/utils/parser.ts --show-unknown    # Include UNKNOWN ranges in output
-agent-trace blame src/utils/parser.ts --require-attribution   # Exit 1 if any line is UNKNOWN (CI)
+agent-trace blame src/utils/parser.ts --show-no-attribution    # Include No-attribution ranges in output
+agent-trace blame src/utils/parser.ts --require-attribution   # Exit 1 if any line is unattributed (CI)
 ```
 
 | Option | Short | Description |
 |--------|--------|-------------|
 | `--line` | `-l` | Blame a single line |
 | `--range` | `-r` | Blame a line range (e.g. `10-25`) |
-| `--json` | | Output attributions as JSON (`kind`: `AI`, `HUMAN`, `MIXED`, `UNKNOWN`) |
-| `--show-unknown` | | List UNKNOWN ranges (default is to omit them from text output) |
-| `--require-attribution` | | Fail with non-zero exit if any line would be UNKNOWN |
+| `--json` | | Output attributions as JSON (`kind`: `AI` or `NO_ATTRIBUTION`) |
+| `--show-no-attribution` | | List No-attribution ranges (default is to omit them from text output) |
+| `--require-attribution` | | Fail with non-zero exit if any line is No attribution |
 
 ### `agent-trace set globaluser <token>`
 
@@ -361,8 +364,8 @@ The schema of the transcript is opaque to agent-trace — your command decides h
 Built-in preset aliases:
 
 - `claude-summary` → runs `claude -p "<prompt>"`
-- `cursor-summary` → runs `cursor agent -p "<prompt>" --trust`
-- `ollama-summary` → runs `ollama run <model> "<prompt>"` (`--model` optional; default `llama3.1:8b`)
+- `cursor-summary` → runs `cursor agent --print --trust` (prompt piped on stdin)
+- `ollama-summary` → runs `ollama run <model> --think=false` (prompt piped on stdin; `--model` optional, default `llama3.1:8b`)
 
 ### `agent-trace projects` | `adopt`
 
@@ -380,9 +383,9 @@ List registered projects or adopt a repo directory and print its `project_id`.
 }
 ```
 
-### Project identity — no in-repo file
+### Project identity — `.git/agent-trace-id` anchor
 
-The `project_id` is derived from the canonical repo path (e.g. `/Users/jane/myrepo` → `-Users-jane-myrepo`). Nothing is written into the repo to identify it; every invocation recomputes the id from the working directory. Moving the repo changes the id — same as `git init`'ing a fresh copy.
+On `init`, each repo gets a stable opaque `project_id` (`at-<32 hex>`) written to `.git/agent-trace-id`. Nothing is written into the working tree, and the anchor is never committed. Because the id lives inside `.git`, it is shared across linked worktrees and survives moving or renaming the repo; a fresh clone gets a new anchor. Before `init` (or outside a git repo) the tool falls back to a sanitized path-derived id.
 
 ### Project settings — `~/.agent-trace/projects/<project_id>/project-config.json`
 
@@ -392,7 +395,7 @@ Created/managed by `agent-trace init`. Holds `notes.*`, `summary.*`, and per-pro
 
 | Setting | Priority |
 |---------|----------|
-| Auth token | `AGENT_TRACE_TOKEN` env > global config |
+| Sync auth token | Per-remote token bound by `agent-trace remote add --token` / `--token-env`. `AGENT_TRACE_TOKEN` and `set globaluser` are **legacy** and are not consulted by `push` / `pull` / `sync`. |
 | Remote URL | Named remote from `agent-trace remote` (per-project) |
 
 ---
@@ -401,7 +404,7 @@ Created/managed by `agent-trace init`. Holds `notes.*`, `summary.*`, and per-pro
 
 Hooks pipe coding agent events through `agent-trace record`. They can be installed at two levels:
 
-- **Global** (recommended) — `~/.cursor/hooks.json`, `~/.claude/settings.json`. Fire for *every* project, like `git config --global`. Set up once with `agent-trace hooks setup-global`.
+- **Global** (recommended) — `~/.cursor/hooks.json`, `~/.claude/settings.json`, `~/.codex/config.toml`. Fire for *every* project, like `git config --global`. Set up once with `agent-trace hooks setup-global`.
 - **Project-level** — `<project>/.cursor/hooks.json`, `<project>/.claude/settings.json`. Set up per-project during `agent-trace init`.
 
 Global hooks are the recommended approach. The recording pipeline resolves the correct project from the **file being edited** (via its git root), not from the agent's working directory. This means:
@@ -472,6 +475,7 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
 ```
 ~/.cursor/hooks.json             # Cursor global hooks (optional, via hooks setup-global)
 ~/.claude/settings.json          # Claude Code global hooks (optional, via hooks setup-global)
+~/.codex/config.toml             # Codex CLI global hooks (optional, via hooks setup-global)
 
 ~/.agent-trace/
   bin/agent-trace                # CLI executable (on PATH)
@@ -481,14 +485,14 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
     __init__.py
     cli.py                       # CLI commands (argparse)
     config.py                    # Global + project settings
-    storage.py                   # Path-based project_id + AGENT_TRACE_HOME paths
+    storage.py                   # project_id anchor (.git/agent-trace-id) + AGENT_TRACE_HOME paths
     registry.py                  # Optional metadata registry (first commit, origin, known_roots)
-    hooks.py                     # Cursor, Claude Code & git hook setup (project + global)
+    hooks.py                     # Cursor, Claude Code, Codex CLI & git hook setup (project + global)
     record.py                    # Trace recording from hooks
     trace.py                     # Trace record construction + per-line hashing
-    blame.py                     # Deterministic blame (ledger + git notes; UNKNOWN when missing)
+    blame.py                     # Deterministic blame (ledger + git notes; No attribution when missing)
     context.py                   # Conversation context for AI-attributed segments
-    rules.py                     # Prebuilt agent rules (Cursor, Claude Code)
+    rules.py                     # Prebuilt agent rules (Cursor, Claude Code, Codex CLI)
     commit_link.py               # Commit-link + ledger build (post-commit)
     ledger.py                    # Ledger construction
     rewrite.py                   # Post-rewrite SHA remapping
@@ -500,7 +504,7 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
   config.json                    # global config (auth_token)
   projects.json                  # optional metadata registry
 
-~/.agent-trace/projects/<project_id>/     # project_id = sanitized absolute repo path
+~/.agent-trace/projects/<project_id>/     # project_id = opaque anchor id from .git/agent-trace-id
   project-config.json            # project settings
   traces.jsonl
   commit-links.jsonl
@@ -509,9 +513,10 @@ Existing hooks are **preserved** — agent-trace entries are merged in without o
   session-summaries.jsonl
   sync-state.json                # push/pull cursors (when using remotes)
 
-<your-project>/                  # NOTHING is written into the repo itself for identity
+<your-project>/                  # nothing is written into the working tree
   .cursor/hooks.json             # Cursor project hooks (only if no global hooks)
   .claude/settings.json          # Claude Code project hooks (only if no global hooks)
+  .git/agent-trace-id            # opaque project_id anchor (inside .git; never committed)
   .git/hooks/post-commit         # agent-trace commit-link
   .git/hooks/post-rewrite        # agent-trace rewrite-ledger
   .git/config                    # notes refspec added for `origin` so notes travel with push/fetch

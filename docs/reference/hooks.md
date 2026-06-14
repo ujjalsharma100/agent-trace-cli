@@ -4,7 +4,7 @@
 agent-trace hooks <ACTION> ...
 ```
 
-**Purpose:** Install or remove **global** agent hooks for **Cursor** and **Claude Code** under the user’s home directory so **every** workspace can emit traces without per-repo hook files.
+**Purpose:** Install or remove **global** agent hooks for **Cursor**, **Claude Code**, and **Codex CLI** under the user’s home directory so **every** workspace can emit traces without per-repo hook files.
 
 If you run **`agent-trace hooks`** without `ACTION`, the CLI prints a short usage line to stdout (see `cmd_hooks`).
 
@@ -18,11 +18,11 @@ agent-trace hooks setup-global [--tool TOOL ...]
 
 | Option | Short | Repeatable | Values | Default | Purpose |
 |--------|-------|------------|--------|---------|---------|
-| **`--tool`** | **`-t`** | yes (`action='append'`) | `cursor`, `claude` | all tools | Restrict installation to the listed tools only. |
+| **`--tool`** | **`-t`** | yes (`action='append'`) | `cursor`, `claude`, `codex` | all tools | Restrict installation to the listed tools only. |
 
 **Effects:**
 
-- Merges hook entries into **`~/.cursor/hooks.json`** and/or **`~/.claude/settings.json`** without clobbering unrelated hooks.
+- Merges hook entries into **`~/.cursor/hooks.json`**, **`~/.claude/settings.json`**, and/or **`~/.codex/config.toml`** without clobbering unrelated hooks.
 - Prints per-tool success (`-> Global <tool> hooks configured`) or failure (`!! Failed…`).
 
 **Exit:** `0` even if a tool fails (check stdout for `!!` lines). This matches “best effort installer” semantics.
@@ -53,8 +53,9 @@ agent-trace hooks status
 
 ```text
 Global hooks:
-  Cursor:     configured  (~/.cursor/hooks.json)
-  Claude Code: not configured  (~/.claude/settings.json)
+  Cursor       configured        (~/.cursor/hooks.json)
+  Claude Code  not configured    (~/.claude/settings.json)
+  Codex CLI    configured        (~/.codex/config.toml)
 ```
 
 **Exit:** `0`.

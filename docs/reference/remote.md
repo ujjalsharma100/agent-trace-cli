@@ -15,7 +15,7 @@ agent-trace remote <ACTION> ...
 | Term | Meaning |
 |------|---------|
 | **`name`** | Short handle (`origin`, `team`, …). |
-| **`url`** | Full service URL including the project path: `<scheme>://<host>[:port]/<org_slug>/<project_slug>`. Bare-host URLs are rejected. |
+| **`url`** | Full service URL including the project path: `<scheme>://<host>[:port]/<org_slug>/<project_slug>` (or `…/at/<org_slug>/<project_slug>` when the service sits behind an `/at/` API gateway). Bare-host URLs are rejected. |
 | **Token** | Provided via **`--token`** (stored in `~/.agent-trace/config.json` under `tokens.<project_id>::<name>`, referenced as `global:<key>`) or **`--token-env VAR`** (referenced as `env:VAR`, never persisted). |
 
 The URL grammar is enforced both client- and server-side. The path segments become the wire `org_slug` and `project_slug`; the slug must exist on the server before push/pull will accept traffic for it. See [Project identity](../concepts/project-identity.md).

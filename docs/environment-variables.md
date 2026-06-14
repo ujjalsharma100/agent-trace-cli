@@ -25,7 +25,7 @@ Overrides the root directory for:
 
 ## `AGENT_TRACE_TOKEN`
 
-**Legacy.** Predates per-remote token storage. In M0, `push` / `pull` / `sync` resolve the bearer token from the bound remote's `token_ref` (`global:<key>` / `env:<VAR>`), not from this variable.
+**Legacy.** Predates per-remote token storage. `push` / `pull` / `sync` resolve the bearer token from the bound remote's `token_ref` (`global:<key>` / `env:<VAR>`), not from this variable.
 
 It remains read-able by the legacy `get_auth_token()` helper for backward compatibility, but nothing in the current sync code path consults it. New configurations should bind tokens with `agent-trace remote add --token` or `--token-env`.
 

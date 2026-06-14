@@ -6,14 +6,14 @@ Hooks are how agent-trace **learns** what the agent did: which files changed, wh
 
 ## Two hook layers
 
-### 1. Agent hooks (Cursor / Claude Code)
+### 1. Agent hooks (Cursor / Claude Code / Codex CLI)
 
 These call **`agent-trace record`** with a JSON document on **stdin**.
 
 | Installation style | Location (typical) |
 |--------------------|--------------------|
-| **Global** (recommended) | Cursor: `~/.cursor/hooks.json` — Claude Code: `~/.claude/settings.json` |
-| **Per-project** | `<repo>/.cursor/hooks.json` or `<repo>/.claude/settings.json` |
+| **Global** (recommended) | Cursor: `~/.cursor/hooks.json` — Claude Code: `~/.claude/settings.json` — Codex CLI: `~/.codex/config.toml` |
+| **Per-project** | `<repo>/.cursor/hooks.json` or `<repo>/.claude/settings.json` (Codex hooks are global-only) |
 
 **Global hooks** run for every workspace. The recorder resolves the correct **git root from the file being edited**, not from the agent’s arbitrary cwd. That means:
 

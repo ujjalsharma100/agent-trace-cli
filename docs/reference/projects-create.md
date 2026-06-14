@@ -23,13 +23,14 @@ If `--token`/`--token-env` are not provided, the CLI looks for `AGENT_TRACE_ADMI
 
 ## URL grammar
 
-The URL must include both org and project slugs:
+The URL must include both org and project slugs, in one of two accepted shapes:
 
 ```
-https://traces.acme.com/acme/myrepo
+https://traces.acme.com/acme/myrepo          # standalone service
+https://traces.acme.com/at/acme/myrepo       # behind an /at/ API gateway
 ```
 
-Slugs match `^[a-z0-9][a-z0-9._-]{0,63}$` — lowercase, start with `[a-z0-9]`, max 64 chars. Bare-host URLs (`https://traces.acme.com`) and over-deep paths (`https://traces.acme.com/acme/myrepo/extra`) are rejected with a clear error.
+Slugs match `^[a-z0-9][a-z0-9._-]{0,63}$` — lowercase, start with `[a-z0-9]`, max 64 chars. Bare-host URLs (`https://traces.acme.com`) are rejected with a clear error; `/at/` is the only accepted extra path segment, so other over-deep paths (`https://traces.acme.com/acme/myrepo/extra`) are still rejected.
 
 ## Auth
 

@@ -25,7 +25,7 @@ This reference enumerates **meaningful paths** under **`AGENT_TRACE_HOME`** (def
 | File | Purpose |
 |------|---------|
 | **`project-config.json`** | `notes`, `summary`, `remote` defaults — edited via `config` / `init` / `reset`. |
-| **`remotes.json`** | Named HTTP remotes for this project: URL, derived `org_slug` / `project_slug` / `base_url`, and an `auth.token_ref` (`global:…` / `env:…` / `keychain:…`). Mode `0o600`. Written by `agent-trace remote add/set-url/set-token/rename/remove`. |
+| **`remotes.json`** | Named HTTP remotes for this project: URL, derived `org_slug` / `project_slug` / `base_url`, and an `auth.token_ref` (`global:…` / `env:…`). Mode `0o600`. Written by `agent-trace remote add/set-url/set-token/rename/remove`. |
 | **`traces.jsonl`** | Append-only trace records from hooks (`record`). |
 | **`commit-links.jsonl`** | Associations between git commits and trace / session data. |
 | **`ledgers.jsonl`** | Deterministic per-commit attribution ledgers. |
@@ -58,6 +58,7 @@ These may exist depending on whether you use **project-level** hooks or **rules*
 | **`.claude/settings.json`** | Claude Code hooks when not using global hooks exclusively. |
 | **`.cursor/rules/agent-trace-<name>.mdc`** | Cursor rules installed via `agent-trace rule add`. |
 | **`.claude/rules/agent-trace-<name>.md`** | Claude rules installed via `agent-trace rule add`. |
+| **`.codex/rules/agent-trace-<name>.md`** | Codex CLI rules installed via `agent-trace rule add`. |
 | **`.git/hooks/post-commit`**, **`.git/hooks/post-rewrite`** | Git hook scripts invoking `commit-link` / `rewrite-ledger`. |
 
 Nothing in-repo encodes **project_id** for git object portability — the anchor lives **inside** `.git`.

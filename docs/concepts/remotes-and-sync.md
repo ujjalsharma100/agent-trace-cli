@@ -6,13 +6,19 @@ A **remote** is a named pointer to an `agent-trace-service` deployment plus the 
 agent-trace remote add origin https://traces.acme.com/acme/myrepo --token $AT_TOKEN
 ```
 
-The URL grammar is **fixed**:
+The URL always carries the `<org_slug>/<project_slug>` path. Two shapes are accepted:
 
 ```
+# Standalone service
 <scheme>://<host>[:port]/<org_slug>/<project_slug>
+
+# Behind a shared API gateway (note the /at/ prefix)
+<scheme>://<host>[:port]/at/<org_slug>/<project_slug>
 ```
 
-Bare-host URLs (e.g. `https://traces.acme.com`) are rejected. The path is what makes the URL self-describing — anyone reading the config can see exactly which org and project the remote points at, without consulting external docs.
+Use the **gateway** form when the service is served under an `/at/` prefix on a host that fronts other APIs; sync requests are then issued under `…/at/<org>/<project>/api/v1/…` instead of `…/api/v1/…`. Either way, the path is what makes the URL self-describing — anyone reading the config can see exactly which org and project the remote points at, without consulting external docs.
+
+Bare-host URLs (e.g. `https://traces.acme.com`) are rejected, and `/at/` is the **only** accepted extra path segment — any other deeper path (`…/acme/myrepo/extra`) is rejected too.
 
 ---
 
@@ -61,7 +67,6 @@ Tokens are bound **per remote**. The URL and the secret are stored apart, so `re
 
 - **`--token <value>`** — raw secret. Written to `~/.agent-trace/config.json` under `tokens.<project_id>::<remote_name>` (mode `0o600`). `remotes.json` stores only a reference (`global:<project_id>::<remote_name>`), never the raw value.
 - **`--token-env <VAR>`** — only the variable name is persisted. `os.environ[VAR]` is read at every push/pull.
-- **`keychain:<name>`** — scaffold only in M0; not yet wired up.
 
 There is no `AGENT_TRACE_TOKEN` / `set globaluser` override that displaces the per-remote binding. The sync code path resolves the token strictly through the remote's `token_ref`. The legacy global `auth_token` slot survives for backward compatibility but does not feed into push/pull/sync. See [push/pull/sync — Authentication](../reference/push-pull-sync.md#authentication) for the full resolution table.
 

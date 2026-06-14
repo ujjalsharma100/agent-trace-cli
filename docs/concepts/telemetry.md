@@ -30,7 +30,7 @@ Set **`AGENT_TRACE_TELEMETRY`** to force behavior regardless of the config file:
 
 ## What is sent
 
-When telemetry is effectively **on**, after each **subcommand** finishes the CLI may **POST** a single JSON object to the collector URL (see below). Payload fields:
+When telemetry is effectively **on**, after each **subcommand** finishes the CLI may **POST** a single JSON object to the telemetry endpoint (see [Delivery semantics](#delivery-semantics)). Payload fields:
 
 | Field | Meaning |
 |-------|---------|
@@ -44,10 +44,8 @@ No repository paths, file names, trace content, tokens, or hostnames are include
 
 ---
 
-## Collector URL (M0)
+## Delivery semantics
 
-There is **no production telemetry endpoint** in M0. The client uses a **placeholder URL** that cannot accept connections; POST attempts fail harmlessly and are discarded. This lets us ship the **opt-in switch and payload shape** now and turn on a real endpoint later without requiring a CLI upgrade for users who already enabled telemetry.
-
-When a collector is ready, the URL in the client will be updated in a normal release; behavior (payload, fail-closed semantics, env override) stays the same unless documented otherwise.
+Telemetry is **best-effort** and **fail-closed**. The event is sent with a short, non-blocking POST **after** the command has already finished its work, so telemetry can never slow down, block, or change the outcome of a command. If the endpoint is unreachable or returns an error, the send is **silently discarded** — there are no retries and nothing is queued to disk.
 
 For details on configuration layout, see [Configuration](../configuration.md#telemetry).

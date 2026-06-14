@@ -8,7 +8,7 @@ This page is the shortest path from **no setup** to **seeing attribution** on a 
 
 - **Python 3.9 or newer** on your PATH (required by the official installer and in-repo usage).
 - A **git repository** for the project you want to trace.
-- One or both coding tools if you want automatic recording: **Cursor** and/or **Claude Code**.
+- One or more supported coding tools if you want automatic recording: **Cursor**, **Claude Code**, and/or **Codex CLI**.
 
 ---
 
@@ -37,6 +37,7 @@ Optional: limit to one tool:
 ```bash
 agent-trace hooks setup-global --tool cursor
 agent-trace hooks setup-global --tool claude
+agent-trace hooks setup-global --tool codex
 ```
 
 Verify:
@@ -125,7 +126,7 @@ Add `--full` for the entire transcript text (can be large). See [context](refere
 
 | Symptom | What to check |
 |---------|----------------|
-| `blame` shows lots of UNKNOWN | You have not committed since edits, or ledger/git-note data is missing for those lines. See [Attribution ledger](concepts/attribution-ledger.md). |
+| `blame` shows lots of **No attribution** | You have not committed since edits, or ledger/git-note data is missing for those lines. See [Attribution ledger](concepts/attribution-ledger.md). |
 | No traces recorded | Hooks not installed or not firing; run `doctor`. For global hooks, the edited file must live inside an **initialized** repo. |
 | Wrong project when cwd is odd | Pass `--project` to `blame`, `context`, or `viewer`. See each command reference. |
 

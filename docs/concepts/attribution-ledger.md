@@ -1,6 +1,6 @@
 # Concepts — Attribution ledger
 
-The **ledger** is a per-commit, per-repository artifact that answers: *for each line of a file at this commit, was the content last attributable to AI edits, human edits, or both?* **`agent-trace blame`** reads the ledger (and optional inline git-note data) **only** — it does not infer missing data.
+The **ledger** is a per-commit, per-repository artifact that answers one **binary** question for each line of a file at this commit: *does this line match AI-edit evidence, or not?* **`agent-trace blame`** reads the ledger (and optional inline git-note data) **only** — it does not infer missing data.
 
 ---
 
@@ -11,7 +11,7 @@ The **`post-commit`** hook runs **`agent-trace commit-link`**, which:
 - Links the commit to relevant **trace ids** and session state.
 - Computes deterministic **line-level** classifications from **hashes of line contents** recorded in traces, combined with the **edit sequence** in the session.
 
-So until you **commit**, there is **no ledger row** for those working-tree changes, and blame will show **UNKNOWN** for those lines (honest “no proof yet”).
+So until you **commit**, there is **no ledger row** for those working-tree changes, and blame reports **No attribution** for those lines (honest “no proof yet”).
 
 ---
 
@@ -25,27 +25,25 @@ If you bypass hooks or operate in a clone without ledger data, blame cannot fabr
 
 ## Labels you will see
 
-In CLI text and JSON output, expect categories along the lines of:
+Attribution is **binary**. Every line is one of two kinds:
 
-| Kind | Meaning (simplified) |
-|------|----------------------|
-| **AI** | Line range matches AI-authored trace evidence under ledger rules. |
-| **HUMAN** | Human-authored under the same deterministic rules. |
-| **MIXED** | Evidence combines human and AI influence for that range. |
-| **UNKNOWN** | No ledger coverage (or unusable note) for that line — **not a guess**. |
+| Kind | Text tag | JSON `kind` | Meaning |
+|------|----------|-------------|---------|
+| **AI** | `[AI]` | `AI` | The line matches AI-authored trace evidence under the deterministic ledger rules. |
+| **No attribution** | `[NO ATTRIBUTION]` | `NO_ATTRIBUTION` | Everything else — no matching AI evidence for that line. An **honest absence of proof**, not a guess. |
 
-JSON schemas and stats in git notes may use related terminology such as **NO_ATTRIBUTION** in schema descriptions; the CLI’s blame help text refers to **UNKNOWN** for the same honest-absence case.
+agent-trace never emits **HUMAN**, **MIXED**, or **UNKNOWN**: it only ever asserts *“this line matches an AI trace,”* or it makes no claim at all (**No attribution**). It does **not** assert that a human wrote a line.
 
 ---
 
 ## Cross-file and refactor cases
 
-The ledger builder can correlate hashes **across files** when appropriate (for example moves/splits that preserve identifiable line content). Edge cases are documented in the repository’s internal engineering notes; the user-facing guarantee remains: **output is ledger-driven**, not heuristic scoring.
+The ledger builder can correlate hashes **across files** when appropriate (for example moves/splits that preserve identifiable line content). Regardless of how the content moved, the guarantee is the same: **output is ledger-driven**, not heuristic scoring.
 
 ---
 
 ## CI usage
 
-`agent-trace blame` supports **`--require-attribution`**: exit non-zero if any blamed line would be UNKNOWN — useful as a **guardrail** when you require complete provenance for certain paths.
+`agent-trace blame` supports **`--require-attribution`**: exit non-zero if any blamed line has **No attribution** — useful as a **guardrail** when you require complete AI provenance for certain paths.
 
 See [blame reference](../reference/blame.md).
