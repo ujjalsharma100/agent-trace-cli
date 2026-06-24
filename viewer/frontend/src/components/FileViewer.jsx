@@ -1,5 +1,19 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import ConversationModal, { ConversationPanel } from './ConversationModal';
+import ModelAttributionChart from './ModelAttributionChart';
+import {
+  AI_PALETTES,
+  AI_DEFAULT,
+  NO_ATTRIBUTION_COLORS,
+  buildLegendItemsFromAttributions,
+  countDistinctLinesCovered,
+  getDisplayLabel,
+  getLegendKey,
+  getTraceKey,
+  legendItemLabel,
+  pieSlicePath,
+  isNoAttribution,
+} from '../utils/attributionStats';
 
 const API = '';
 
@@ -29,26 +43,6 @@ function formatAuthorTime(ts) {
   if (ts == null) return '';
   const d = new Date(ts * 1000);
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-}
-
-function countDistinctLinesCovered(attributions) {
-  const lineSet = new Set();
-  for (const a of attributions) {
-    const start = a.start_line ?? a.startLine;
-    const end = a.end_line ?? a.endLine;
-    for (let L = start; L <= end; L++) lineSet.add(L);
-  }
-  return lineSet.size;
-}
-
-/** Schema 2.0: any attribution that isn't a verified AI segment is NO_ATTRIBUTION. */
-function isNoAttribution(attr) {
-  if (!attr) return true;
-  if (attr.kind === 'NO_ATTRIBUTION') return true;
-  if (attr.kind === 'AI') return false;
-  const hasTrace = attr.trace_id != null && attr.trace_id !== '';
-  if (hasTrace && attr.attribution_label === 'AI') return false;
-  return true;
 }
 
 /** Line ranges (start, end) that have no attribution */
@@ -100,31 +94,6 @@ function getNoAttributionLineRanges(totalLines, attributions) {
   return ranges;
 }
 
-/** SVG pie slice path: angles in degrees, 0 = top (12 o'clock), clockwise */
-function pieSlicePath(cx, cy, r, startDeg, endDeg) {
-  const toRad = (d) => (d - 90) * (Math.PI / 180);
-  const x = (deg) => cx + r * Math.cos(toRad(deg));
-  const y = (deg) => cy + r * Math.sin(toRad(deg));
-  const large = endDeg - startDeg > 180 ? 1 : 0;
-  return `M ${cx} ${cy} L ${x(startDeg)} ${y(startDeg)} A ${r} ${r} 0 ${large} 1 ${x(endDeg)} ${y(endDeg)} Z`;
-}
-
-/* ─── Color system ──────────────────────────────────────── */
-
-// 8 hand-tuned green-family palettes with wide lightness & saturation spread
-// Lightness ranges from 80% to 93%, saturation from 40% to 65%
-// All hues stay in 120-175 range (clearly green, no blue/yellow confusion)
-const AI_PALETTES = [
-  { bg: 'hsl(142, 52%, 91%)', strip: 'hsl(142, 62%, 32%)' },   // light spring green
-  { bg: 'hsl(162, 58%, 83%)', strip: 'hsl(162, 62%, 26%)' },   // deep teal-green
-  { bg: 'hsl(125, 42%, 88%)', strip: 'hsl(125, 52%, 30%)' },   // grass green
-  { bg: 'hsl(150, 65%, 80%)', strip: 'hsl(150, 70%, 24%)' },   // saturated emerald (darkest)
-  { bg: 'hsl(172, 48%, 86%)', strip: 'hsl(172, 55%, 28%)' },   // cyan-green
-  { bg: 'hsl(135, 60%, 84%)', strip: 'hsl(135, 65%, 27%)' },   // forest green
-  { bg: 'hsl(155, 42%, 93%)', strip: 'hsl(155, 52%, 36%)' },   // pale jade (lightest)
-  { bg: 'hsl(145, 62%, 81%)', strip: 'hsl(145, 68%, 22%)' },   // deep jade
-];
-
 function buildTraceColorMap(attributions) {
   const map = {};
   if (!Array.isArray(attributions)) return map;
@@ -138,9 +107,6 @@ function buildTraceColorMap(attributions) {
   });
   return map;
 }
-
-const NO_ATTRIBUTION_COLORS = { bg: 'hsl(0, 0%, 94%)', strip: 'hsl(0, 0%, 65%)' };
-const AI_DEFAULT   = AI_PALETTES[0];
 
 /** Darken an HSL strip color for use as pinned-line border (same hue, deeper). */
 function deeperBorderColor(stripColor) {
@@ -159,24 +125,6 @@ function getLineColors(attr, traceColorMap) {
     return { ...traceColorMap[attr.trace_id], label: 'AI' };
   }
   return { ...AI_DEFAULT, label: 'AI' };
-}
-
-/** Trace key for grouping (must match attributionsByTraceId). */
-function getTraceKey(attr) {
-  if (isNoAttribution(attr)) return '__no_attribution__';
-  return attr.trace_id ? `${attr.trace_id}:AI` : `__no_trace__:AI`;
-}
-
-/** Legend key for toolbar / model pie (must match legendItems). */
-function getLegendKey(attr) {
-  if (isNoAttribution(attr)) return 'No attribution';
-  return `AI:${attr.model_id || '(unknown model)'}`;
-}
-
-/** Human-facing label for one attribution (for gutter, detail panel, popover). */
-function getDisplayLabel(attr) {
-  if (isNoAttribution(attr)) return 'No attribution';
-  return 'AI';
 }
 
 const SIDE_PANE_MIN = 320;
@@ -220,7 +168,6 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
   const [popover, setPopover] = useState(null);
   const [attrMapView, setAttrMapView] = useState('list');
   const [chartHover, setChartHover] = useState(null);
-  const [modelChartHover, setModelChartHover] = useState(null);
   const dragStart = useRef({ x: 0, width: 0 });
   const popoverTimer = useRef(null);
 
@@ -432,46 +379,11 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
     });
   }, [attributionsByTraceId, lines.length, traceColorMap, noAttributionStats]);
 
-  /* ─── Toolbar legend: grouped by model (AI · model, No attribution) ── */
-  const legendItems = useMemo(() => {
-    const totalLines = lines.length;
-    const keyToAttrs = new Map();
-    for (const a of attributions) {
-      const key = getLegendKey(a);
-      if (!keyToAttrs.has(key)) keyToAttrs.set(key, []);
-      keyToAttrs.get(key).push(a);
-    }
-    const items = [];
-    const seenKeys = new Set();
-    for (const a of attributions) {
-      const key = getLegendKey(a);
-      if (seenKeys.has(key)) continue;
-      seenKeys.add(key);
-      const colors = getLineColors(a, traceColorMap);
-      const attrs = keyToAttrs.get(key) ?? [];
-      const pct = key === 'No attribution'
-        ? noAttributionStats.pct
-        : (totalLines ? (countDistinctLinesCovered(attrs) / totalLines * 100) : 0);
-      if (key === 'No attribution') {
-        items.push({ key: 'No attribution', label: 'No attribution', sublabel: null, bg: NO_ATTRIBUTION_COLORS.bg, strip: NO_ATTRIBUTION_COLORS.strip, pct });
-      } else if (key.startsWith('AI:')) {
-        items.push({ key, label: 'AI', sublabel: key.slice(3), bg: colors.bg, strip: colors.strip, pct });
-      } else {
-        items.push({ key, label: key, sublabel: null, bg: colors.bg, strip: colors.strip, pct });
-      }
-    }
-    if (noAttributionStats.pct > 0 && !seenKeys.has('No attribution')) {
-      items.push({
-        key: 'No attribution',
-        label: 'No attribution',
-        sublabel: null,
-        bg: NO_ATTRIBUTION_COLORS.bg,
-        strip: NO_ATTRIBUTION_COLORS.strip,
-        pct: noAttributionStats.pct,
-      });
-    }
-    return items;
-  }, [attributions, traceColorMap, lines.length, noAttributionStats.pct]);
+  /* ─── Toolbar legend: grouped by model + tool (AI · model · tool, No attribution) ── */
+  const legendItems = useMemo(
+    () => buildLegendItemsFromAttributions(attributions, lines.length),
+    [attributions, lines.length],
+  );
 
   /* ─── Pie chart legend: AI vs No attribution ── */
   const pieLegendItems = useMemo(() => {
@@ -493,29 +405,6 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
       color: colors[label],
     }));
   }, [pieSegments]);
-
-  /* ─── By-model pie (toolbar distribution as pie, for side pane) ── */
-  const modelPieSegments = useMemo(() => {
-    const withPct = legendItems.filter((item) => item.pct > 0);
-    let cum = 0;
-    return withPct.map((item) => {
-      const startAngle = cum;
-      cum += item.pct;
-      const endAngle = cum;
-      let startDeg = (startAngle / 100) * 360;
-      let endDeg = (endAngle / 100) * 360;
-      if (endDeg >= 360) endDeg = 359.99;
-      return {
-        key: item.key,
-        label: item.label,
-        sublabel: item.sublabel,
-        pct: item.pct,
-        color: item.strip,
-        startAngle: startDeg,
-        endAngle: endDeg,
-      };
-    });
-  }, [legendItems]);
 
   return (
     <div className="fv-container">
@@ -546,7 +435,7 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
                   className="fv-legend-swatch"
                   style={{ background: item.bg, borderLeft: `3px solid ${item.strip}` }}
                 />
-                <span>{item.label}{item.sublabel ? ` · ${item.sublabel}` : ''}</span>
+                <span>{legendItemLabel(item)}</span>
                 <span className="fv-legend-pct">({item.pct.toFixed(1)}%)</span>
               </div>
             ))}
@@ -697,57 +586,11 @@ export default function FileViewer({ path, content, gitBlameSegments, agentTrace
               )}
 
               {showTraceBlame && (attributions.length > 0 || lines.length > 0) && (
-                <CollapsibleSection title="Attribution by model" headerClass="trace" defaultOpen={false}>
-                  <div
-                    className="attr-pie-wrap attr-model-pie-wrap"
-                    onMouseLeave={() => setModelChartHover(null)}
-                  >
-                    {modelPieSegments.length > 0 ? (
-                      <>
-                        <svg className="attr-pie attr-model-pie" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-                          {modelPieSegments.map((seg) => {
-                            const isPinnedSlice = pinnedLegendKey === seg.key;
-                            return (
-                              <path
-                                key={seg.key}
-                                d={pieSlicePath(50, 50, 45, seg.startAngle, seg.endAngle)}
-                                fill={seg.color}
-                                stroke={isPinnedSlice ? 'rgba(0,0,0,0.4)' : 'none'}
-                                strokeWidth={isPinnedSlice ? 2 : 0}
-                                strokeLinejoin="round"
-                                className={`attr-pie-slice ${modelChartHover?.key === seg.key ? 'hover' : ''} ${isPinnedSlice ? 'pinned' : ''}`}
-                                onMouseEnter={() => setModelChartHover(seg)}
-                              />
-                            );
-                          })}
-                        </svg>
-                        {modelChartHover && (
-                          <div className="attr-pie-tooltip attr-model-pie-tooltip">
-                            <span className="attr-model-pie-tooltip-label">
-                              {modelChartHover.label}{modelChartHover.sublabel ? ` · ${modelChartHover.sublabel}` : ''}
-                            </span>
-                            <span className="attr-pie-tooltip-pct">{modelChartHover.pct.toFixed(1)}%</span>
-                          </div>
-                        )}
-                        <div className="attr-pie-legend attr-model-pie-legend">
-                          {modelPieSegments.map((seg) => (
-                            <div key={seg.key} className={`attr-pie-legend-item ${pinnedLegendKey === seg.key ? 'pinned' : ''}`}>
-                              <div
-                                className="attr-pie-legend-swatch"
-                                style={{ background: seg.color }}
-                              />
-                              <span className="attr-pie-legend-label">
-                                {seg.label}{seg.sublabel ? ` · ${seg.sublabel}` : ''}
-                              </span>
-                              <span className="attr-pie-legend-pct">({seg.pct.toFixed(1)}%)</span>
-                            </div>
-                          ))}
-                        </div>
-                      </>
-                    ) : (
-                      <div className="attr-pie-empty">No attribution data</div>
-                    )}
-                  </div>
+                <CollapsibleSection title="Attribution by model & tool" headerClass="trace" defaultOpen={false}>
+                  <ModelAttributionChart
+                    legendItems={legendItems}
+                    pinnedKey={pinnedLegendKey}
+                  />
                 </CollapsibleSection>
               )}
 

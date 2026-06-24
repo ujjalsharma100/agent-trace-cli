@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import FileTree from './components/FileTree';
 import FileViewer from './components/FileViewer';
+import ProjectOverview from './components/ProjectOverview';
 
 const API = '';
 
@@ -10,6 +11,9 @@ export default function App() {
   const [fileContent, setFileContent] = useState('');
   const [gitBlameSegments, setGitBlameSegments] = useState(null);
   const [agentTraceBlame, setAgentTraceBlame] = useState(null);
+  const [projectAttribution, setProjectAttribution] = useState(null);
+  const [projectAttributionLoading, setProjectAttributionLoading] = useState(false);
+  const [projectAttributionError, setProjectAttributionError] = useState('');
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -18,6 +22,23 @@ export default function App() {
       .then(setProject)
       .catch((e) => setError(String(e)));
   }, []);
+
+  useEffect(() => {
+    if (!project) return;
+    setProjectAttributionLoading(true);
+    setProjectAttributionError('');
+    fetch(`${API}/api/project-attribution`)
+      .then(async (r) => {
+        if (!r.ok) {
+          const data = await r.json().catch(() => ({}));
+          throw new Error(data.error || r.statusText);
+        }
+        return r.json();
+      })
+      .then(setProjectAttribution)
+      .catch((e) => setProjectAttributionError(String(e.message || e)))
+      .finally(() => setProjectAttributionLoading(false));
+  }, [project]);
 
   useEffect(() => {
     if (!selectedPath) {
@@ -99,6 +120,15 @@ export default function App() {
           })()}
         </div>
         <div className="sidebar-files">
+          <button
+            type="button"
+            className={`tree-node-btn project-overview-btn ${!selectedPath ? 'selected' : ''}`}
+            onClick={() => setSelectedPath('')}
+          >
+            <span className="chevron" />
+            <span className="icon">📊</span>
+            <span className="name">Project overview</span>
+          </button>
           <FileTree
             selectedPath={selectedPath}
             onSelectFile={setSelectedPath}
@@ -131,10 +161,12 @@ export default function App() {
             </div>
           </>
         ) : (
-          <div className="empty-state">
-            <div className="icon">📄</div>
-            <div>Select a file from the sidebar</div>
-          </div>
+          <ProjectOverview
+            project={project}
+            attribution={projectAttribution}
+            loading={projectAttributionLoading}
+            error={projectAttributionError}
+          />
         )}
       </main>
     </div>

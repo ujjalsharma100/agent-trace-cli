@@ -9,6 +9,7 @@ Serves:
   - /api/file      — file content (?path=...)
   - /api/git-blame — git blame segments (?path=...)
   - /api/agent-trace-blame — agent-trace blame (?path=...)
+  - /api/project-attribution — project-wide attribution breakdown
   - /              — static frontend (index.html + assets)
 
 Bind: 127.0.0.1:8765. Project root passed as first CLI arg (default: cwd).
@@ -117,6 +118,14 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return
         self._send_error_json(err or "blame failed", status=status)
 
+    def _api_project_attribution(self):
+        from .routes.project_attribution import get_project_attribution
+        data, err, status = get_project_attribution(PROJECT_ROOT)
+        if data is not None:
+            self._send_json(data)
+            return
+        self._send_error_json(err or "project attribution failed", status=status)
+
     def _api_conversation(self):
         from .routes.conversation import get_conversation_content
         query = parse_qs(urlparse(self.path).query)
@@ -213,6 +222,8 @@ fetch(API + '/api/tree?path=').then(r=>r.json()).then(function(d){ var ul = docu
             self._api_git_blame()
         elif path == "/api/agent-trace-blame":
             self._api_agent_trace_blame()
+        elif path == "/api/project-attribution":
+            self._api_project_attribution()
         elif path == "/api/conversation":
             self._api_conversation()
         elif path.startswith("/api/"):
