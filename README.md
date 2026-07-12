@@ -1,6 +1,17 @@
-# agent-trace CLI
+<h1 align="center">agent-trace CLI</h1>
 
-A command-line tool for tracing AI-generated code changes across coding agents like **Cursor**, **Claude Code**, and **Codex CLI**. Includes the **file viewer** for browsing files with git + agent-trace blame in your browser.
+<p align="center">
+  Trace AI-generated code changes across Cursor, Claude Code, and Codex CLI.
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/agent-trace-cli/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/agent-trace-cli"></a>
+  <a href="https://pypi.org/project/agent-trace-cli/"><img alt="PyPI downloads" src="https://img.shields.io/pypi/dm/agent-trace-cli"></a>
+  <a href="https://github.com/ujjalsharma100/agent-trace-cli/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/ujjalsharma100/agent-trace-cli"></a>
+  <a href="https://github.com/ujjalsharma100/agent-trace-cli/actions/workflows/docs.yml"><img alt="Documentation status" src="https://github.com/ujjalsharma100/agent-trace-cli/actions/workflows/docs.yml/badge.svg"></a>
+</p>
+
+Includes the **file viewer** for browsing files with git + agent-trace blame in your browser.
 
 This implementation follows the [Agent Trace](https://agent-trace.dev/) specification: deterministic-only attribution, local-first storage, **git-like** `push` / `pull` / `sync`, **git notes** (`refs/notes/agent-trace`) for sharing metadata with the repo, and an optional HTTP remote as a **pure datastore** (no server-side blame).
 
