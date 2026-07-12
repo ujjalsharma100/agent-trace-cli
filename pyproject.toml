@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-trace-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "CLI tool for tracing AI-generated code changes"
 readme = "README.md"
 license = "Apache-2.0"
