@@ -11,6 +11,13 @@
   <a href="https://github.com/ujjalsharma100/agent-trace-cli/actions/workflows/docs.yml"><img alt="Documentation status" src="https://github.com/ujjalsharma100/agent-trace-cli/actions/workflows/docs.yml/badge.svg"></a>
 </p>
 
+<p align="center">
+  <img src="docs/assets/gif-1-money-shot.gif" alt="Per-line AI attribution and the prompt behind any line" width="800">
+</p>
+<p align="center">
+  <code>pip install agent-trace-cli</code> · <a href="https://www.youtube.com/watch?v=J4LPhV9wURg">▶ 3-min demo</a>
+</p>
+
 Includes the **file viewer** for browsing files with git + agent-trace blame in your browser.
 
 This implementation follows the [Agent Trace](https://agent-trace.dev/) specification: deterministic-only attribution, local-first storage, **git-like** `push` / `pull` / `sync`, **git notes** (`refs/notes/agent-trace`) for sharing metadata with the repo, and an optional HTTP remote as a **pure datastore** (no server-side blame).
@@ -213,6 +220,10 @@ agent-trace rewrite-ledger
 ### `agent-trace viewer [--project /path]`
 
 Open the **file viewer** in your browser. The viewer lets you browse the project's file tree, view file contents, and see git blame and agent-trace blame inline.
+
+<p align="center">
+  <img src="docs/assets/gif-3-local-viewer.gif" alt="Local file viewer: git blame plus AI authorship overlay, no account required" width="800">
+</p>
 
 The viewer is installed automatically by `install.sh`. If it's missing, re-run `install.sh` to reinstall. Once launched, open **http://127.0.0.1:8765** in your browser.
 

@@ -2,6 +2,10 @@
 
 This page is the shortest path from **no setup** to **seeing attribution** on a file. For install options and uninstall steps, see [Installation](installation.md).
 
+![Init → commit → remote add → push](assets/gif-2-zero-to-pushed.gif)
+
+[▶ Watch the 3-minute demo](https://www.youtube.com/watch?v=J4LPhV9wURg)
+
 ---
 
 ## Prerequisites
