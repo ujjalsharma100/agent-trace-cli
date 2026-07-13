@@ -1,6 +1,11 @@
 # Installation
 
-agent-trace ships as a **Python package layout** installed by a **bash installer** into `~/.agent-trace/` by default. There is **no PyPI `pip install agent-trace`** requirement documented here; the supported paths are the **curl one-liner** or **clone + `install.sh`**.
+agent-trace is published on **PyPI** as **`agent-trace-cli`**. Pick the path that fits your setup:
+
+| Path | What you get |
+|------|----------------|
+| **`pip install agent-trace-cli`** | The `agent-trace` CLI on your PATH (Python 3.9+). Best when you already use pip/venv. |
+| **curl one-liner** or **`install.sh`** | Same CLI, plus the **file viewer** under `~/.agent-trace/`, PATH setup, and optional global hook prompts. |
 
 ---
 
@@ -13,6 +18,28 @@ agent-trace ships as a **Python package layout** installed by a **bash installer
 | **Shell** | Installer is **bash** (`bash install.sh` or pipe to `bash`). |
 | **curl** | Required only when bootstrapping from GitHub without a local clone. |
 | **npm** | Optional; used to build the file viewer frontend when present. If absent, the installer can use a pre-built `dist/`. |
+
+---
+
+## Install from PyPI
+
+```bash
+pip install agent-trace-cli
+```
+
+This installs the **`agent-trace`** console script. Verify:
+
+```bash
+agent-trace --version
+```
+
+Use a virtualenv if your OS Python is externally managed (for example `python3 -m venv .venv && source .venv/bin/activate` before the install command above).
+
+**File viewer:** `pip install` does **not** bundle the local web viewer. For `agent-trace viewer`, use the [curl one-liner](#install-from-github-one-liner) or [local `install.sh`](#install-from-a-local-clone) below, or run `install.sh` after pip if you only need the viewer assets added under `~/.agent-trace/`.
+
+**Upgrade:** `pip install -U agent-trace-cli`
+
+**Uninstall:** `pip uninstall agent-trace-cli` — this removes the CLI only. Local trace data under `~/.agent-trace/` is unchanged unless you delete it yourself (see [Uninstall](#uninstall)).
 
 ---
 
@@ -89,7 +116,8 @@ Removing **`~/.agent-trace/`** entirely deletes **all** projects’ traces, ledg
 
 ## Upgrading
 
-Re-run **`install.sh`** from the latest `main` (curl or clone). The installer overwrites library and viewer files under the install prefix. Your **`project-config.json`** and JSONL data under `projects/<id>/` are not removed by the installer itself.
+- **PyPI install:** `pip install -U agent-trace-cli`
+- **Bash installer:** re-run **`install.sh`** from the latest `main` (curl or clone). The installer overwrites library and viewer files under the install prefix. Your **`project-config.json`** and JSONL data under `projects/<id>/` are not removed by the installer itself.
 
 ---
 

@@ -66,17 +66,23 @@ cd agent-trace-cli
 bash install.sh
 ```
 
-### pip / Python package
+### pip (PyPI)
 
-The project is published as a wheel (`pyproject.toml`). From a clone, in a virtualenv:
+```bash
+pip install agent-trace-cli
+```
+
+Installs the `agent-trace` CLI. The **file viewer** is not included — use the one-liner or `install.sh` above for `agent-trace viewer`. See [Installation](https://ujjalsharma100.github.io/agent-trace-cli/installation/) for upgrade/uninstall notes.
+
+From a clone (contributors), in a virtualenv:
 
 ```bash
 pip install .
-# contributors (tests + hypothesis + jsonschema):
+# tests + hypothesis + jsonschema:
 pip install -e ".[dev]"
 ```
 
-When released to PyPI: `pip install agent-trace-cli`. Build artifacts locally with `python -m build` after `pip install -e ".[dev]"` (or `pip install build`).
+Build release wheels with `python -m build` after `pip install -e ".[dev]"` (or `pip install build`).
 
 ### What the installer does
 

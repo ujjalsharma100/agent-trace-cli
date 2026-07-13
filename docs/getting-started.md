@@ -18,13 +18,19 @@ This page is the shortest path from **no setup** to **seeing attribution** on a 
 
 ## Step 1 — Install the CLI
 
-Use the one-liner from the project README or run `./install.sh` from a clone. After installation:
+**PyPI** (CLI only):
+
+```bash
+pip install agent-trace-cli
+```
+
+**Or** use the one-liner / `./install.sh` from a clone — that path also installs the **file viewer** and adds the `at` short alias. See [Installation](installation.md).
+
+After installation:
 
 ```bash
 agent-trace --version
 ```
-
-The `at` command is a short alias for the same binary when the installer adds it.
 
 ---
 
