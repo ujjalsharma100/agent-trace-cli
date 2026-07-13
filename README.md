@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://pypi.org/project/agent-trace-cli/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/agent-trace-cli"></a>
-  <a href="https://pypi.org/project/agent-trace-cli/"><img alt="PyPI downloads" src="https://img.shields.io/pypi/dm/agent-trace-cli"></a>
+  <a href="https://pypi.org/project/agent-trace-cli/"><img alt="PyPI downloads" src="https://pepy.tech/badge/agent-trace-cli"></a>
   <a href="https://github.com/ujjalsharma100/agent-trace-cli/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/ujjalsharma100/agent-trace-cli"></a>
   <a href="https://github.com/ujjalsharma100/agent-trace-cli/actions/workflows/docs.yml"><img alt="Documentation status" src="https://github.com/ujjalsharma100/agent-trace-cli/actions/workflows/docs.yml/badge.svg"></a>
 </p>
