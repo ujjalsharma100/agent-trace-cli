@@ -75,7 +75,7 @@ bash install.sh
 pip install agent-trace-cli
 ```
 
-Installs the `agent-trace` CLI. The **file viewer** is not included — use the one-liner or `install.sh` above for `agent-trace viewer`. See [Installation](https://ujjalsharma100.github.io/agent-trace-cli/installation/) for upgrade/uninstall notes.
+Installs the `agent-trace` CLI. The **file viewer** is not included — use the one-liner or `install.sh` above for `agent-trace viewer`. See [Installation](https://cli.traceshub.com/installation/) for upgrade/uninstall notes.
 
 From a clone (contributors), in a virtualenv:
 

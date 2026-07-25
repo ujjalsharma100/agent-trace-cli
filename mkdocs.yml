@@ -8,8 +8,8 @@ site_description: >-
   deterministic attribution, git notes, and optional HTTP remotes.
 site_author: agent-trace contributors
 
-# GitHub Pages (project site): https://docs.github.com/pages
-site_url: https://ujjalsharma100.github.io/agent-trace-cli/
+# GitHub Pages custom domain (cli.traceshub.com): https://docs.github.com/pages
+site_url: https://cli.traceshub.com/
 
 repo_url: https://github.com/ujjalsharma100/agent-trace-cli
 repo_name: agent-trace-cli
