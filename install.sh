@@ -8,7 +8,7 @@ set -euo pipefail
 #   curl -fsSL https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/install.sh | bash
 #
 # Pin a specific release (optional):
-#   AGENT_TRACE_INSTALL_VERSION=v0.1.1 curl -fsSL https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/install.sh | bash
+#   AGENT_TRACE_INSTALL_VERSION=v0.1.3 curl -fsSL https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/install.sh | bash
 #
 # Bootstrap from a git branch instead of the latest release (dev/testing only):
 #   AGENT_TRACE_INSTALL_BRANCH=my-branch curl -fsSL https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/install.sh | bash

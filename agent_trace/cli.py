@@ -120,8 +120,7 @@ from .summary_presets import (
     list_summary_presets,
     run_summary_preset,
 )
-
-VERSION = "0.1.0"
+from . import __version__ as VERSION
 
 VIEWER_BIN = os.path.expanduser("~/.agent-trace/bin/agent-trace-viewer")
 

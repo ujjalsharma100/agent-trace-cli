@@ -6,7 +6,7 @@ These apply to the **top-level** `agent-trace` program **before** the subcommand
 
 ## `--version`
 
-Prints the embedded version string (for example `agent-trace 0.1.0`) and **exits without** running a subcommand.
+Prints the embedded version string (for example `agent-trace 0.1.3`) and **exits without** running a subcommand.
 
 ```bash
 agent-trace --version

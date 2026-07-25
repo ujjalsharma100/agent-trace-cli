@@ -84,7 +84,7 @@ These are read by `install.sh` (not necessarily by every `agent-trace` subcomman
 
 | Variable | Purpose |
 |----------|---------|
-| `AGENT_TRACE_INSTALL_VERSION` | Pin a GitHub Release tag when bootstrapping (example: `v0.1.1`). Default: latest release. |
+| `AGENT_TRACE_INSTALL_VERSION` | Pin a GitHub Release tag when bootstrapping (example: `v0.1.3`). Default: latest release. |
 | `AGENT_TRACE_INSTALL_BRANCH` | Dev/testing only — bootstrap from a git branch archive instead of a release. |
 | `AGENT_TRACE_INSTALL_FROM_GITHUB` | Internal flag set when the installer re-execs after download. |
 | `AGENT_TRACE_INSTALL_TMPDIR` | Temporary directory removed after a curl-based install. |
