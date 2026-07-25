@@ -4,17 +4,21 @@ set -euo pipefail
 # =========================================================================
 # agent-trace installer
 #
-# Usage (curl from GitHub):
+# Usage (curl — bootstrap script from this repo or traceshub.com):
 #   curl -fsSL https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/install.sh | bash
 #
-# Install tree from another branch (default is main):
+# Pin a specific release (optional):
+#   AGENT_TRACE_INSTALL_VERSION=v0.1.1 curl -fsSL https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/install.sh | bash
+#
+# Bootstrap from a git branch instead of the latest release (dev/testing only):
 #   AGENT_TRACE_INSTALL_BRANCH=my-branch curl -fsSL https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/install.sh | bash
 #
 # Usage (local — from repo checkout):
 #   ./install.sh
 #
 # What it does:
-#   1. If run via curl (no source on disk), downloads repo from GitHub and re-runs
+#   1. If run via curl (no source on disk), downloads the latest GitHub Release
+#      tarball (or a pinned version / branch when env vars are set) and re-runs
 #   2. Checks for Python 3.9+
 #   3. Copies the Python source to ~/.agent-trace/lib/
 #   4. Creates an executable at ~/.agent-trace/bin/agent-trace
@@ -24,7 +28,7 @@ set -euo pipefail
 
 INSTALL_DIR="${HOME}/.agent-trace"
 GITHUB_REPO="https://github.com/ujjalsharma100/agent-trace-cli"
-GITHUB_BRANCH="${AGENT_TRACE_INSTALL_BRANCH:-main}"
+RELEASE_ASSET="agent-trace-cli.tar.gz"
 BIN_DIR="${INSTALL_DIR}/bin"
 LIB_DIR="${INSTALL_DIR}/lib"
 
@@ -44,6 +48,16 @@ error() { echo -e "${RED}Error:${NC} $1" >&2; exit 1; }
 # -------------------------------------------------------------------
 # 0.  Bootstrap: if run via curl (no source on disk), download from GitHub
 # -------------------------------------------------------------------
+bootstrap_download_url() {
+    if [ -n "${AGENT_TRACE_INSTALL_BRANCH:-}" ]; then
+        printf '%s/archive/refs/heads/%s.tar.gz' "$GITHUB_REPO" "$AGENT_TRACE_INSTALL_BRANCH"
+    elif [ -n "${AGENT_TRACE_INSTALL_VERSION:-}" ]; then
+        printf '%s/releases/download/%s/%s' "$GITHUB_REPO" "$AGENT_TRACE_INSTALL_VERSION" "$RELEASE_ASSET"
+    else
+        printf '%s/releases/latest/download/%s' "$GITHUB_REPO" "$RELEASE_ASSET"
+    fi
+}
+
 bootstrap_if_remote() {
     if [ -n "${AGENT_TRACE_INSTALL_FROM_GITHUB:-}" ]; then
         return
@@ -60,20 +74,21 @@ bootstrap_if_remote() {
         error "curl is required to install from GitHub.  Install curl or clone the repo and run ./install.sh"
     fi
 
-    local tmpdir tarball
+    local tmpdir tarball download_url extract_dir
     tmpdir="$(mktemp -d)"
-    tarball="${tmpdir}/agent-trace-cli.tar.gz"
+    tarball="${tmpdir}/${RELEASE_ASSET}"
+    download_url="$(bootstrap_download_url)"
 
-    if ! curl -fsSL "${GITHUB_REPO}/archive/refs/heads/${GITHUB_BRANCH}.tar.gz" -o "$tarball"; then
-        error "Failed to download from GitHub.  Check your network or try again later."
+    if ! curl -fsSL "$download_url" -o "$tarball"; then
+        error "Failed to download from GitHub (${download_url}).  Check your network, try pip install agent-trace-cli, or clone the repo and run ./install.sh"
     fi
 
     if ! tar xzf "$tarball" -C "$tmpdir"; then
         error "Failed to extract archive."
     fi
 
-    local extract_dir="${tmpdir}/agent-trace-cli-${GITHUB_BRANCH}"
-    if [ ! -f "${extract_dir}/install.sh" ]; then
+    extract_dir="$(find "$tmpdir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
+    if [ -z "$extract_dir" ] || [ ! -f "${extract_dir}/install.sh" ]; then
         error "Unexpected archive layout.  Please clone the repo and run ./install.sh"
     fi
 

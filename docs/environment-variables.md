@@ -66,4 +66,4 @@ Summary **preset** execution augments `PATH` with common install locations (for 
 
 ## Install-only variables
 
-See [Installation — Installer environment variables](installation.md#installer-environment-variables): `AGENT_TRACE_INSTALL_BRANCH`, `AGENT_TRACE_INSTALL_FROM_GITHUB`, `AGENT_TRACE_INSTALL_TMPDIR`.
+See [Installation — Installer environment variables](installation.md#installer-environment-variables): `AGENT_TRACE_INSTALL_VERSION`, `AGENT_TRACE_INSTALL_BRANCH`, `AGENT_TRACE_INSTALL_FROM_GITHUB`, `AGENT_TRACE_INSTALL_TMPDIR`.

@@ -51,7 +51,7 @@ curl -fsSL https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main
 
 What this does at a high level:
 
-1. If no source tree is present, **downloads** the repository archive from GitHub and re-runs the installer from the extracted tree.
+1. If no source tree is present, **downloads** the **latest GitHub Release** install tarball (`agent-trace-cli.tar.gz`, uploaded on each version tag) and re-runs the installer from the extracted tree.
 2. Verifies **Python 3.9+**.
 3. Copies Python sources to **`~/.agent-trace/lib/`** (or `$AGENT_TRACE_HOME/lib/` if overridden).
 4. Creates executables under **`~/.agent-trace/bin/`**:
@@ -84,7 +84,8 @@ These are read by `install.sh` (not necessarily by every `agent-trace` subcomman
 
 | Variable | Purpose |
 |----------|---------|
-| `AGENT_TRACE_INSTALL_BRANCH` | Git branch to download when using the curl bootstrap (default: `main`). |
+| `AGENT_TRACE_INSTALL_VERSION` | Pin a GitHub Release tag when bootstrapping (example: `v0.1.1`). Default: latest release. |
+| `AGENT_TRACE_INSTALL_BRANCH` | Dev/testing only — bootstrap from a git branch archive instead of a release. |
 | `AGENT_TRACE_INSTALL_FROM_GITHUB` | Internal flag set when the installer re-execs after download. |
 | `AGENT_TRACE_INSTALL_TMPDIR` | Temporary directory removed after a curl-based install. |
 
@@ -117,7 +118,7 @@ Removing **`~/.agent-trace/`** entirely deletes **all** projects’ traces, ledg
 ## Upgrading
 
 - **PyPI install:** `pip install -U agent-trace-cli`
-- **Bash installer:** re-run **`install.sh`** from the latest `main` (curl or clone). The installer overwrites library and viewer files under the install prefix. Your **`project-config.json`** and JSONL data under `projects/<id>/` are not removed by the installer itself.
+- **Bash installer:** re-run **`install.sh`** from the latest GitHub Release (curl or clone). The installer overwrites library and viewer files under the install prefix. Your **`project-config.json`** and JSONL data under `projects/<id>/` are not removed by the installer itself.
 
 ---
 

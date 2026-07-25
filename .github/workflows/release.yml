@@ -43,11 +43,21 @@ jobs:
       - name: Check distributions
         run: python -m twine check dist/*
 
+      - name: Build install tarball
+        run: git archive --format=tar.gz --prefix=agent-trace-cli/ HEAD -o agent-trace-cli.tar.gz
+
       - name: Save distributions
         uses: actions/upload-artifact@v4
         with:
           name: python-package-distributions
           path: dist/
+          if-no-files-found: error
+
+      - name: Save install tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-tarball
+          path: agent-trace-cli.tar.gz
           if-no-files-found: error
 
   publish:
@@ -68,3 +78,22 @@ jobs:
 
       - name: Publish distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    name: Upload install tarball to GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download install tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: install-tarball
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: agent-trace-cli.tar.gz
+          generate_release_notes: false

@@ -7,6 +7,7 @@
 <p align="center">
   <a href="https://pypi.org/project/agent-trace-cli/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/agent-trace-cli"></a>
   <a href="https://pypi.org/project/agent-trace-cli/"><img alt="PyPI downloads" src="https://pepy.tech/badge/agent-trace-cli"></a>
+  <a href="https://github.com/ujjalsharma100/agent-trace-cli/releases"><img alt="GitHub downloads" src="https://img.shields.io/github/downloads/ujjalsharma100/agent-trace-cli/total"></a>
   <a href="https://github.com/ujjalsharma100/agent-trace-cli/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/ujjalsharma100/agent-trace-cli"></a>
   <a href="https://github.com/ujjalsharma100/agent-trace-cli/actions/workflows/docs.yml"><img alt="Documentation status" src="https://github.com/ujjalsharma100/agent-trace-cli/actions/workflows/docs.yml/badge.svg"></a>
 </p>
@@ -52,11 +53,13 @@ The **deterministic attribution ledger** is built at **commit time** by the post
 
 ## Installation
 
-### One-liner (install from GitHub)
+### One-liner (curl install)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ujjalsharma100/agent-trace-cli/main/install.sh | bash
 ```
+
+Downloads the **latest GitHub Release** install tarball (see `agent-trace-cli.tar.gz` on each release). Requires at least one published release with that asset.
 
 ### From the repo (local install)
 
@@ -86,7 +89,7 @@ Build release wheels with `python -m build` after `pip install -e ".[dev]"` (or 
 
 ### What the installer does
 
-1. If run via curl, downloads the repo from GitHub and runs the installer
+1. If run via curl, downloads the **latest GitHub Release** install tarball and runs the installer
 2. Checks for Python 3.9+
 3. Copies Python source to `~/.agent-trace/lib/`
 4. Creates executables at `~/.agent-trace/bin/agent-trace` and a short alias `~/.agent-trace/bin/at`
